@@ -6,6 +6,7 @@
     lms-worker resume           clear a polling pause after the LMS layout changed
     lms-worker db-upgrade       create or migrate the database tables
     lms-worker notify-test      send a test message to each configured channel
+    lms-worker whatsapp         link the bot's WhatsApp (QR or phone number), show or remove the link
 
     lms-worker probe            read the CMS login form; submits nothing
     lms-worker login            log in through CMS and save the LMS session
@@ -26,6 +27,7 @@ import logging
 import signal
 import sys
 import threading
+import time
 from datetime import datetime
 
 import httpx
@@ -39,6 +41,7 @@ from .lms.session import USER_AGENT, session_is_valid
 from .config import ConfigError
 from .runtime import Runtime
 from .schedule import run_forever
+from .whatsapp import EvolutionAdmin, WhatsAppError
 from .watcher import HEARTBEAT_KEY, POLL_PAUSE_KEY, PollResult
 
 
@@ -156,6 +159,69 @@ def cmd_notify_test(rt: Runtime, args) -> int:
     return 0 if all(e is None for e in results.values()) else 1
 
 
+LINK_WAIT_SECONDS = 180
+
+
+def cmd_whatsapp(rt: Runtime, args) -> int:
+    evo = rt.settings.evolution
+    if evo is None:
+        raise ConfigError("Set EVOLUTION_API_URL and EVOLUTION_API_KEY first")
+    admin = EvolutionAdmin(evo)
+
+    if args.action == "status":
+        st = admin.state()
+        if st.linked:
+            print(f"Linked: {st.name or 'WhatsApp'} (+{st.number})")
+        else:
+            print(f"Not linked (instance {evo.instance}: {st.state}). Run: lms-worker whatsapp link")
+        print(f"Messages go to: +{evo.number}" if evo.number else "WHATSAPP_NUMBER is not set: nothing will be sent")
+        return 0 if st.linked else 1
+
+    if args.action == "unlink":
+        admin.unlink()
+        print("WhatsApp unlinked")
+        return 0
+
+    challenge = admin.start_link(args.number)
+    if challenge.already_linked:
+        print("Already linked. To link another account, run: lms-worker whatsapp unlink")
+        return 0
+    if args.number:
+        print(f"Pairing code: {challenge.pairing_code_display}\n")
+        print("On the bot phone: WhatsApp > Settings > Linked devices > Link a device >")
+        print("Link with phone number instead, then type the code above.")
+    else:
+        _print_qr(challenge.qr_text)
+        print("On the bot phone: WhatsApp > Settings > Linked devices > Link a device, and scan this.")
+
+    shown = challenge.qr_text
+    deadline = time.monotonic() + LINK_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(3)
+        st = admin.state()
+        if st.linked:
+            print(f"\nLinked: {st.name or 'WhatsApp'} (+{st.number})")
+            if not evo.number:
+                print("Now set WHATSAPP_NUMBER to the number that should receive messages.")
+            return 0
+        if not args.number:
+            latest = admin.current_challenge()
+            if latest and latest.qr_text and latest.qr_text != shown:
+                shown = latest.qr_text
+                print("\nThe QR code changed; scan this one:")
+                _print_qr(shown)
+    print("Not linked yet. Run the command again to get a fresh code.")
+    return 1
+
+
+def _print_qr(text: str | None) -> None:
+    import segno
+
+    if not text:
+        raise WhatsAppError("Evolution API returned no QR code")
+    segno.make(text, error="L").terminal(compact=True)
+
+
 def cmd_db_upgrade(rt: Runtime, args) -> int:
     db.upgrade(rt.engine)
     print("Database is up to date")
@@ -230,6 +296,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("resume", help="clear a polling pause after the LMS layout changed")
     sub.add_parser("db-upgrade", help="create or migrate the database tables")
     sub.add_parser("notify-test", help="send a test message to each configured channel")
+    p_wa = sub.add_parser("whatsapp", help="link the bot's WhatsApp, show or remove the link")
+    p_wa.add_argument("action", choices=["status", "link", "unlink"])
+    p_wa.add_argument("--number", help="link by pairing code: the BOT phone's number, country code first")
     sub.add_parser("probe", help="read the CMS login form; submits nothing")
     p_login = sub.add_parser("login", help="log in through CMS and save the LMS session")
     p_login.add_argument("--headed", action="store_true", help="show the browser")
@@ -252,6 +321,7 @@ def main(argv: list[str] | None = None) -> int:
         "resume": cmd_resume,
         "db-upgrade": cmd_db_upgrade,
         "notify-test": cmd_notify_test,
+        "whatsapp": cmd_whatsapp,
         "probe": cmd_probe,
         "login": cmd_login,
         "check": cmd_check,
@@ -268,6 +338,6 @@ def main(argv: list[str] | None = None) -> int:
             require_db=args.command in NEEDS_DB,
         )
         return handler(rt, args)
-    except (LMSError, ConfigError) as e:
+    except (LMSError, ConfigError, WhatsAppError) as e:
         print(f"{type(e).__name__}: {e}", file=sys.stderr)
         return 2

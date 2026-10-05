@@ -28,8 +28,9 @@ class Runtime:
     def outbox(self) -> Outbox:
         """Every configured channel gets every message; with none, they go to the log."""
         channels: dict[str, Notifier] = {}
-        if self.settings.evolution:
-            channels["whatsapp"] = EvolutionNotifier(self.settings.evolution)
+        evo = self.settings.evolution
+        if evo and evo.number:
+            channels["whatsapp"] = EvolutionNotifier(evo)
         if self.settings.discord_webhook_url:
             channels["discord"] = DiscordNotifier(self.settings.discord_webhook_url)
         return Outbox(channels or {"console": ConsoleNotifier()})

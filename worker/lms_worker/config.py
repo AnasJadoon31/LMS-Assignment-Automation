@@ -51,12 +51,13 @@ class PortalUrls:
 
 @dataclass(frozen=True)
 class EvolutionConfig:
-    """WhatsApp through Evolution API."""
+    """WhatsApp through Evolution API. URL and key come from the environment; the app
+    creates and links the instance itself."""
 
     base_url: str
     api_key: str = field(repr=False)
-    instance: str
-    number: str  # your WhatsApp number, digits with country code
+    instance: str = "lms"
+    number: str | None = None  # where messages go: your own number, digits with country code
 
 
 @dataclass(frozen=True)
@@ -85,12 +86,12 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         )
     evolution = None
     evo = {k: os.environ.get(k, "").strip() for k in EVOLUTION_VARS}
-    if all(evo.values()):
+    if evo["EVOLUTION_API_URL"] and evo["EVOLUTION_API_KEY"]:
         evolution = EvolutionConfig(
             base_url=evo["EVOLUTION_API_URL"].rstrip("/"),
             api_key=evo["EVOLUTION_API_KEY"],
-            instance=evo["EVOLUTION_INSTANCE"],
-            number="".join(ch for ch in evo["WHATSAPP_NUMBER"] if ch.isdigit()),
+            instance=evo["EVOLUTION_INSTANCE"] or "lms",
+            number="".join(ch for ch in evo["WHATSAPP_NUMBER"] if ch.isdigit()) or None,
         )
     discord = os.environ.get("DISCORD_WEBHOOK_URL", "").strip() or None
     if discord and not re.match(r"https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/(?:v\d+/)?webhooks/\d+/[\w-]+$", discord):

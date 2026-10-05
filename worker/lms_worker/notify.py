@@ -44,6 +44,8 @@ class EvolutionNotifier:
     """POST /message/sendText/{instance} and /message/sendMedia/{instance}, authenticated by the apikey header."""
 
     def __init__(self, cfg: EvolutionConfig, *, transport: httpx.BaseTransport | None = None) -> None:
+        if not cfg.number:
+            raise ValueError("WhatsApp messages need WHATSAPP_NUMBER")
         self.cfg = cfg
         self.client = httpx.Client(
             base_url=cfg.base_url,

@@ -15,6 +15,7 @@ dependencies = [
     "playwright==1.56.0",
     "psycopg[binary]>=3.1",
     "python-dotenv>=1.0",
+    "segno>=1.6",
     "sqlalchemy>=2.0",
     "tzdata",
 ]

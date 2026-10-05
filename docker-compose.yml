@@ -1,21 +1,29 @@
-# Step 2: the worker and PostgreSQL. The api, dockerproxy and sandbox services
-# from the spec join in later steps. Deploy on Coolify as a Docker Compose resource.
+# Self-hosted LMS Assignment Automation: one stack per student.
+# Works with `docker compose up -d` on any machine, or as a Docker Compose resource on Coolify.
+# Values come from .env (plain Docker) or the resource's environment variables (Coolify).
+#
+# Only the worker talks to the LMS and to Evolution API. Nothing here publishes a port:
+# Evolution API, PostgreSQL and Redis are reachable only inside this stack.
+# The api service (web UI) and the solver sandbox join in later build steps.
+
 services:
   worker:
     build: ./worker
     restart: unless-stopped
     environment:
-      - DATABASE_URL=postgresql://lms:${POSTGRES_PASSWORD}@postgres:5432/lms
-      - APP_SECRET_KEY
-      - CMS_ENROLLMENT
-      - CMS_PASSWORD
+      - DATABASE_URL=postgresql://lms:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/lms
+      - APP_SECRET_KEY=${APP_SECRET_KEY:?set APP_SECRET_KEY}
+      - CMS_ENROLLMENT=${CMS_ENROLLMENT:?set CMS_ENROLLMENT}
+      - CMS_PASSWORD=${CMS_PASSWORD:?set CMS_PASSWORD}
       - CMS_INSTITUTE=${CMS_INSTITUTE:-Karachi Campus}
       - CMS_ROLE=${CMS_ROLE:-Student}
-      - EVOLUTION_API_URL
-      - EVOLUTION_API_KEY
-      - EVOLUTION_INSTANCE
-      - WHATSAPP_NUMBER
-      - DISCORD_WEBHOOK_URL
+      # WhatsApp: the bundled Evolution API below, unless you point this at your own
+      - EVOLUTION_API_URL=${EVOLUTION_API_URL:-http://evolution-api:8080}
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-}
+      - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-lms}
+      - WHATSAPP_NUMBER=${WHATSAPP_NUMBER:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - TZ=Asia/Karachi
     volumes:
       - artifacts:/data
     depends_on:
@@ -23,20 +31,79 @@ services:
         condition: service_healthy
 
   postgres:
-    image: postgres:16
+    image: postgres:16-alpine
     restart: unless-stopped
     environment:
       - POSTGRES_USER=lms
       - POSTGRES_DB=lms
-      - POSTGRES_PASSWORD
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lms -d lms"]
+      test: ["CMD-SHELL", "pg_isready -U lms -d lms -h 127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # WhatsApp gateway. The worker creates and links its instance; you never open its pages.
+  # It keeps its tables in their own schema (evolution_api) of the same database, and
+  # stores no chat history: the bot only needs to send, and later to read your replies.
+  evolution-api:
+    image: evoapicloud/evolution-api:v2.3.7
+    restart: unless-stopped
+    environment:
+      - SERVER_URL=http://evolution-api:8080
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:-}
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://lms:${POSTGRES_PASSWORD}@postgres:5432/lms?schema=evolution_api
+      - DATABASE_CONNECTION_CLIENT_NAME=lms_bot
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=false
+      - DATABASE_SAVE_MESSAGE_UPDATE=false
+      - DATABASE_SAVE_DATA_CONTACTS=false
+      - DATABASE_SAVE_DATA_CHATS=false
+      - DATABASE_SAVE_DATA_LABELS=false
+      - DATABASE_SAVE_DATA_HISTORIC=false
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379/6
+      - CACHE_REDIS_PREFIX_KEY=evolution
+      - CACHE_LOCAL_ENABLED=false
+      - DEL_INSTANCE=false
+      - CONFIG_SESSION_PHONE_CLIENT=LMS Bot
+      - TELEMETRY_ENABLED=false
+      - LOG_LEVEL=ERROR,WARN,INFO
+      - LOG_BAILEYS=error
+      - LANGUAGE=en
+    volumes:
+      - evolution_instances:/evolution/instances
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e "require('http').get('http://127.0.0.1:8080/',r=>process.exit(r.statusCode<300?0:1)).on('error',()=>process.exit(1))"
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 30
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - evolution_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
 volumes:
   pgdata:
   artifacts:
+  evolution_instances:
+  evolution_redis:

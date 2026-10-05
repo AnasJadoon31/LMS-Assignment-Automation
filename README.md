@@ -12,48 +12,28 @@ approval. The design is in the tech spec; this repo is being built in the spec's
 | 4. Submitter | Not started; upload form mapped |
 | 5. Web UI and auto mode | Not started |
 
-## Deploy the watcher on Coolify
+## Run it
 
-1. Add this repo in Coolify as a **Docker Compose** resource (`docker-compose.yml` at the root).
-2. Set the environment variables, as secrets where marked:
-   - `POSTGRES_PASSWORD` (secret)
-   - `APP_SECRET_KEY` (secret): any random string of 32 or more characters. It encrypts the stored LMS session.
-   - `CMS_ENROLLMENT` and `CMS_PASSWORD` (secret). Institute and role default to Karachi Campus and Student.
-   - WhatsApp: `EVOLUTION_API_URL`, `EVOLUTION_API_KEY` (secret), `EVOLUTION_INSTANCE`, `WHATSAPP_NUMBER`
-   - Discord, optional: `DISCORD_WEBHOOK_URL` (secret). In Discord: channel settings, Integrations, Webhooks, New Webhook, Copy Webhook URL.
-3. Deploy. The worker runs its migrations, then polls every 10 minutes from 08:00 to 23:00 PKT and every 30 minutes overnight.
-   Nothing in this step needs a public domain.
-
-With no notification channel set, messages go to the worker's log.
-
-## Set up WhatsApp (Evolution API)
-
-Evolution API links a WhatsApp account the way WhatsApp Web does. That is not an official
-WhatsApp API, so use a second number for the bot: if WhatsApp ever restricts it, your own
-account is untouched.
-
-1. In Coolify: **New Resource**, **Service**, search **Evolution API**, deploy. The template brings its
-   own PostgreSQL and Redis and generates a domain and an API key
-   (`SERVICE_PASSWORD_AUTHENTICATIONAPIKEY` in the service's environment variables).
-2. Open `https://<evolution domain>/manager`, sign in with that domain and API key, and create an
-   instance named `lms` with the **Baileys** integration.
-3. Connect it: open the instance's QR code, then on the bot phone go to WhatsApp, **Settings**,
-   **Linked devices**, **Link a device**, and scan it.
-4. On the worker, set `EVOLUTION_API_URL=https://<evolution domain>`, `EVOLUTION_API_KEY=<the API key>`,
-   `EVOLUTION_INSTANCE=lms` and `WHATSAPP_NUMBER=<your own number, country code first, e.g. 923001234567>`.
-5. Redeploy the worker and run `lms-worker notify-test` from its terminal in Coolify.
-
-Without the manager UI, the same steps work over HTTP:
+Each student runs their own copy: see **[SELF_HOSTING.md](SELF_HOSTING.md)**. In short:
 
 ```sh
-curl -X POST https://<evolution domain>/instance/create -H "apikey: <key>" -H "Content-Type: application/json" \
-  -d '{"instanceName": "lms", "integration": "WHATSAPP-BAILEYS", "qrcode": true}'
-curl https://<evolution domain>/instance/connect/lms -H "apikey: <key>"          # QR code to scan
-curl https://<evolution domain>/instance/connectionState/lms -H "apikey: <key>"  # "open" once linked
+scripts/init-env.sh                 # .env with random secrets; then fill in your CMS login and WhatsApp number
+docker compose up -d --build        # worker, PostgreSQL, Evolution API (WhatsApp), Redis; no public ports
+docker compose exec worker lms-worker whatsapp link --number <bot number>   # or without --number for a QR code
+docker compose exec worker lms-worker notify-test
 ```
 
-Open WhatsApp on the bot phone at least every two weeks; WhatsApp logs out linked devices when the phone
-has been away longer than that.
+The same `docker-compose.yml` deploys on Coolify as a Docker Compose resource.
+
+## How WhatsApp is wired
+
+Evolution API runs inside the stack and is reachable only by the worker, at
+`EVOLUTION_API_URL` (default `http://evolution-api:8080`) with `EVOLUTION_API_KEY`, both from the
+environment. The worker owns the WhatsApp instance: it creates it on first use, links it by QR code
+or by phone-number pairing code, and sends through it to `WHATSAPP_NUMBER`. The web UI will offer
+the same QR and phone-number linking on its WhatsApp page, through the same code
+(`lms_worker/whatsapp.py`). Replies to the bot (the numbered menu and approvals) will reach the app
+through an Evolution webhook to the api service, also inside the stack.
 
 ## What the watcher does
 
@@ -94,6 +74,8 @@ the failed-login counter and any spike recordings. With it, they live in Postgre
 | `lms-worker resume` | Clears the polling pause after a changed LMS page |
 | `lms-worker db-upgrade` | Creates or migrates the tables |
 | `lms-worker notify-test` | Sends a test message to each configured channel (WhatsApp, Discord) and says which worked |
+| `lms-worker whatsapp link [--number N]` | Links the bot's WhatsApp: a QR code in the terminal, or with `--number` an 8-character pairing code |
+| `lms-worker whatsapp status` / `unlink` | Shows which number is linked and where messages go / removes the link |
 | `lms-worker probe` | Reads the CMS login form and reports its fields and any CAPTCHA. Submits nothing |
 | `lms-worker login` | Logs in through CMS (enrollment, password, institute, role), follows the LMS link, saves the session |
 | `lms-worker check` | Says whether the saved LMS session still works and shows the failed-login count |
