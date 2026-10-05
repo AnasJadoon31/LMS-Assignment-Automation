@@ -1,0 +1,42 @@
+# Step 2: the worker and PostgreSQL. The api, dockerproxy and sandbox services
+# from the spec join in later steps. Deploy on Coolify as a Docker Compose resource.
+services:
+  worker:
+    build: ./worker
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://lms:${POSTGRES_PASSWORD}@postgres:5432/lms
+      - APP_SECRET_KEY
+      - CMS_ENROLLMENT
+      - CMS_PASSWORD
+      - CMS_INSTITUTE=${CMS_INSTITUTE:-Karachi Campus}
+      - CMS_ROLE=${CMS_ROLE:-Student}
+      - EVOLUTION_API_URL
+      - EVOLUTION_API_KEY
+      - EVOLUTION_INSTANCE
+      - WHATSAPP_NUMBER
+      - DISCORD_WEBHOOK_URL
+    volumes:
+      - artifacts:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=lms
+      - POSTGRES_DB=lms
+      - POSTGRES_PASSWORD
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lms -d lms"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+  artifacts:

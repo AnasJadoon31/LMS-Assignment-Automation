@@ -1,13 +1,13 @@
-"""Worker configuration.
+"""Worker configuration, from environment variables (Coolify secrets) or worker/.env.
 
-For the spike everything comes from environment variables (or worker/.env).
-Once the web UI exists, credentials move to the encrypted settings table and
-only the worker decrypts them.
+CMS credentials come from the environment until the web UI exists; then they move
+to the encrypted settings table and only the worker decrypts them.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -16,6 +16,13 @@ from dotenv import load_dotenv
 
 CMS_LOGIN_URL = "https://cms.bahria.edu.pk/Logins/Student/Login.aspx"
 LMS_DASHBOARD_URL = "https://lms.bahria.edu.pk/Student/Dashboard.php"
+
+
+class ConfigError(Exception):
+    pass
+
+
+EVOLUTION_VARS = ("EVOLUTION_API_URL", "EVOLUTION_API_KEY", "EVOLUTION_INSTANCE", "WHATSAPP_NUMBER")
 
 
 @dataclass(frozen=True)
@@ -43,10 +50,25 @@ class PortalUrls:
 
 
 @dataclass(frozen=True)
+class EvolutionConfig:
+    """WhatsApp through Evolution API."""
+
+    base_url: str
+    api_key: str = field(repr=False)
+    instance: str
+    number: str  # your WhatsApp number, digits with country code
+
+
+@dataclass(frozen=True)
 class Settings:
     urls: PortalUrls
     state_dir: Path
     credentials: CMSCredentials | None
+    database_url: str | None = None
+    app_secret_key: str | None = field(default=None, repr=False)
+    data_dir: Path = Path("./data")
+    evolution: EvolutionConfig | None = None
+    discord_webhook_url: str | None = field(default=None, repr=False)
 
 
 def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
@@ -61,6 +83,18 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
             institute=os.environ.get("CMS_INSTITUTE", "Karachi Campus").strip(),
             role=os.environ.get("CMS_ROLE", "Student").strip(),
         )
+    evolution = None
+    evo = {k: os.environ.get(k, "").strip() for k in EVOLUTION_VARS}
+    if all(evo.values()):
+        evolution = EvolutionConfig(
+            base_url=evo["EVOLUTION_API_URL"].rstrip("/"),
+            api_key=evo["EVOLUTION_API_KEY"],
+            instance=evo["EVOLUTION_INSTANCE"],
+            number="".join(ch for ch in evo["WHATSAPP_NUMBER"] if ch.isdigit()),
+        )
+    discord = os.environ.get("DISCORD_WEBHOOK_URL", "").strip() or None
+    if discord and not re.match(r"https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/(?:v\d+/)?webhooks/\d+/[\w-]+$", discord):
+        raise ConfigError("DISCORD_WEBHOOK_URL must be a Discord webhook URL (https://discord.com/api/webhooks/<id>/<token>)")
     return Settings(
         urls=PortalUrls(
             cms_login=os.environ.get("CMS_LOGIN_URL", CMS_LOGIN_URL),
@@ -68,4 +102,9 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         ),
         state_dir=Path(os.environ.get("STATE_DIR", "./state")),
         credentials=credentials,
+        database_url=os.environ.get("DATABASE_URL") or None,
+        app_secret_key=os.environ.get("APP_SECRET_KEY") or None,
+        data_dir=Path(os.environ.get("DATA_DIR", "./data")),
+        evolution=evolution,
+        discord_webhook_url=discord,
     )

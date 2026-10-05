@@ -12,3 +12,7 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+
+# Downloaded assignment files
+data/
+worker/data/

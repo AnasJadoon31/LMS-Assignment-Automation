@@ -1,0 +1,6 @@
+.env
+state/
+data/
+tests/
+**/__pycache__
+*.egg-info

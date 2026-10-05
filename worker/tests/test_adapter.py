@@ -21,8 +21,9 @@ def adapter_for(urls, tmp_path: Path, **kw) -> BahriaAdapter:
 def test_relogin_saves_a_session_that_passes_the_check(portal, urls, tmp_path):
     adapter = adapter_for(urls, tmp_path)
     adapter.ensure_session()
-    assert adapter.store.path.exists()
-    assert oct(adapter.store.path.stat().st_mode & 0o777) == "0o600"
+    path = adapter.store.kv.path("lms_session")
+    assert path.exists()
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
     assert session_is_valid(adapter.store.load(), urls)
 
     # A second poll reuses the stored session: no new CMS login

@@ -11,6 +11,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 from ..config import Settings
+from ..kv import FileKV
 from .bahria_pages import AssignmentRow, b64_id, parse_assignments_page
 from .cms_login import login
 from .errors import (
@@ -40,8 +41,8 @@ class BahriaAdapter:
         headless: bool = True,
     ) -> None:
         self.settings = settings
-        self.store = store or SessionStore(settings.state_dir / "session.json")
-        self.guard = guard or LoginGuard(settings.state_dir / "login_guard.json")
+        self.store = store or SessionStore(FileKV(settings.state_dir))
+        self.guard = guard or LoginGuard(self.store.kv)
         self.throttle = throttle or Throttle()
         self.headless = headless
         self._http: httpx.Client | None = None
@@ -183,6 +184,8 @@ class BahriaAdapter:
             attachment_name=row.question_file,
             remarks=row.remarks,
             assignment_id=row.assignment_id,
+            submitted_file=row.submission_file,
+            deadline_passed=row.deadline_passed,
         )
 
 

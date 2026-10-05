@@ -5,17 +5,16 @@ and waits for a pasted session or a manual Retry. The count survives restarts
 and resets only on a successful login or a Retry. A CAPTCHA on the form
 pauses re-login at once.
 
-Kept in a JSON file for the spike; moves to the settings table with the database.
+Kept in the key-value store: the settings table in production, a file locally.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 
+from ..kv import KeyValue
 from .errors import ReloginPaused
 
 MAX_FAILURES = 2
@@ -30,15 +29,16 @@ class GuardState:
 
 
 class LoginGuard:
-    def __init__(self, path: Path, max_failures: int = MAX_FAILURES) -> None:
-        self.path = path
+    KEY = "login_guard"
+
+    def __init__(self, kv: KeyValue, max_failures: int = MAX_FAILURES) -> None:
+        self.kv = kv
         self.max_failures = max_failures
 
     @property
     def state(self) -> GuardState:
-        if not self.path.exists():
-            return GuardState()
-        return GuardState(**json.loads(self.path.read_text()))
+        raw = self.kv.get(self.KEY)
+        return GuardState(**json.loads(raw)) if raw else GuardState()
 
     def check(self) -> None:
         """Raise ReloginPaused when another automatic attempt is not allowed."""
@@ -72,7 +72,4 @@ class LoginGuard:
 
     def _write(self, s: GuardState) -> None:
         s.updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(s), indent=2))
-        os.replace(tmp, self.path)
+        self.kv.set(self.KEY, json.dumps(asdict(s)))

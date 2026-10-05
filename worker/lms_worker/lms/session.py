@@ -7,15 +7,17 @@ Without a valid one, the dashboard redirects to cms.bahria.edu.pk.
 from __future__ import annotations
 
 import json
-import os
+import logging
 import time
-from pathlib import Path
 from typing import Callable
 from urllib.parse import urljoin, urlsplit
 
 import httpx
 
 from ..config import PortalUrls
+from ..kv import KeyValue, SecretBox
+
+log = logging.getLogger(__name__)
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -48,26 +50,31 @@ class Throttle:
 
 
 class SessionStore:
-    """Playwright storage_state saved to disk with owner-only permissions.
+    """The LMS session (a Playwright storage_state) in a key-value store, encrypted when a box is given."""
 
-    Moves to the encrypted settings table once the database exists.
-    """
+    KEY = "lms_session"
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
+    def __init__(self, kv: KeyValue, box: SecretBox | None = None) -> None:
+        self.kv = kv
+        self.box = box
 
     def load(self) -> dict | None:
-        if not self.path.exists():
+        """The stored session, or None when there is none or it no longer decrypts
+        (APP_SECRET_KEY changed); either way the next poll logs in again."""
+        raw = self.kv.get(self.KEY)
+        if raw is None:
             return None
-        return json.loads(self.path.read_text())
+        if self.box:
+            try:
+                raw = self.box.decrypt(raw)
+            except ValueError:
+                log.warning("Stored LMS session cannot be decrypted; it will be replaced by a fresh login")
+                return None
+        return json.loads(raw)
 
     def save(self, state: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(state, f)
-        os.replace(tmp, self.path)
+        raw = json.dumps(state)
+        self.kv.set(self.KEY, self.box.encrypt(raw) if self.box else raw)
 
     def save_pasted(self, phpsessid: str, urls: PortalUrls) -> dict:
         """Store a PHPSESSID copied from your own browser's LMS tab."""
@@ -93,7 +100,7 @@ class SessionStore:
         return state
 
     def clear(self) -> None:
-        self.path.unlink(missing_ok=True)
+        self.kv.delete(self.KEY)
 
 
 def lms_cookies(state: dict | None, urls: PortalUrls) -> dict[str, str]:

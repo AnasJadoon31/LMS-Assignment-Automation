@@ -1,22 +1,23 @@
+from lms_worker.kv import FileKV
 from lms_worker.lms.session import SessionStore, Throttle, lms_cookies, session_is_valid
 
 
 def test_pasted_session_is_valid_only_with_the_right_cookie(portal, urls, tmp_path):
-    store = SessionStore(tmp_path / "session.json")
+    store = SessionStore(FileKV(tmp_path))
     assert session_is_valid(store.save_pasted("PHPSESSID=good", urls), urls)
     assert not session_is_valid(store.save_pasted("stale", urls), urls)
     assert lms_cookies(store.load(), urls) == {"PHPSESSID": "stale"}
 
 
 def test_expired_session_costs_one_request_and_never_touches_cms(portal, urls, tmp_path):
-    state = SessionStore(tmp_path / "s.json").save_pasted("stale", urls)
+    state = SessionStore(FileKV(tmp_path)).save_pasted("stale", urls)
     assert not session_is_valid(state, urls)
     assert portal.lms_requests == ["/Student/Dashboard.php"]
 
 
 def test_redirects_inside_the_lms_are_followed(portal, urls, tmp_path):
     hop = urls.__class__(cms_login=urls.cms_login, lms_dashboard=urls.lms_dashboard.replace("Dashboard", "Hop"))
-    state = SessionStore(tmp_path / "s.json").save_pasted("good", hop)
+    state = SessionStore(FileKV(tmp_path)).save_pasted("good", hop)
     assert session_is_valid(state, hop)
 
 

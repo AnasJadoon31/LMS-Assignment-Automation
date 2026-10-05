@@ -172,3 +172,36 @@ def urls(portal) -> PortalUrls:
 def make_settings(urls: PortalUrls, state_dir: Path, password: str = PASSWORD, **cred_overrides) -> Settings:
     creds = CMSCredentials(enrollment=ENROLLMENT, password=password, **cred_overrides)
     return Settings(urls=urls, state_dir=state_dir, credentials=creds)
+
+
+# --- PostgreSQL, for the watcher and outbox tests ---
+# Set TEST_DATABASE_URL to a scratch database; these tests drop and recreate its tables.
+
+import os
+
+from sqlalchemy import text
+
+
+@pytest.fixture(scope="session")
+def engine():
+    url = os.environ.get("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL not set")
+    from lms_worker.db import make_engine, upgrade
+
+    eng = make_engine(url)
+    with eng.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
+    upgrade(eng)  # the migration itself is under test
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture
+def sessions(engine):
+    from lms_worker.db import Base, make_sessionmaker
+
+    with engine.begin() as conn:
+        names = ", ".join(t.name for t in Base.metadata.sorted_tables)
+        conn.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    return make_sessionmaker(engine)

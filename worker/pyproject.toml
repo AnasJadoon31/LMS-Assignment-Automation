@@ -8,10 +8,14 @@ version = "0.1.0"
 description = "LMS adapter, orchestrator and renderer for LMS Assignment Automation"
 requires-python = ">=3.11"
 dependencies = [
+    "alembic>=1.13",
     "beautifulsoup4>=4.12",
+    "cryptography>=42",
     "httpx>=0.27",
     "playwright==1.56.0",
+    "psycopg[binary]>=3.1",
     "python-dotenv>=1.0",
+    "sqlalchemy>=2.0",
     "tzdata",
 ]
 
@@ -23,6 +27,9 @@ lms-worker = "lms_worker.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["lms_worker*"]
+
+[tool.setuptools.package-data]
+"lms_worker.db.migrations" = ["script.py.mako"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

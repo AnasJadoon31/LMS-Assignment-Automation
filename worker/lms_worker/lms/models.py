@@ -28,6 +28,9 @@ class AssignmentMeta:
     attachment_size: int | None = None
     remarks: str | None = None
     assignment_id: str | None = None  # LMS id, shown only while the assignment is open
+    # Snapshot from the listing, not part of the fingerprint
+    submitted_file: str | None = None
+    deadline_passed: bool = False
 
     def fingerprint(self) -> str:
         """Hash of course code, title, deadline and attachment name plus size.
