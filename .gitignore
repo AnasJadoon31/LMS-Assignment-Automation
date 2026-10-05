@@ -1,0 +1,14 @@
+# Secrets and portal state: sessions, HAR recordings and traces hold your cookies
+.env
+state/
+worker/state/
+*.har
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/

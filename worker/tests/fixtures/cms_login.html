@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<!-- Trimmed copy of https://cms.bahria.edu.pk/Logins/Student/Login.aspx (2026-10-05).
+     Field ids, names and dropdown options are the real ones; the ASP.NET postback
+     script is replaced by a plain form submit. -->
+<html lang="en">
+<head><meta charset="utf-8" /><title>CMS - Bahria University</title></head>
+<body>
+<form method="post" action="./Login.aspx" id="form1" autocomplete="off">
+<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="fixture" />
+<input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="fixture" />
+<div id="pageContent">
+	<div id="pageHeading"><h1 id="pageTitle_h1" class="text-center">Student</h1></div>
+	<div class="container-fluid">
+		<div id="pageAlerts_up">{{ALERT}}</div>
+		<div class="row" style="margin-top: 2%">
+		<div class="col-md-4 col-md-offset-4">
+			<div class="form-group">
+				<label for="BodyPH_tbEnrollment" class="control-label">Enrollment:</label>
+				<input name="ctl00$BodyPH$tbEnrollment" type="text" maxlength="100" id="BodyPH_tbEnrollment" class="form-control" placeholder="Enrollment" />
+			</div>
+			<div class="form-group">
+				<label for="BodyPH_tbPassword" class="control-label">Password:</label>
+				<input name="ctl00$BodyPH$tbPassword" type="password" maxlength="100" id="BodyPH_tbPassword" class="form-control" placeholder="Password" />
+			</div>
+			<div class="form-group">
+				<label for="BodyPH_ddlInstituteID" class="control-label">Institute:</label>
+				<select name="ctl00$BodyPH$ddlInstituteID" id="BodyPH_ddlInstituteID" class="form-control AspireDropDownList">
+					<option selected="selected" value="">Select</option>
+					<option value="13">Bahria University College of Nursing</option>
+					<option value="10">Finishing School</option>
+					<option value="12">Health Sciences Campus (Islamabad)</option>
+					<option value="6">Health Sciences Campus (Karachi)</option>
+					<option value="5">IPP (Karachi)</option>
+					<option value="1">Islamabad E-8 Campus</option>
+					<option value="9">Islamabad H-11 Campus</option>
+					<option value="2">Karachi Campus</option>
+					<option value="3">Lahore Campus</option>
+					<option value="11">NATIONAL SCHOOL OF HYDROGRAPHY</option>
+					<option value="4">NCMPR</option>
+					<option value="14">ODL</option>
+					<option value="8">PN Nursing College</option>
+					<option value="7">PN School Of Logistics</option>
+					<option value="15">School for Underwater Medicine</option>
+				</select>
+			</div>
+			<div class="form-group">
+				<label for="BodyPH_ddlSubUserType" class="control-label">Role:</label>
+				<select name="ctl00$BodyPH$ddlSubUserType" id="BodyPH_ddlSubUserType" class="form-control AspireDropDownList">
+					<option selected="selected" value="None">Student</option>
+					<option value="Parents">Parents</option>
+				</select>
+			</div>
+			{{CAPTCHA}}
+			<div class="form-group">
+				<a id="BodyPH_btnLogin" class="btn-block btn btn-primary" href="javascript:document.getElementById('form1').submit()">Sign In</a>
+			</div>
+		</div>
+		</div>
+	</div>
+</div>
+</form>
+</body>
+</html>
