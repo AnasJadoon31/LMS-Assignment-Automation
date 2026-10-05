@@ -5,6 +5,7 @@
     lms-worker status           last poll, pauses, session and recent jobs
     lms-worker resume           clear a polling pause after the LMS layout changed
     lms-worker db-upgrade       create or migrate the database tables
+    lms-worker notify-test      send a test message to each configured channel
 
     lms-worker probe            read the CMS login form; submits nothing
     lms-worker login            log in through CMS and save the LMS session
@@ -30,7 +31,7 @@ from datetime import datetime
 import httpx
 from sqlalchemy import select
 
-from . import db, runtime
+from . import db, notify, runtime
 from .config import load_settings
 from .lms.cms_login import inspect_login_html
 from .lms.errors import LMSError
@@ -147,6 +148,14 @@ def cmd_record(rt: Runtime, args) -> int:
     return 0
 
 
+def cmd_notify_test(rt: Runtime, args) -> int:
+    channels = rt.outbox().channels
+    results = notify.send_test(channels, "Test message from the LMS bot. If you can read this, notifications work.")
+    for name, error in results.items():
+        print(f"{name}: {'sent' if error is None else 'FAILED: ' + error}")
+    return 0 if all(e is None for e in results.values()) else 1
+
+
 def cmd_db_upgrade(rt: Runtime, args) -> int:
     db.upgrade(rt.engine)
     print("Database is up to date")
@@ -220,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="last poll, pauses, session and recent jobs")
     sub.add_parser("resume", help="clear a polling pause after the LMS layout changed")
     sub.add_parser("db-upgrade", help="create or migrate the database tables")
+    sub.add_parser("notify-test", help="send a test message to each configured channel")
     sub.add_parser("probe", help="read the CMS login form; submits nothing")
     p_login = sub.add_parser("login", help="log in through CMS and save the LMS session")
     p_login.add_argument("--headed", action="store_true", help="show the browser")
@@ -241,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "resume": cmd_resume,
         "db-upgrade": cmd_db_upgrade,
+        "notify-test": cmd_notify_test,
         "probe": cmd_probe,
         "login": cmd_login,
         "check": cmd_check,

@@ -26,6 +26,35 @@ approval. The design is in the tech spec; this repo is being built in the spec's
 
 With no notification channel set, messages go to the worker's log.
 
+## Set up WhatsApp (Evolution API)
+
+Evolution API links a WhatsApp account the way WhatsApp Web does. That is not an official
+WhatsApp API, so use a second number for the bot: if WhatsApp ever restricts it, your own
+account is untouched.
+
+1. In Coolify: **New Resource**, **Service**, search **Evolution API**, deploy. The template brings its
+   own PostgreSQL and Redis and generates a domain and an API key
+   (`SERVICE_PASSWORD_AUTHENTICATIONAPIKEY` in the service's environment variables).
+2. Open `https://<evolution domain>/manager`, sign in with that domain and API key, and create an
+   instance named `lms` with the **Baileys** integration.
+3. Connect it: open the instance's QR code, then on the bot phone go to WhatsApp, **Settings**,
+   **Linked devices**, **Link a device**, and scan it.
+4. On the worker, set `EVOLUTION_API_URL=https://<evolution domain>`, `EVOLUTION_API_KEY=<the API key>`,
+   `EVOLUTION_INSTANCE=lms` and `WHATSAPP_NUMBER=<your own number, country code first, e.g. 923001234567>`.
+5. Redeploy the worker and run `lms-worker notify-test` from its terminal in Coolify.
+
+Without the manager UI, the same steps work over HTTP:
+
+```sh
+curl -X POST https://<evolution domain>/instance/create -H "apikey: <key>" -H "Content-Type: application/json" \
+  -d '{"instanceName": "lms", "integration": "WHATSAPP-BAILEYS", "qrcode": true}'
+curl https://<evolution domain>/instance/connect/lms -H "apikey: <key>"          # QR code to scan
+curl https://<evolution domain>/instance/connectionState/lms -H "apikey: <key>"  # "open" once linked
+```
+
+Open WhatsApp on the bot phone at least every two weeks; WhatsApp logs out linked devices when the phone
+has been away longer than that.
+
 ## What the watcher does
 
 - **Finds work.** Each poll reads every course of the current semester. An assignment that is open and not yet
@@ -64,6 +93,7 @@ the failed-login counter and any spike recordings. With it, they live in Postgre
 | `lms-worker status` | Last poll, pauses, login state and recent jobs |
 | `lms-worker resume` | Clears the polling pause after a changed LMS page |
 | `lms-worker db-upgrade` | Creates or migrates the tables |
+| `lms-worker notify-test` | Sends a test message to each configured channel (WhatsApp, Discord) and says which worked |
 | `lms-worker probe` | Reads the CMS login form and reports its fields and any CAPTCHA. Submits nothing |
 | `lms-worker login` | Logs in through CMS (enrollment, password, institute, role), follows the LMS link, saves the session |
 | `lms-worker check` | Says whether the saved LMS session still works and shows the failed-login count |

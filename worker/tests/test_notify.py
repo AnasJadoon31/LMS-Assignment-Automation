@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from lms_worker.config import EvolutionConfig
 from lms_worker.db import Notification
-from lms_worker.notify import DiscordNotifier, EvolutionNotifier, NotifyError, Outbox
+from lms_worker.notify import DiscordNotifier, EvolutionNotifier, NotifyError, Outbox, send_test
 
 WEBHOOK = "https://discord.com/api/webhooks/123/tok"
 
@@ -155,3 +155,9 @@ def test_outbox_sends_files_and_falls_back_to_text_when_missing(sessions, tmp_pa
         outbox.queue(s, "assignment", "file gone", file=tmp_path / "missing.pdf")
     outbox.flush(sessions)
     assert ch.sent == [("with file", "Q.pdf"), ("file gone", None)]
+
+
+def test_send_test_reports_each_channel():
+    ok, down = Flaky(), Flaky(fail_times=1)
+    assert send_test({"whatsapp": ok, "discord": down}, "ping") == {"whatsapp": None, "discord": "down"}
+    assert ok.sent == [("ping", None)]

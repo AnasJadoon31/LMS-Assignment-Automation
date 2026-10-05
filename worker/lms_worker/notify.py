@@ -154,6 +154,18 @@ class ConsoleNotifier:
         print(f"[notify] {caption}\n[notify] attachment: {path}")
 
 
+def send_test(channels: dict[str, Notifier], message: str) -> dict[str, str | None]:
+    """Send one text straight to each channel, skipping the outbox. Returns the error per channel, or None."""
+    results: dict[str, str | None] = {}
+    for name, notifier in channels.items():
+        try:
+            notifier.text(message)
+            results[name] = None
+        except NotifyError as e:
+            results[name] = str(e)
+    return results
+
+
 class Outbox:
     def __init__(self, channels: dict[str, Notifier]) -> None:
         if not channels:
