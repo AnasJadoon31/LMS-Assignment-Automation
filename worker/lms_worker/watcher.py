@@ -3,6 +3,9 @@
 Rules (from the spec):
 - A new fingerprint creates a job. A changed fingerprint on a known assignment
   creates a new revision; an unfinished older revision is superseded.
+- Every new job is announced, in every course mode, in the poll that finds it: with the
+  question file when it downloads, and without it when it does not (the file then follows
+  on its own). Being told never waits for the download or for the solver.
 - Anything already closed, or already showing a submission the service did not
   make, is recorded but gets no job. Your manual work is never touched.
 - If a submission the service did not make appears while a job is unfinished,
@@ -61,6 +64,7 @@ POLL_NOW_KEY = "poll_requested"
 HEARTBEAT_KEY = "last_poll"
 DOWN_SINCE_KEY = "lms_down_since"
 DOWNLOAD_ALERT_AFTER = 3
+ANNOUNCED_EARLY = "announced without the question file"
 LMS_DOWN_ALERT_AFTER = 3
 # Stopping a job the service has not worked on yet is not worth a message
 QUIET_STATES = {JobState.DETECTED, JobState.DOWNLOADED}
@@ -377,9 +381,11 @@ class Watcher:
                 try:
                     paths = self.adapter.download(_meta(a), dest)
                 except (ContractBroken, SessionExpired, httpx.HTTPError):
+                    self._announce_early(s, job, None)
                     s.commit()
                     raise
                 except LMSError as e:
+                    self._announce_early(s, job, str(e))
                     job.attempts += 1
                     job.last_error = str(e)
                     result.errors.append(f"{a.title}: {e}")
@@ -395,11 +401,26 @@ class Watcher:
                 a.question_path = str(paths[0]) if paths else None
                 a.announced_at = self.now()
                 self._transition(s, job, JobState.DOWNLOADED, f"downloaded {len(paths)} file(s)")
-                text = _announce(a, job, self._detected_detail(s, job))
+                text = _announce(a, job, self._detected_detail(s, job), file_only=self._announced_early(s, job))
                 self.outbox.queue(s, "assignment", text, file=paths[0] if paths else None, job_id=job.id)
                 s.commit()
                 done += 1
         return done
+
+    @staticmethod
+    def _announced_early(s: Session, job: Job) -> bool:
+        return s.scalar(select(Event.id).where(Event.job_id == job.id, Event.detail.startswith(ANNOUNCED_EARLY)).limit(1)) is not None
+
+    def _announce_early(self, s: Session, job: Job, reason: str | None) -> None:
+        """The question file did not download: say that the assignment is there anyway, once.
+        The file follows by itself when a later poll gets it."""
+        if self._announced_early(s, job):
+            return
+        a = job.assignment
+        why = f" ({reason})" if reason else ""
+        text = _announce(a, job, self._detected_detail(s, job)) + f"\nThe question file could not be downloaded yet{why}; it will follow."
+        s.add(Event(job_id=job.id, detail=f"{ANNOUNCED_EARLY}: {reason or 'the LMS did not answer'}"))
+        self.outbox.queue(s, "assignment", text, job_id=job.id)
 
     # --- deletes, on your request ---
 
@@ -697,8 +718,10 @@ def _pkt(dt: datetime) -> str:
     return dt.astimezone(LMS_TZ).strftime("%a %d %b, %I:%M %p").replace(" 0", " ")
 
 
-def _announce(a: Assignment, job: Job, detail: str) -> str:
+def _announce(a: Assignment, job: Job, detail: str, *, file_only: bool = False) -> str:
     head = "New assignment" if job.revision == 1 else f"Assignment changed (revision {job.revision})"
+    if file_only:  # the assignment itself was announced when the file would not download
+        head = "Question file for the new assignment" if job.revision == 1 else f"Question file for the changed assignment (revision {job.revision})"
     lines = [head, a.course.name, a.title, f"Due {_pkt(a.deadline)}" if a.deadline else "No deadline shown"]
     if detail.startswith(("changed: ", "reopened: ")):
         lines.append(detail[0].upper() + detail[1:])

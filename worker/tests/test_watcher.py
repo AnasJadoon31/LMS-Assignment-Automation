@@ -239,6 +239,49 @@ def test_downloads_retry_and_alert_on_the_third_failure(watcher, lmsfake, channe
     assert jobs(sessions) == [("Recurrence Relations", 1, "DOWNLOADED")]
 
 
+def test_a_new_assignment_is_announced_even_when_its_file_cannot_be_downloaded(watcher, lmsfake, channel, sessions):
+    lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations"))
+    lmsfake.download_error["155150:1"] = LMSError("404 from Download.php")
+
+    watcher.poll_once()
+    watcher.poll_once()
+
+    told = [(m, f) for m, f in channel.sent if "Recurrence Relations" in m]
+    assert told == [("New assignment\nDesign & Analysis of Algorithms\nRecurrence Relations\nDue Sun 11 Oct, 11:55 PM\n"
+                     "The question file could not be downloaded yet (404 from Download.php); it will follow.", None)]  # once
+
+    del lmsfake.download_error["155150:1"]
+    watcher.poll_once()
+    assert jobs(sessions) == [("Recurrence Relations", 1, "DOWNLOADED")]
+    assert channel.sent[-1] == ("Question file for the new assignment\nDesign & Analysis of Algorithms\nRecurrence Relations\n"
+                                "Due Sun 11 Oct, 11:55 PM", "Recurrence-Relations.pdf")
+    assert sum(m.startswith("New assignment") for m, _ in channel.sent) == 1
+
+
+def test_a_new_assignment_is_announced_even_when_the_lms_stops_answering_the_download(watcher, lmsfake, channel, sessions):
+    lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations"))
+    lmsfake.download_error["155150:1"] = httpx.ReadTimeout("timed out")
+
+    assert watcher.poll_once().status == "lms_down"
+    watcher.poll_once()
+    told = [m for m, _ in channel.sent if m.startswith("New assignment")]
+    assert told == ["New assignment\nDesign & Analysis of Algorithms\nRecurrence Relations\nDue Sun 11 Oct, 11:55 PM\n"
+                    "The question file could not be downloaded yet; it will follow."]
+    assert jobs(sessions) == [("Recurrence Relations", 1, "DETECTED")]
+
+
+def test_a_new_assignment_is_announced_in_every_course_mode(watcher, lmsfake, sessions, channel):
+    lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations"))
+    watcher.poll_once()
+    for number, mode in enumerate(("notify", "approve", "auto"), start=2):
+        with sessions.begin() as s:
+            s.scalar(select(Course)).mode = mode
+        lmsfake.set(DAA, *lmsfake.listing[DAA.lms_ref], meta(DAA, number, f"Sheet {number}"))
+        watcher.poll_once()
+        assert channel.sent[-1] == (f"New assignment\nDesign & Analysis of Algorithms\nSheet {number}\nDue Sun 11 Oct, 11:55 PM",
+                                    f"Sheet-{number}.pdf"), mode
+
+
 def test_a_changed_layout_pauses_polling_until_resume(watcher, lmsfake, channel, sessions):
     lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations"))
     lmsfake.list_assignments = lambda course: (_ for _ in ()).throw(ContractBroken("Assignments table columns changed"))
