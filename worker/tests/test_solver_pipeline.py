@@ -1,3 +1,4 @@
+import dataclasses
 import importlib
 import json
 from datetime import datetime, timedelta
@@ -14,7 +15,7 @@ from lms_worker.db import Artifact, Assignment, Course, Event, Job, JobState
 from lms_worker.kv import DbKV
 from lms_worker.lms import models as lms
 from lms_worker.lms.bahria_pages import LMS_TZ
-from lms_worker.lms.errors import AlreadySubmitted
+from lms_worker.lms.errors import AlreadySubmitted, LMSError, SessionExpired
 from lms_worker.notify import Outbox
 from lms_worker.solver.claude import rate_limit
 from lms_worker.solver.pipeline import CONTINUE, SIGNED_OUT_KEY, Solver, report_name
@@ -459,6 +460,111 @@ def test_a_submission_already_there_counts_as_ours_only_after_our_own_try(sessio
         job = s.get(Job, job_id)
         assert job.state == expected
         assert job.lms_submission_file == ("Assignment_01.pdf" if expected == "CONFIRMED" else None)
+
+
+UPLOADED = "Assignment_01.pdf"
+
+
+def uploaded_job(sessions, tmp_path, *, state=JobState.CONFIRMED):
+    """A job whose report the service uploaded; the LMS shows the file."""
+    job_id = add_job(sessions, tmp_path, state=state, fingerprint=LISTED.fingerprint())
+    with sessions.begin() as s:
+        job = s.get(Job, job_id)
+        job.lms_submission_file = UPLOADED if state == JobState.CONFIRMED else None
+        job.assignment.submitted_file = UPLOADED
+    return job_id
+
+
+def ask_to_delete(sessions, job_id):
+    with sessions.begin() as s:
+        return actions.delete_submission(s, s.get(Job, job_id).assignment, DbKV(sessions), NOW, "WhatsApp")
+
+
+def test_a_submission_you_ask_to_delete_is_deleted_and_the_report_waits_again(sessions, channel, tmp_path):
+    job_id = uploaded_job(sessions, tmp_path)
+    done, message = ask_to_delete(sessions, job_id)
+    assert done and message == "Deleting your submission for Recurrence Relations from the LMS now; a message will confirm it."
+    assert DbKV(sessions).get(POLL_NOW_KEY)  # the worker is asked to poll at once
+    assert ask_to_delete(sessions, job_id) == (False, "Nothing changed: the submission for Recurrence Relations is already being deleted.")
+
+    class Deleting(FakeLMS):
+        def delete_submission(self, a):
+            self.calls.append(f"delete:{a.lms_ref}")
+            self.listing[DAA.lms_ref] = [LISTED]  # the row is open again, nothing submitted
+            return UPLOADED
+
+    fake = Deleting()
+    fake.set(DAA, dataclasses.replace(LISTED, submitted_file=UPLOADED))
+    watcher = Watcher(fake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data", now=Clock(NOW))
+    assert watcher.poll_once().deleted == 1
+    assert fake.calls.count("delete:155150:1") == 1
+    with sessions() as s:
+        job = s.get(Job, job_id)
+        a = job.assignment
+        assert (job.state, job.lms_submission_file) == ("AWAITING_APPROVAL", None)
+        assert (a.submitted_file, a.delete_requested_at) == (None, None)
+        assert s.scalars(select(Event.detail).where(Event.job_id == job_id).order_by(Event.id)).all()[-2:] == [
+            "delete of the LMS submission requested on WhatsApp: Recurrence Relations",
+            "Assignment_01.pdf deleted from the LMS at your request; waiting for your approval again"]
+    assert channel.sent[-1][0] == (
+        "Deleted from the LMS: Design & Analysis of Algorithms · Recurrence Relations\n"
+        "Assignment_01.pdf is no longer submitted.\n"
+        "The solved report waits for your approval again: reply menu, then Waiting for your approval.")
+
+    assert watcher.poll_once().deleted == 0  # asked once, done once
+    assert fake.calls.count("delete:155150:1") == 1
+    assert state(sessions, job_id) == "AWAITING_APPROVAL"
+
+
+def test_a_delete_the_lms_refuses_is_reported_and_not_repeated(sessions, channel, tmp_path):
+    job_id = uploaded_job(sessions, tmp_path)
+    ask_to_delete(sessions, job_id)
+
+    class Refusing(FakeLMS):
+        def delete_submission(self, a):
+            self.calls.append("delete")
+            raise LMSError("The LMS still shows the submission after the delete")
+
+    fake = Refusing()
+    fake.set(DAA, dataclasses.replace(LISTED, submitted_file=UPLOADED))
+    watcher = Watcher(fake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data", now=Clock(NOW))
+    assert watcher.poll_once().deleted == 0 and watcher.poll_once().deleted == 0
+    assert fake.calls.count("delete") == 1
+    with sessions() as s:
+        job = s.get(Job, job_id)
+        assert (job.state, job.lms_submission_file, job.assignment.submitted_file) == ("CONFIRMED", UPLOADED, UPLOADED)
+        assert job.assignment.delete_requested_at is None
+    assert channel.sent[-1][0] == ("Not deleted: Design & Analysis of Algorithms · Recurrence Relations\n"
+                                   "The LMS still shows the submission after the delete")
+
+
+def test_delete_is_offered_only_for_an_open_assignment_the_lms_shows_a_file_for(sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path, state=JobState.AWAITING_APPROVAL)
+    nothing = "Nothing changed: Recurrence Relations has no submission on the LMS that can be deleted now."
+    assert ask_to_delete(sessions, job_id) == (False, nothing)  # nothing submitted
+    with sessions.begin() as s:
+        a = s.get(Job, job_id).assignment
+        a.submitted_file, a.deadline_passed = UPLOADED, True
+    assert ask_to_delete(sessions, job_id) == (False, nothing)  # closed: the LMS no longer offers Delete
+    with sessions() as s:
+        assert s.get(Job, job_id).assignment.delete_requested_at is None
+
+
+def test_a_session_that_ends_keeps_the_delete_for_the_next_poll(sessions, channel, tmp_path):
+    job_id = uploaded_job(sessions, tmp_path)
+    ask_to_delete(sessions, job_id)
+
+    class Expired(FakeLMS):
+        def delete_submission(self, a):
+            raise SessionExpired("the session ended")
+
+    fake = Expired()
+    fake.set(DAA, dataclasses.replace(LISTED, submitted_file=UPLOADED))
+    result = Watcher(fake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data", now=Clock(NOW)).poll_once()
+    assert result.status == "session"
+    with sessions() as s:
+        assert s.get(Job, job_id).assignment.delete_requested_at is not None
+    assert state(sessions, job_id) == "CONFIRMED"
 
 
 def test_a_redo_after_a_blocked_run_starts_a_new_session(solver, sandbox, sessions, tmp_path):

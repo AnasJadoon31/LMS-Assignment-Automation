@@ -95,6 +95,8 @@ class Assignment(Base):
     announced_at: Mapped[datetime | None]
     # Deadline reminders already sent for the current deadline, e.g. "24h,2h"
     reminders: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    # You asked for the LMS submission to be deleted; the worker does it at its next poll
+    delete_requested_at: Mapped[datetime | None]
     first_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
 

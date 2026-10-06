@@ -51,7 +51,8 @@ from .lms import models as lms
 from .lms.models import PAPER, PAPER_MISSED, PAPER_NOT_SUBMITTED, PAPER_SUBMITTED
 from .lms.adapter import LMSAdapter
 from .lms.bahria_pages import LMS_TZ
-from .lms.errors import AlreadySubmitted, BadCredentials, ContractBroken, LMSError, LoginError, ReloginPaused, SessionExpired
+from .lms.errors import (AlreadySubmitted, BadCredentials, ContractBroken, LMSError, LoginError, NothingSubmitted,
+                         ReloginPaused, SessionExpired)
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ class PollResult:
     stopped: int = 0
     downloaded: int = 0
     uploaded: int = 0
+    deleted: int = 0
     papers: int = 0
     new_papers: int = 0
     marks_posted: int = 0
@@ -184,6 +186,7 @@ class Watcher:
                     + "\nEach starts in approve mode.",
                 )
         result.downloaded = self._download_pending(result)
+        self._delete_pending(result)
         self._submit_pending(result)
         self._announce_papers(result)
         self._remind(result)
@@ -397,6 +400,59 @@ class Watcher:
                 s.commit()
                 done += 1
         return done
+
+    # --- deletes, on your request ---
+
+    def _delete_pending(self, result: PollResult) -> None:
+        """Submissions you asked to delete while the assignment is open: the row's Delete link is
+        followed and the row read back. A report the service had uploaded then waits for your
+        approval again; nothing is uploaded in its place by itself. Asked once, tried once: a
+        delete the LMS refuses is reported, not repeated."""
+        with self.sessions() as s:
+            rows = s.scalars(
+                select(Assignment).where(Assignment.delete_requested_at.is_not(None)).order_by(Assignment.id)
+                .with_for_update(skip_locked=True)
+            ).all()
+            for a in rows:
+                job = a.jobs[-1] if a.jobs else None
+                job_id = job.id if job else None
+                where = f"{a.course.name} · {a.title}"
+                refused = None
+                try:
+                    if a.deadline_passed or (a.deadline is not None and a.deadline <= self.now()):
+                        raise LMSError("The deadline has passed, so the LMS no longer lets a submission be deleted")
+                    filename = self.adapter.delete_submission(_meta(a))
+                except (ContractBroken, SessionExpired, httpx.HTTPError):
+                    s.commit()  # the request stays for the next poll
+                    raise
+                except NotImplementedError:
+                    refused = "Deleting is not available here; delete it on the LMS."
+                except NothingSubmitted as e:
+                    a.submitted_file = None
+                    refused = f"{e}: there is nothing to delete."
+                except LMSError as e:
+                    refused = str(e)
+                a.delete_requested_at = None
+                if refused:
+                    result.errors.append(f"{a.title}: not deleted: {refused}")
+                    s.add(Event(job_id=job_id, detail=f"submission not deleted: {refused}"))
+                    self.outbox.queue(s, "deleted", f"Not deleted: {where}\n{refused}", job_id=job_id)
+                    s.commit()
+                    continue
+                a.submitted_file = None
+                lines = [f"Deleted from the LMS: {where}", f"{filename} is no longer submitted."]
+                if job and job.state == JobState.CONFIRMED:
+                    job.lms_submission_file = None
+                    job.attempts = 0
+                    self._transition(s, job, JobState.AWAITING_APPROVAL,
+                                     f"{filename} deleted from the LMS at your request; waiting for your approval again")
+                    lines.append("The solved report waits for your approval again: reply menu, then Waiting for your approval.")
+                else:
+                    s.add(Event(job_id=job_id, detail=f"{filename} deleted from the LMS at your request"))
+                    lines.append("Nothing is submitted now; upload again before the deadline.")
+                self.outbox.queue(s, "deleted", "\n".join(lines), job_id=job_id)
+                result.deleted += 1
+                s.commit()
 
     # --- uploads ---
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
 from playwright.sync_api import Error as PlaywrightError
@@ -22,6 +22,7 @@ from .errors import (
     ContractBroken,
     LMSError,
     LoginError,
+    NothingSubmitted,
     ReloginPaused,
     SessionExpired,
 )
@@ -33,6 +34,7 @@ ASSIGNMENTS = "Assignments.php"
 PAPERS = "Papers.php"
 PAGES = {ASSIGNMENT: (ASSIGNMENTS, parse_assignments_page), PAPER: (PAPERS, parse_papers_page)}
 SUBMIT_ACTION = re.compile(r"includes/studentprocess\.php\?s=assignmentSubmissionAdd")
+DELETE_ACTION = re.compile(r"includes/studentprocess\.php\?s=assignmentSubmissionDelete&[\w%=&+/.-]+")
 UPLOAD_TYPES = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip"}
 
 
@@ -138,7 +140,7 @@ class BahriaAdapter:
         """Upload file through the row's Submit form, then read the row back to confirm.
 
         Only an open row with nothing submitted: a row showing Delete raises AlreadySubmitted,
-        since the service never deletes a submission. Papers are never uploaded."""
+        since the service never deletes a submission to upload over it. Papers are never uploaded."""
         if a.kind != ASSIGNMENT:
             raise LMSError("Only assignments are uploaded; lab papers never are")
         if file.suffix.lower() not in UPLOAD_TYPES:
@@ -164,6 +166,35 @@ class BahriaAdapter:
         if not after.submission_file:
             raise LMSError("The LMS does not show the file after the upload")
         return Receipt(filename=after.submission_file, submitted_at=datetime.now(timezone.utc))
+
+    def delete_submission(self, a: AssignmentMeta) -> str:
+        """Follow the row's Delete link, then read the row back to confirm; the LMS offers it
+        while the assignment is open. Returns the name of the file that was deleted.
+
+        Only on your request, and only the link the row itself carries, for this course."""
+        if a.kind != ASSIGNMENT:
+            raise LMSError("Only an assignment's submission can be deleted")
+        row = self._row(a)
+        if row.action == "submit":
+            raise NothingSubmitted(f"The LMS shows no submission for {a.title}")
+        if row.action != "delete":
+            raise LMSError(f"{a.title} is not open, so its submission cannot be deleted ({row.action})")
+        href = row.delete_href
+        query = parse_qs(urlsplit(href).query) if href else {}
+        if not href or not DELETE_ACTION.fullmatch(href) or not query.get("aSubId") or query.get("oc") != [a.course.lms_ref]:
+            raise LMSError(f"The Delete link for {a.title} is not the one expected ({href or 'missing'}); delete it on the LMS")
+        self.throttle.wait()
+        r = self._client().get(href)
+        if r.is_redirect:
+            target = urljoin(str(r.url), r.headers.get("location", ""))
+            if urlsplit(target).hostname != self.settings.urls.lms_host:
+                raise SessionExpired(f"The delete was redirected to {target}; the session ended")
+        elif r.status_code >= 400:
+            raise LMSError(f"The LMS answered the delete with HTTP {r.status_code}")
+        after = self._row(a)
+        if after.action != "submit" or after.submission_file:
+            raise LMSError("The LMS still shows the submission after the delete")
+        return row.submission_file or "the submission"
 
     def submission_status(self, a: AssignmentMeta) -> SubmissionStatus:
         row = self._row(a)

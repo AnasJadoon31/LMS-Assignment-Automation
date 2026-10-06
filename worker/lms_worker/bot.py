@@ -188,6 +188,11 @@ class Bot:
         action = c["action"]
         if action == "mode":
             return actions.set_mode(s.get(Course, c["course"]), c["mode"])[1]
+        if action == "delete":
+            a = s.get(Assignment, c["assignment"])
+            if a is None:
+                return "That assignment is no longer listed."
+            return actions.delete_submission(s, a, self.kv, self.now(), "WhatsApp")[1]
         job = s.get(Job, c["job"])
         if job is None:
             return "That job no longer exists."
@@ -307,6 +312,8 @@ class Bot:
             if actions.can_redo(job):
                 options.append(("Redo with a note", {"do": "note", "job": job.id}))
             options.append(("History", {"do": "history", "job": job.id}))
+        if actions.can_delete(a):
+            options.append(("Delete my submission from the LMS", {"do": "confirm", "action": "delete", "assignment": a.id}))
         return "", lines, options
 
     def _screen_courses(self, s: Session, screen: dict):
@@ -352,6 +359,12 @@ class Bot:
         if action == "mode":
             c = s.get(Course, screen["course"])
             question = [f"Switch {c.name} to auto?", "Work will be uploaded under your name without you reading it first."]
+        elif action == "delete":
+            a = s.get(Assignment, screen["assignment"])
+            if a is None:
+                return "", ["That assignment is no longer listed."], [("OK", {"do": "no"})]
+            question = [f"Delete your submission for {a.title} from the LMS?",
+                        f"The LMS shows {a.submitted_file}. Nothing is uploaded in its place until you approve a report or upload one yourself."]
         else:
             job = s.get(Job, screen["job"])
             if job is None:
@@ -572,7 +585,9 @@ def _status(a: Assignment, now: datetime) -> str:
             return "finished; the LMS does not show whether you submitted"
         return "not started" if _paper_in(a, "upcoming", now) else "open; nothing submitted yet"
     if a.submitted_file:
-        return "submitted" + ("; still open, you can delete and resubmit on the LMS" if not a.deadline_passed else "")
+        if a.delete_requested_at:
+            return "submitted; being deleted from the LMS, as you asked"
+        return "submitted" + ("; still open, you can delete it and resubmit" if not a.deadline_passed else "")
     if a.deadline_passed:
         return "missed: closed with no submission"
     return "not submitted"

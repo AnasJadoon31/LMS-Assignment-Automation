@@ -256,7 +256,7 @@ def _print_result(result: PollResult, delay: float | None = None) -> None:
         f"{datetime.now().astimezone().isoformat(timespec='seconds')} poll {result.status}: {result.courses} courses, {result.seen} assignments, "
         f"{result.new_jobs} new, {result.revisions} changed, {result.skipped} skipped, "
         f"{result.stopped} stopped, {result.downloaded} downloaded, {result.papers} papers "
-        f"({result.new_papers} new), {result.marks_posted} marks posted, {result.reminders} reminders, "
+        f"({result.new_papers} new), {result.marks_posted} marks posted, {result.deleted} deleted, {result.reminders} reminders, "
         f"{result.sent} messages sent"
     )
     if delay is not None:

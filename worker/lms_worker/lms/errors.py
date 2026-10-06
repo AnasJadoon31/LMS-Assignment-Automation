@@ -32,8 +32,13 @@ class ReloginPaused(SessionExpired):
     Needs a pasted session or a manual Retry."""
 
 
+class NothingSubmitted(LMSError):
+    """The row shows no submission, so there is nothing to delete."""
+
+
 class AlreadySubmitted(LMSError):
-    """The row already shows a submission; the service never deletes one to upload again."""
+    """The row already shows a submission; the service never deletes one to upload again.
+    Deleting happens only when you ask for it."""
 
     def __init__(self, filename: str | None):
         super().__init__(f"The LMS already shows a submission ({filename or 'unnamed'})")

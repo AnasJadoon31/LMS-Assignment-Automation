@@ -94,6 +94,25 @@ def test_a_course_shows_its_work_files_and_approval(client, semester, sessions):
     assert DbKV(sessions).get(POLL_NOW_KEY)
 
 
+def test_a_submission_on_an_open_assignment_can_be_deleted_from_the_page(client, semester, sessions):
+    signed_in(client)
+    assert 'data-act="delete"' in client.get(f"/courses/{semester['lab']}").text
+    by_title = {i["title"]: i for i in client.get(f"/api/courses/{semester['lab']}", headers=H).json()["assignments"]}
+    assert {t: i["can_delete"] for t, i in by_title.items()} == {"Lab 4": False, "Lab 5": False, "Lab 6": True}
+    assert by_title["Lab 6"]["submitted_file"] == "l6.pdf"
+    lab6 = by_title["Lab 6"]["id"]
+
+    assert client.post(f"/api/assignments/{lab6}/delete-submission").status_code == 403  # no X-LMS header
+    r = client.post(f"/api/assignments/{lab6}/delete-submission", headers=H)
+    assert r.json()["message"] == "Deleting your submission for Lab 6 from the LMS now; a message will confirm it."
+    assert client.post(f"/api/assignments/{lab6}/delete-submission", headers=H).status_code == 409  # already asked
+    assert client.post(f"/api/assignments/{by_title['Lab 5']['id']}/delete-submission", headers=H).status_code == 409  # closed
+    assert client.post("/api/assignments/999999/delete-submission", headers=H).status_code == 404
+    again = {i["title"]: i for i in client.get(f"/api/courses/{semester['lab']}", headers=H).json()["assignments"]}["Lab 6"]
+    assert again["status"] == "submitted; being deleted from the LMS, as you asked" and not again["can_delete"]
+    assert DbKV(sessions).get(POLL_NOW_KEY)
+
+
 def test_redo_needs_a_note_and_queues_the_job(client, semester, sessions):
     signed_in(client)
     job = client.get(f"/api/courses/{semester['daa']}", headers=H).json()["assignments"][0]["job"]["id"]

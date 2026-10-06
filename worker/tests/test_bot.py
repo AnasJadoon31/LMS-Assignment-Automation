@@ -159,6 +159,37 @@ def test_a_typed_report_for_a_handwritten_sheet_can_be_approved(bot, semester, s
         assert s.scalar(select(Job.state)) == "SUBMITTING"
 
 
+def pick(replies, label):
+    """The number the menu gives an option."""
+    return next(line.split(".")[0] for line in text(replies).splitlines() if line.split(". ", 1)[-1].startswith(label))
+
+
+def test_a_submission_on_an_open_assignment_can_be_deleted_after_a_yes(bot, semester, sessions):
+    listed = say(bot, "menu", "1", "6")  # Assignments, Submitted
+    item = say(bot, pick(listed, "Lab 6"))
+    assert "Status: submitted; still open, you can delete it and resubmit" in text(item)
+    confirm = text(say(bot, pick(item, "Delete my submission from the LMS")))
+    assert "Delete your submission for Lab 6 from the LMS?" in confirm
+    assert "The LMS shows l6.pdf. Nothing is uploaded in its place until you approve a report or upload one yourself." in confirm
+    assert "1. Yes" in confirm and "2. No" in confirm
+
+    assert text(say(bot, "2")).startswith("Cancelled.")
+    with sessions() as s:
+        assert s.scalar(select(Assignment).where(Assignment.title == "Lab 6")).delete_requested_at is None
+
+    item = say(bot, "0", pick(listed, "Lab 6"))
+    out = text(say(bot, pick(item, "Delete my submission from the LMS"), "1"))
+    assert out.startswith("Deleting your submission for Lab 6 from the LMS now; a message will confirm it.")
+    assert "Status: submitted; being deleted from the LMS, as you asked" in out
+    assert "Delete my submission" not in out.split("---")[-1]  # asked once
+    with sessions() as s:
+        assert s.scalar(select(Assignment).where(Assignment.title == "Lab 6")).delete_requested_at is not None
+        assert DbKV(sessions).get(POLL_NOW_KEY)
+
+    closed = say(bot, "0", pick(listed, "Lab 5"))  # submitted and closed: the LMS offers no Delete
+    assert "Delete my submission" not in text(closed)
+
+
 def test_files_are_sent_as_documents(bot, semester):
     say(bot, "menu", "1", "1", "1")
     (q,) = say(bot, "1")

@@ -139,6 +139,18 @@ def dashboard_router(auth: Auth, sessions: sessionmaker[Session], kv: KeyValue, 
     def redo(request: Request, job_id: int, body: Note) -> dict:
         return job_action(request, job_id, lambda s, job: actions.redo(s, job, body.note, "the web page"))
 
+    @router.post("/api/assignments/{assignment_id}/delete-submission")
+    def delete_submission(request: Request, assignment_id: int) -> dict:
+        auth.guard(request)
+        with sessions.begin() as s:
+            a = s.get(Assignment, assignment_id)
+            if a is None:
+                raise HTTPException(status_code=404, detail="No such assignment")
+            ok, message = actions.delete_submission(s, a, kv, now(), "the web page")
+        if not ok:
+            raise HTTPException(status_code=409, detail=message)
+        return {"message": message}
+
     @router.get("/files/question/{assignment_id}")
     def question_file(request: Request, assignment_id: int):
         if not auth.signed_in(request):
@@ -200,6 +212,7 @@ def _item(s: Session, a: Assignment, now: datetime) -> dict:
     item = {
         "id": a.id, "kind": a.kind, "number": a.number, "title": a.title, "when": when, "status": status, "tone": tone,
         "marks": a.marks, "remarks": a.remarks, "skipped": a.skipped_reason, "files": files, "job": None,
+        "can_delete": actions.can_delete(a), "submitted_file": a.submitted_file,
     }
     if job and a.kind != PAPER:
         latest: dict[str, Artifact] = {}
@@ -303,6 +316,7 @@ function itemHtml(i) {
     btns.push('<button data-act="approve" data-job="' + i.job.id + '" data-title="' + esc(i.title) + '">Approve and upload</button>');
     btns.push('<button class="secondary" data-act="reject" data-job="' + i.job.id + '" data-title="' + esc(i.title) + '">Reject</button>');
   }
+  if (i.can_delete) btns.push('<button class="secondary" data-act="delete" data-assignment="' + i.id + '" data-title="' + esc(i.title) + '" data-file="' + esc(i.submitted_file) + '">Delete submission</button>');
   if (i.job && i.job.can_redo) btns.push('<button class="secondary" data-act="redo" data-job="' + i.job.id + '" data-title="' + esc(i.title) + '">Redo with a note</button>');
   if (btns.length) h += '<div class="row small">' + btns.join("") + "</div>";
   if (i.job && i.job.history.length) h += '<details class="hist"><summary>History</summary>' +
@@ -315,8 +329,10 @@ async function act(btn) {
   if (kind === "approve" && !confirm("Upload the solved PDF for " + title + " to the LMS now?")) return;
   if (kind === "reject" && !confirm("Reject the solution for " + title + "? Nothing will be uploaded.")) return;
   if (kind === "redo") { const note = prompt("What should change in the redo?"); if (!note) return; body = { note }; }
+  if (kind === "delete" && !confirm("Delete your submission for " + title + " from the LMS?\\nThe LMS shows " + btn.dataset.file + ". Nothing is uploaded in its place until you approve a report or upload one yourself.")) return;
   btn.disabled = true;
-  try { const r = await call("/api/jobs/" + job + "/" + kind, body); alert(r.message); } catch (e) { alert(e.message); }
+  const path = kind === "delete" ? "/api/assignments/" + btn.dataset.assignment + "/delete-submission" : "/api/jobs/" + job + "/" + kind;
+  try { const r = await call(path, body); alert(r.message); } catch (e) { alert(e.message); }
   load();
 }
 async function load() {

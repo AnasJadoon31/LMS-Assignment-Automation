@@ -17,8 +17,9 @@ link. Closed rows carry no id, so rows are identified by course and number.
 The Submit modal posts multipart to includes/studentprocess.php?s=assignmentSubmissionAdd
 with assignmentID, offeredCourseID, ocID, studentID and assignmentSubmissionFile
 (.pdf .doc .docx .xls .xlsx .zip, no special symbols in the name). Delete is a
-plain GET link. The poller follows neither; only the upload step posts the Submit form,
-after your approval, and nothing ever follows Delete.
+plain GET link to includes/studentprocess.php?s=assignmentSubmissionDelete with aSubId, a and
+oc. The poller follows neither; the upload step posts the Submit form after your approval,
+and the Delete link is followed only when you ask for a submission to be deleted.
 
 Papers.php lists lab exam papers (only lab courses get them), with ten columns: number,
 term (with its duration, e.g. "Mid Term (60 Minutes)"), paper file, remarks, your
@@ -118,6 +119,7 @@ class AssignmentRow:
     submission_hidden: bool = False  # papers: a submission link with no file (k=NA)
     paper_status: str | None = None  # papers: from the row colour, None if it is not one of the three
     submit_form: SubmitForm | None = None  # open rows with nothing submitted
+    delete_href: str | None = None  # open rows with a submission: the Delete link
 
     @property
     def deadline_passed(self) -> bool:
@@ -210,6 +212,14 @@ def _assignment_id(soup: BeautifulSoup, action_cell: Tag) -> str | None:
         value = (query.get("a") or query.get("p") or [None])[0]
         return b64_id(value) if value else None
     return None
+
+
+def _delete_href(soup: BeautifulSoup, action_cell: Tag) -> str | None:
+    """The link in the row's Delete modal."""
+    trigger = action_cell.find("a", attrs={"data-target": True})
+    modal = soup.find(id=trigger["data-target"].lstrip("#")) if trigger else None
+    link = modal.find("a", href=re.compile(r"assignmentSubmissionDelete", re.I)) if modal else None
+    return link["href"] if link else None
 
 
 def _submit_form(soup: BeautifulSoup, action_cell: Tag) -> SubmitForm | None:
@@ -338,6 +348,7 @@ def _parse_row(soup: BeautifulSoup, cells: list[Tag], layout: Layout, tr: Tag | 
         submission_hidden=hidden,
         paper_status=_paper_status(tr) if tr is not None and layout.term is not None else None,
         submit_form=_submit_form(soup, status) if _action(status) == "submit" else None,
+        delete_href=_delete_href(soup, status) if _action(status) == "delete" else None,
     )
 
 
