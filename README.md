@@ -54,7 +54,7 @@ LMS BOT
 
 Assignments list: remaining, due in 48 hours, waiting for your approval, queued or being solved,
 stopped, submitted, missed (closed with no submission), marked and all. Lab papers list by exam
-window: upcoming, open now, starting in 48 hours, finished, submitted, marked and all. By course
+window: upcoming, open now, starting in 48 hours, finished, submitted, missed, marked and all. By course
 gives the same screens for one course (papers only for labs), plus its mode. Picking an item shows
 its deadline, status, marks, teacher's note and service state, and offers what applies: the
 question file or paper, the solved PDF, DOCX, notebook and receipt, Approve, Reject, Redo with a
@@ -72,8 +72,9 @@ note, and History. Approve, Reject and switching a course to auto ask 1. Yes / 2
 - **Lab papers.** Only lab courses get papers (`Papers.php`), each with a date, start and end time.
   You get one message when a paper is scheduled, reminders 24 hours and 1 hour before it starts, and
   the paper file the moment it opens: the worker polls at the start time, then every minute until
-  the file appears. The LMS does not show paper submissions afterwards (`k=NA`), so a past paper is
-  "finished", not "missed". Papers are never solved.
+  the file appears. The LMS never shows the submitted file (`k=NA`); the row colour is the status:
+  green submitted, white not submitted, red missed (the exam ended with no submission). A paper
+  that turns green or red gets one message, and either stops its reminders. Papers are never solved.
 - **Status, marks, reminders.** Every poll records what the LMS shows for each assignment and paper
   (submitted, open or closed, marks). "Marks posted" arrives when marks first appear, and a reminder
   24 hours and 2 hours before any assignment deadline with nothing submitted.

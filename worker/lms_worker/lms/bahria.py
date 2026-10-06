@@ -190,6 +190,7 @@ class BahriaAdapter:
             starts_at=row.starts_at,
             marks=row.marks,
             submission_hidden=row.submission_hidden,
+            paper_status=row.paper_status,
             number=row.number,
             title=row.title,
             deadline=row.deadline,

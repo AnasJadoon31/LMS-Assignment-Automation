@@ -7,7 +7,7 @@ again at the main menu. Approve and Reject ask 1. Yes / 2. No first.
 
 Everything reads the database the poller keeps current; "Check the LMS now" asks the
 worker for an immediate poll. Lab papers are listed by their exam window and never solved;
-the LMS does not show paper submissions afterwards, so a past paper is "finished", not "missed".
+their status is the LMS row colour: green submitted, white not submitted, red missed.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from .db.models import TERMINAL_STATES, Artifact, Assignment, ChatSession, Course, CourseMode, Event, Job, JobState, utcnow
 from .kv import KeyValue
 from .lms.bahria_pages import LMS_TZ
+from .lms.models import PAPER_MISSED, PAPER_NOT_SUBMITTED, PAPER_SUBMITTED
 from .watcher import HEARTBEAT_KEY, POLL_NOW_KEY, POLL_PAUSE_KEY, is_lab
 
 IDLE = timedelta(minutes=10)
@@ -54,6 +55,7 @@ CATEGORIES = {
         ("due_soon", "Starting in the next 48 hours"),
         ("finished", "Finished"),
         ("submitted", "Submitted"),
+        ("missed", "Missed (no submission)"),
         ("marked", "Marked"),
         ("all", "All"),
     ],
@@ -295,7 +297,7 @@ class Bot:
         what = f"Paper {a.number}" if a.kind == PAPER else f"Assignment {a.number}"
         lines = [a.title, f"{a.course.name} · {what}"]
         if a.kind == PAPER and a.starts_at:
-            lines.append(f"{_window(a)} ({_paper_phase(a, now)})")
+            lines.append(f"{_window(a)} ({_paper_timing(a, now)})")
         elif a.deadline:
             lines.append(f"Due {_when(a.deadline)}" + (f" ({_relative(a.deadline, now)})" if not a.deadline_passed else ""))
         else:
@@ -481,9 +483,23 @@ def _in(a: Assignment, category: str, now: datetime) -> bool:
     raise ValueError(category)
 
 
+def _paper_submitted(a: Assignment) -> bool:
+    return bool(a.submitted_file) or a.paper_status == PAPER_SUBMITTED
+
+
+def _paper_missed(a: Assignment, finished: bool) -> bool:
+    """Red on the LMS, or over and still white. Without a colour, a hidden submission is unknown."""
+    if a.paper_status == PAPER_MISSED:
+        return True
+    if not finished or _paper_submitted(a):
+        return False
+    return a.paper_status == PAPER_NOT_SUBMITTED or not a.submission_hidden
+
+
 def _paper_in(a: Assignment, category: str, now: datetime) -> bool:
-    finished = a.deadline_passed or (a.deadline is not None and a.deadline <= now)
+    finished = a.deadline_passed or a.paper_status == PAPER_MISSED or (a.deadline is not None and a.deadline <= now)
     started = a.starts_at is None or a.starts_at <= now
+    submitted = _paper_submitted(a)
     if category == "all":
         return True
     if category in ("upcoming",):
@@ -491,15 +507,15 @@ def _paper_in(a: Assignment, category: str, now: datetime) -> bool:
     if category == "open_now":
         return not finished and started
     if category == "remaining":
-        return not finished and not a.submitted_file
+        return not finished and not submitted
     if category == "due_soon":
-        return not finished and not a.submitted_file and a.starts_at is not None and a.starts_at - now <= DUE_SOON
+        return not finished and not submitted and a.starts_at is not None and a.starts_at - now <= DUE_SOON
     if category == "finished":
         return finished
     if category == "submitted":
-        return bool(a.submitted_file)
+        return submitted
     if category == "missed":
-        return finished and not a.submitted_file and not a.submission_hidden
+        return _paper_missed(a, finished)
     if category == "marked":
         return bool(a.marks)
     return False
@@ -520,12 +536,21 @@ def _window(a: Assignment) -> str:
     return f"{_when(a.starts_at)} to {end}"
 
 
-def _paper_phase(a: Assignment, now: datetime) -> str:
-    if a.deadline_passed or (a.deadline and a.deadline <= now):
-        return "finished"
+def _paper_timing(a: Assignment, now: datetime) -> str:
+    if _paper_in(a, "finished", now):
+        return "ended"
     if a.starts_at and a.starts_at > now:
         return f"starts {_relative(a.starts_at, now)}"
     return f"open now, {_relative(a.deadline, now).removeprefix('in ')} left" if a.deadline else "open now"
+
+
+def _paper_phase(a: Assignment, now: datetime) -> str:
+    if _paper_submitted(a):
+        return "submitted"
+    if _paper_in(a, "missed", now):
+        return "missed"
+    timing = _paper_timing(a, now)
+    return "finished" if timing == "ended" else timing
 
 
 def _order(category: str):
@@ -546,9 +571,13 @@ def _summary(items: list[Assignment], now: datetime) -> str:
 
 
 def _status(a: Assignment, now: datetime) -> str:
-    if a.kind == PAPER and not a.submitted_file:
+    if a.kind == PAPER:
+        if _paper_submitted(a):
+            return "submitted"
+        if _paper_in(a, "missed", now):
+            return "missed: the exam ended with no submission"
         if _paper_in(a, "finished", now):
-            return "the LMS does not show paper submissions" if a.submission_hidden else "no submission"
+            return "finished; the LMS does not show whether you submitted"
         return "not started" if _paper_in(a, "upcoming", now) else "open; nothing submitted yet"
     if a.submitted_file:
         return "submitted" + ("; still open, you can delete and resubmit on the LMS" if not a.deadline_passed else "")

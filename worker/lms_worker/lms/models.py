@@ -20,6 +20,11 @@ class Course:
 ASSIGNMENT = "assignment"
 PAPER = "paper"
 
+# A lab paper's row colour on the LMS: green, white, red
+PAPER_SUBMITTED = "submitted"
+PAPER_NOT_SUBMITTED = "not_submitted"
+PAPER_MISSED = "missed"  # the exam ended with no submission
+
 
 @dataclass(frozen=True)
 class AssignmentMeta:
@@ -42,6 +47,11 @@ class AssignmentMeta:
     deadline_passed: bool = False
     marks: str | None = None
     submission_hidden: bool = False  # papers: the LMS shows a submission link with no file
+    paper_status: str | None = None  # papers: PAPER_SUBMITTED, PAPER_NOT_SUBMITTED or PAPER_MISSED
+
+    @property
+    def submitted(self) -> bool:
+        return self.submitted_file is not None or self.paper_status == PAPER_SUBMITTED
 
     def fingerprint(self) -> str:
         """Hash of course code, title, deadline and attachment name plus size.

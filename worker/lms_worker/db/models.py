@@ -85,6 +85,7 @@ class Assignment(Base):
     # What the LMS showed at the last poll
     submitted_file: Mapped[str | None] = mapped_column(String(512))
     submission_hidden: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    paper_status: Mapped[str | None] = mapped_column(String(16))  # lab papers: submitted, not_submitted, missed
     deadline_passed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     marks: Mapped[str | None] = mapped_column(String(64))
     status_seen_at: Mapped[datetime | None]

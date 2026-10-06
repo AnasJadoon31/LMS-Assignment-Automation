@@ -24,7 +24,7 @@ class Clock:
 
 @pytest.fixture
 def semester(sessions, tmp_path):
-    """Two courses: open, due-soon, submitted, missed and marked work, two papers, one job waiting for you."""
+    """Two courses: open, due-soon, submitted, missed and marked work, four papers, one job waiting for you."""
     q = tmp_path / "q.pdf"
     q.write_bytes(b"%PDF question")
     pdf = tmp_path / "solved.pdf"
@@ -47,10 +47,15 @@ def semester(sessions, tmp_path):
         item(lab, "151704:6", "Lab 6", NOW + timedelta(days=2), submitted_file="l6.pdf")
         item(lab, "151704:4", "Lab 4", NOW - timedelta(days=9), deadline_passed=True)
         item(lab, "151704:P2", "Mid Term paper (60 Minutes)", NOW + timedelta(hours=21), kind="paper", term="Mid Term",
-             starts_at=NOW + timedelta(hours=20), submission_hidden=True)
+             starts_at=NOW + timedelta(hours=20), submission_hidden=True, paper_status="not_submitted")
         item(lab, "151704:P1", "Quiz paper", NOW - timedelta(days=3), kind="paper", term="Quiz",
              starts_at=NOW - timedelta(days=3, hours=1), deadline_passed=True, submission_hidden=True, marks="8/10",
-             question_path=str(q))
+             question_path=str(q), paper_status="submitted")
+        item(lab, "151704:P3", "Retake paper", NOW - timedelta(days=10), kind="paper", term="Retake",
+             starts_at=NOW - timedelta(days=10, hours=1), deadline_passed=True, submission_hidden=True,
+             paper_status="missed")
+        item(lab, "151704:P4", "Old paper", NOW - timedelta(days=20), kind="paper", term="Old",
+             starts_at=NOW - timedelta(days=20, hours=1), deadline_passed=True, submission_hidden=True)
         s.flush()
         job = Job(assignment=rec, revision=1, fingerprint="x", state=JobState.AWAITING_APPROVAL)
         s.add(job)
@@ -104,8 +109,8 @@ def test_assignment_categories(bot, semester):
 def test_lab_paper_categories_lists_and_item(bot, semester):
     out = text(say(bot, "menu", "2"))
     assert out.startswith("*Lab papers · all labs*")
-    for line in ["1. Upcoming (1)", "2. Open now (0)", "3. Starting in the next 48 hours (1)", "4. Finished (1)",
-                 "5. Submitted (0)", "6. Marked (1)", "7. All (2)"]:
+    for line in ["1. Upcoming (1)", "2. Open now (0)", "3. Starting in the next 48 hours (1)", "4. Finished (3)",
+                 "5. Submitted (1)", "6. Missed (no submission) (1)", "7. Marked (1)", "8. All (4)"]:
         assert line in out
     assert "approval" not in out.lower()
     upcoming = text(say(bot, "1"))
@@ -113,9 +118,17 @@ def test_lab_paper_categories_lists_and_item(bot, semester):
     item = text(say(bot, "1"))
     assert "Sun 11 Oct, 8:00 AM to 9:00 AM (starts in 20 h 0 min)" in item
     assert "Status: not started" in item and "Lab papers are tracked only" in item
-    finished = text(say(bot, "0", "0", "4", "1"))
-    assert "Status: the LMS does not show paper submissions" in finished and "Marks: 8/10" in finished
-    assert "1. Send the paper" in finished
+    # The LMS row colour: green submitted, red missed; a paper seen before colours were read is unknown
+    finished = text(say(bot, "0", "0", "4"))
+    assert "1. Quiz paper · CA Lab · Wed 7 Oct, 11:00 AM to 12:00 PM · 8/10" in finished
+    assert "2. Retake paper · CA Lab · Wed 30 Sep, 11:00 AM to 12:00 PM · missed" in finished
+    assert "3. Old paper · CA Lab · Sun 20 Sep, 11:00 AM to 12:00 PM · finished" in finished
+    quiz = text(say(bot, "1"))
+    assert "(ended)" in quiz and "Status: submitted" in quiz and "Marks: 8/10" in quiz
+    assert "1. Send the paper" in quiz
+    assert "Status: missed: the exam ended with no submission" in text(say(bot, "0", "2"))
+    assert "Status: finished; the LMS does not show whether you submitted" in text(say(bot, "0", "3"))
+    assert "Retake paper" in text(say(bot, "0", "0", "6")) and "Quiz paper" in text(say(bot, "0", "5"))
 
 
 def test_remaining_list_is_sorted_by_deadline_and_opens_an_item(bot, semester):

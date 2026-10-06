@@ -361,6 +361,7 @@ OSLAB = lms.Course(code="151869", name="Operating Systems Lab", lms_ref="MTUxODY
 
 
 def lab_paper(start, minutes=90, number=1, term="Mid Term", **kw):
+    kw.setdefault("paper_status", "not_submitted")  # a white row
     return paper(OSLAB, number, term, starts_at=start, deadline=start + timedelta(minutes=minutes),
                  submission_hidden=True, **kw)
 
@@ -439,6 +440,78 @@ def test_past_lab_papers_are_recorded_quietly(watcher, lmsfake, channel, session
     with sessions() as s:
         a = s.scalar(select(Assignment))
         assert (a.kind, a.submission_hidden, a.starts_at) == ("paper", True, old)
+
+
+def test_a_paper_that_turns_green_or_red_gets_one_message(lmsfake, sessions, channel, tmp_path):
+    start = datetime(2026, 10, 20, 14, 0, tzinfo=LMS_TZ)
+    clock = Clock(start + timedelta(minutes=1))
+    w = Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path, now=clock)
+    lmsfake.set(OSLAB)
+    lmsfake.papers[OSLAB.lms_ref] = [lab_paper(start), lab_paper(start, number=2, term="Final Term")]
+    w.poll_once()
+    assert len([m for m, _ in channel.sent if m.startswith("Lab paper open now")]) == 2
+
+    clock.at = start + timedelta(minutes=40)
+    lmsfake.papers[OSLAB.lms_ref] = [
+        lab_paper(start, paper_status="submitted"),
+        lab_paper(start, number=2, term="Final Term"),
+    ]
+    w.poll_once()
+    assert channel.sent[-1][0].splitlines() == [
+        "Lab paper submitted", "Operating Systems Lab", "Mid Term paper", "The LMS now shows your submission (green).",
+    ]
+    clock.at = start + timedelta(hours=2)
+    lmsfake.papers[OSLAB.lms_ref] = [
+        lab_paper(start, paper_status="submitted", deadline_passed=True),
+        lab_paper(start, number=2, term="Final Term", paper_status="missed", deadline_passed=True),
+    ]
+    w.poll_once()
+    assert channel.sent[-1][0].splitlines()[:3] == ["Lab paper missed", "Operating Systems Lab", "Final Term paper"]
+    sent = len(channel.sent)
+    w.poll_once()
+    assert len(channel.sent) == sent  # each once
+    with sessions() as s:
+        assert [a.paper_status for a in s.scalars(select(Assignment).order_by(Assignment.number))] == ["submitted", "missed"]
+
+
+def test_a_green_paper_gets_no_reminder_and_is_not_fetched(lmsfake, sessions, channel, tmp_path):
+    start = datetime(2026, 10, 20, 14, 0, tzinfo=LMS_TZ)
+    clock = Clock(start - timedelta(days=3))
+    w = Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path, now=clock)
+    lmsfake.set(OSLAB)
+    lmsfake.papers[OSLAB.lms_ref] = [lab_paper(start)]
+    w.poll_once()
+    lmsfake.papers[OSLAB.lms_ref] = [lab_paper(start, paper_status="submitted")]  # e.g. submitted on campus
+    w.poll_once()
+    assert channel.sent[-1][0].startswith("Lab paper submitted")
+    sent = len(channel.sent)
+    clock.at = start - timedelta(minutes=30)
+    assert w.poll_once().reminders == 0
+    assert w.next_wake() is None
+    clock.at = start + timedelta(seconds=15)
+    w.poll_once()
+    assert "download:151869:P1" not in lmsfake.calls
+    assert len(channel.sent) == sent
+
+
+def test_a_paper_first_seen_green_or_without_a_colour_is_quiet(watcher, lmsfake, channel, sessions):
+    old = datetime(2026, 3, 17, 12, 55, tzinfo=LMS_TZ)
+    lmsfake.set(OSLAB)
+    lmsfake.papers[OSLAB.lms_ref] = [lab_paper(old, minutes=60, deadline_passed=True, paper_status=None)]
+    watcher.poll_once()
+    # Rows saved before colours were read have none; their first colour is not news
+    lmsfake.papers[OSLAB.lms_ref] = [lab_paper(old, minutes=60, deadline_passed=True, paper_status="submitted")]
+    watcher.poll_once()
+    # Open now but already green: recorded, not fetched
+    lmsfake.papers[OSLAB.lms_ref].append(
+        lab_paper(datetime.now(LMS_TZ) - timedelta(minutes=5), number=2, paper_status="submitted"))
+    assert watcher.poll_once().skipped == 1
+    assert "download:151869:P2" not in lmsfake.calls
+    assert not [m for m, _ in channel.sent if "Lab paper" in m]
+    with sessions() as s:
+        assert [(a.paper_status, a.skipped_reason) for a in s.scalars(select(Assignment).order_by(Assignment.number))] == [
+            ("submitted", "Deadline passed"), ("submitted", "Already submitted on the LMS"),
+        ]
 
 
 def test_a_rescheduled_paper_is_announced_again(lmsfake, sessions, channel, tmp_path):

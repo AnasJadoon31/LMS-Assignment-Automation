@@ -23,7 +23,8 @@ Papers.php lists lab exam papers (only lab courses get them), with ten columns: 
 term (with its duration, e.g. "Mid Term (60 Minutes)"), paper file, remarks, your
 submission, marks, returned comments, returned submission, action, and the exam window:
 "Date: 17 March 2026", "Start Time: 12:55 pm", "End Time: 01:55 pm". The submission link
-reads Download.php?k=NA on past papers, so the LMS does not show whether one was made.
+reads Download.php?k=NA, so the file is never shown; the row colour says what happened:
+green (#90EE90) submitted, white not submitted, red the exam ended with no submission.
 No open paper has been seen yet; its Submit button is assumed to match the assignments'.
 
 Download links are Download.php?k=<base64 of
@@ -44,6 +45,7 @@ from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup, Tag
 
 from .errors import ContractBroken
+from .models import PAPER_MISSED, PAPER_NOT_SUBMITTED, PAPER_SUBMITTED
 
 LMS_TZ = ZoneInfo("Asia/Karachi")
 NO_ROWS = ("please select a course", "no assignment uploaded", "no paper uploaded", "no paper")
@@ -104,6 +106,7 @@ class AssignmentRow:
     term: str | None = None  # papers: "Mid Term", "Final Term"
     starts_at: datetime | None = None  # papers: when the exam window opens (deadline is when it closes)
     submission_hidden: bool = False  # papers: a submission link with no file (k=NA)
+    paper_status: str | None = None  # papers: from the row colour, None if it is not one of the three
 
     @property
     def deadline_passed(self) -> bool:
@@ -237,7 +240,41 @@ def _remarks(cell: Tag, layout: Layout) -> str | None:
     return None if not text or text.strip().lower() in ("no remarks", "---", "-") else text.strip()
 
 
-def _parse_row(soup: BeautifulSoup, cells: list[Tag], layout: Layout) -> AssignmentRow:
+COLOURS = {
+    "white": "ffffff", "green": "008000", "lightgreen": "90ee90", "palegreen": "98fb98", "lime": "00ff00",
+    "red": "ff0000", "lightcoral": "f08080", "salmon": "fa8072", "tomato": "ff6347", "pink": "ffc0cb",
+}
+BACKGROUND = re.compile(r"background(?:-color)?\s*:\s*(#[0-9a-f]{3,6}\b|rgba?\([^)]*\)|[a-z]+)", re.I)
+
+
+def _rgb(value: str) -> tuple[int, int, int] | None:
+    value = value.strip().lower()
+    value = "#" + COLOURS[value] if value in COLOURS else value
+    if m := re.fullmatch(r"#([0-9a-f]{3}|[0-9a-f]{6})", value):
+        digits = m[1] if len(m[1]) == 6 else "".join(c * 2 for c in m[1])
+        return int(digits[0:2], 16), int(digits[2:4], 16), int(digits[4:6], 16)
+    if m := re.fullmatch(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+).*\)", value):
+        return int(m[1]), int(m[2]), int(m[3])
+    return None
+
+
+def _paper_status(tr: Tag) -> str | None:
+    """Green row: submitted. White: not submitted. Red: the exam ended with no submission."""
+    m = BACKGROUND.search(tr.get("style") or "")
+    rgb = _rgb(m[1] if m else tr.get("bgcolor") or "")
+    if rgb is None:
+        return None
+    r, g, b = rgb
+    if min(rgb) >= 0xD0 and max(rgb) - min(rgb) <= 0x18:  # white or a light grey
+        return PAPER_NOT_SUBMITTED
+    if g > r and g >= b:
+        return PAPER_SUBMITTED
+    if r > g and r > b:
+        return PAPER_MISSED
+    return None
+
+
+def _parse_row(soup: BeautifulSoup, cells: list[Tag], layout: Layout, tr: Tag | None = None) -> AssignmentRow:
     question, submission, status, deadline = (
         cells[layout.question], cells[layout.submission], cells[layout.action], cells[layout.deadline]
     )
@@ -276,6 +313,7 @@ def _parse_row(soup: BeautifulSoup, cells: list[Tag], layout: Layout) -> Assignm
         term=term or None,
         starts_at=starts_at,
         submission_hidden=hidden,
+        paper_status=_paper_status(tr) if tr is not None and layout.term is not None else None,
     )
 
 
@@ -306,7 +344,7 @@ def parse_listing(html: str, layout: Layout) -> AssignmentsPage:
         if len(cells) == 1 and any(m in _text(cells[0]).lower() for m in NO_ROWS):
             continue
         if len(cells) >= layout.columns:
-            rows.append(_parse_row(soup, cells, layout))
+            rows.append(_parse_row(soup, cells, layout, tr))
         elif cells:
             raise ContractBroken(f"{layout.name.capitalize()} row has {len(cells)} cells, expected {layout.columns}")
 

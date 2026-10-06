@@ -87,6 +87,7 @@ def test_lab_paper_rows_have_an_exam_window():
     assert mid.question_file == "DBMS-lab----2-17032026-123230pm.pdf"
     assert mid.remarks is None and mid.marks is None
     assert mid.submission_file is None and mid.submission_hidden  # Download.php?k=NA
+    assert (mid.paper_status, final.paper_status, upcoming.paper_status) == ("submitted", "submitted", "not_submitted")
     assert final.title == "Final Term paper (Objective-2hours)" and final.remarks == "For BUMDC Only"
     assert (final.starts_at.hour, final.deadline.hour) == (12, 14)
     # An open paper (markup assumed from the assignments page)
@@ -94,6 +95,26 @@ def test_lab_paper_rows_have_an_exam_window():
     assert upcoming.starts_at == datetime(2026, 10, 20, 14, 0, tzinfo=LMS_TZ)
     assert not upcoming.deadline_passed
     assert parse_papers_page(EMPTY_PAPERS_HTML).rows == []
+
+
+@pytest.mark.parametrize("style, status", [
+    ('style="background: #90EE90"', "submitted"),  # what the LMS uses
+    ('style="background-color:lightgreen;"', "submitted"),
+    ('style="background: #FFFFFF"', "not_submitted"),
+    ('style="background:#fff"', "not_submitted"),
+    ('style="background: #FF7F7F"', "missed"),
+    ('style="background: rgb(255, 204, 203)"', "missed"),
+    ('bgcolor="red"', "missed"),
+    ('style="background: #337ab7"', None),  # not one of the three
+    ("", None),
+])
+def test_a_paper_row_colour_is_its_status(style, status):
+    row = PAPERS_HTML.replace('<tr style="background: #FFFFFF">', f"<tr {style}>")
+    assert parse_papers_page(row).rows[2].paper_status == status
+
+
+def test_assignment_rows_have_no_paper_status():
+    assert {r.paper_status for r in parse_assignments_page(ASSIGNMENTS_HTML).rows} == {None}
 
 
 def test_layouts_do_not_mix():

@@ -12,6 +12,8 @@ Rules (from the spec):
 - Lab exam papers (Papers.php, lab courses only) are tracked, never solved: one
   message when a paper is scheduled, reminders 24 h and 1 h before it starts, and the
   paper file the moment its window opens (the scheduler polls at the start time).
+  The row colour is the paper's status: green submitted, white not submitted, red
+  missed. A paper that turns green or red gets one message; either ends its reminders.
 - Every poll records what the LMS shows for each item (submitted file, open or
   closed, marks), sends "marks posted" when marks appear, and reminds you 24 hours
   and 2 hours before an assignment deadline that has nothing submitted.
@@ -46,7 +48,7 @@ from .db.models import (
 )
 from .kv import KeyValue
 from .lms import models as lms
-from .lms.models import PAPER
+from .lms.models import PAPER, PAPER_MISSED, PAPER_NOT_SUBMITTED, PAPER_SUBMITTED
 from .lms.adapter import LMSAdapter
 from .lms.bahria_pages import LMS_TZ
 from .lms.errors import BadCredentials, ContractBroken, LMSError, LoginError, ReloginPaused, SessionExpired
@@ -65,6 +67,8 @@ REMINDER_HOURS = (24, 2)  # before an assignment's deadline
 PAPER_REMINDER_HOURS = (24, 1)  # before a paper's start
 OPEN_RETRY = timedelta(seconds=60)  # while an open paper's file is not delivered yet
 LAB = re.compile(r"\blab\b", re.IGNORECASE)
+# Not green or red: a paper still waiting for you (assignments have no row colour)
+PAPER_PENDING = or_(Assignment.paper_status.is_(None), Assignment.paper_status == PAPER_NOT_SUBMITTED)
 
 
 @dataclass
@@ -251,6 +255,8 @@ class Watcher:
             result.marks_posted += 1
         if "deadline" in changes or "exam time" in changes:
             row.reminders = ""
+        if row.paper_status == PAPER_NOT_SUBMITTED and meta.paper_status in (PAPER_SUBMITTED, PAPER_MISSED):
+            self.outbox.queue(s, "paper", _paper_result(course.name, row.title, meta.paper_status))
         self._copy(row, meta)
         self._snapshot(row, meta)
         row.last_seen_at = self.now()
@@ -302,6 +308,7 @@ class Watcher:
     def _snapshot(self, row: Assignment, meta: lms.AssignmentMeta) -> None:
         row.submitted_file = meta.submitted_file
         row.submission_hidden = meta.submission_hidden
+        row.paper_status = meta.paper_status
         row.deadline_passed = meta.deadline_passed
         row.marks = meta.marks
         row.term = meta.term
@@ -310,7 +317,7 @@ class Watcher:
     def _crossed(self, row: Assignment) -> list[str]:
         """Reminder keys already due: assignments count down to the deadline ("24h", "2h"),
         papers to the start of the exam ("s24h", "s1h")."""
-        if row.deadline_passed or row.submitted_file:
+        if row.deadline_passed or row.submitted_file or row.paper_status in (PAPER_SUBMITTED, PAPER_MISSED):
             return []
         if row.kind == PAPER:
             if row.starts_at is None or row.starts_at <= self.now():
@@ -398,6 +405,7 @@ class Watcher:
                     Assignment.kind == PAPER,
                     Assignment.skipped_reason.is_(None),
                     Assignment.deadline_passed.is_(False),
+                    PAPER_PENDING,
                 )
             ).all()
             for a in papers:
@@ -445,6 +453,7 @@ class Watcher:
                     Assignment.kind == PAPER,
                     Assignment.skipped_reason.is_(None),
                     Assignment.deadline_passed.is_(False),
+                    PAPER_PENDING,
                     Assignment.opened_at.is_(None),
                     Assignment.starts_at.is_not(None),
                 )
@@ -466,6 +475,7 @@ class Watcher:
                     Assignment.deadline_passed.is_(False),
                     Assignment.submitted_file.is_(None),
                     Assignment.skipped_reason.is_(None),
+                    PAPER_PENDING,
                     or_(
                         and_(Assignment.kind != PAPER, Assignment.deadline.is_not(None), Assignment.deadline <= horizon),
                         and_(Assignment.kind == PAPER, Assignment.starts_at.is_not(None), Assignment.starts_at <= horizon),
@@ -515,7 +525,9 @@ class Watcher:
 def _skip_reason(meta: lms.AssignmentMeta, own: set[str]) -> str | None:
     if meta.submitted_file and meta.submitted_file not in own:
         return "Already submitted on the LMS, not by the service"
-    if meta.deadline_passed:
+    if meta.paper_status == PAPER_SUBMITTED:
+        return "Already submitted on the LMS"
+    if meta.deadline_passed or meta.paper_status == PAPER_MISSED:
         return "Deadline passed"
     return None
 
@@ -548,6 +560,12 @@ def _meta(a: Assignment) -> lms.AssignmentMeta:
         term=a.term,
         starts_at=a.starts_at,
     )
+
+
+def _paper_result(course: str, title: str, status: str) -> str:
+    if status == PAPER_SUBMITTED:
+        return f"Lab paper submitted\n{course}\n{title}\nThe LMS now shows your submission (green)."
+    return f"Lab paper missed\n{course}\n{title}\nThe LMS marks it red: the exam ended with no submission."
 
 
 def _pkt(dt: datetime) -> str:
