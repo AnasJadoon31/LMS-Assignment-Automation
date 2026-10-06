@@ -17,7 +17,8 @@ SUMMARY_SCHEMA = {
     "additionalProperties": False,
     "required": ["status", "kind", "number", "title", "course_code", "course_name", "exercises", "checked"],
     "properties": {
-        "status": {"type": "string", "enum": ["done", "blocked"]},
+        "status": {"type": "string", "enum": ["done", "handwritten", "blocked"],
+                   "description": "handwritten: the sheet asks for handwritten work; the report is the full solution for the student to copy."},
         "blocked_reason": {"type": "string", "description": "Why this cannot be done here, when status is blocked."},
         "kind": {"type": "string", "enum": ["lab", "assignment"]},
         "number": {"type": "integer", "description": "The lab or assignment number on the sheet."},
@@ -69,7 +70,8 @@ Rules:
 - Never type an output by hand; outputs come from running the code.
 - The student details are in the theme README; use them exactly as written there.
 - No internet except installing a Python package with pip.
-- If the work cannot be done here (it needs hardware, a group, a website login, handwriting, or a tool that cannot be installed), stop and give the reason with status blocked."""
+- If the sheet says the work must be handwritten, still solve all of it completely and build the report the same way, as the worked solution the student will copy by hand; finish with status handwritten.
+- If the work cannot be done here (it needs hardware, a group, a website login, or a tool that cannot be installed), stop and give the reason with status blocked."""
 
 
 @dataclass(frozen=True)
