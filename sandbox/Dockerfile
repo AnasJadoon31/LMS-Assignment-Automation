@@ -28,12 +28,12 @@ RUN pip install --break-system-packages --no-cache-dir \
         notebook nbclient nbformat ipykernel
 
 COPY lms_sandbox /opt/lms/lms_sandbox
+# Claude Code with every feature on ("essential traffic only" would turn off the Artifact tool
+# and feature flags). Only self-updates are off: the image pins the version.
 ENV PYTHONPATH=/opt/lms \
     MPLBACKEND=Agg \
     DISABLE_AUTOUPDATER=1 \
-    DISABLE_TELEMETRY=1 \
-    DISABLE_ERROR_REPORTING=1 \
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+    CLAUDE_CODE_ARTIFACT=1
 RUN printf '#!/bin/sh\nexec python3 -m lms_sandbox.notebook "$@"\n' > /usr/local/bin/lms-notebook \
     && chmod +x /usr/local/bin/lms-notebook \
     && useradd --create-home --uid 10001 solver \

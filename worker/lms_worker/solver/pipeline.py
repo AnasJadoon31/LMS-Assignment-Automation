@@ -204,7 +204,9 @@ class Solver:
             a = job.assignment
             work = self.job_dir(a, job) / "work"
             redo = bool(job.note) and job.summary is not None
-            resume = job.claude_session if job.claude_session and (work / "job.json").exists() else None
+            # A run that ended blocked starts over: its session has already concluded it cannot go on
+            blocked = job.summary is not None and json.loads(job.summary).get("status") == "blocked"
+            resume = job.claude_session if job.claude_session and (work / "job.json").exists() and not blocked else None
             if not resume:
                 if work.exists():
                     shutil.rmtree(work)
