@@ -1,7 +1,7 @@
 """Turn a report into a .docx laid out like the submitted Lab 5 report, then a PDF.
 
-Every size, colour and spacing below was measured from that report (see
-lms_worker/theme/README.md, "Report layout"); colours come from the theme's tokens.json.
+Every size and spacing below was measured from that report (see lms_worker/theme/README.md);
+every colour comes from the theme's tokens.json, exported from the theme artifact.
 Sizes are in Word units: twips (1/20 pt) for spacing and widths, half-points for font
 sizes, eighths of a point for borders, EMU for images.
 
@@ -43,8 +43,6 @@ PAGE_W, PAGE_H = 11906, 16838
 MARGIN_SIDE = 1220
 TEXT_W = PAGE_W - 2 * MARGIN_SIDE  # 9466
 SERIF, SANS, MONO = "Cambria", "Calibri", "Consolas"
-# Code colours of the submitted report (not in the theme tokens)
-CODE_COMMENT, CODE_STRING = "2E7D4F", "B3261E"
 COVER_LOGO = (Emu(2209800), Emu(1990725))
 HEADER_LOGO = (Emu(323850), Emu(295275))
 SHOT_W = Emu(5867400)
@@ -92,7 +90,7 @@ class Theme:
         tokens = json.loads((root / "tokens.json").read_text())
         meta = json.loads((root / "theme.json").read_text())
         colors = {t["name"]: _hex(t["value"]) for t in tokens["color"]["tokens"]}
-        missing = {"navy", "sky", "sky-soft", "gold", "ink", "muted", "rule", "paper"} - colors.keys()
+        missing = {"navy", "sky", "sky-soft", "gold", "ink", "muted", "rule", "paper", "code-comment", "code-string"} - colors.keys()
         if missing:
             raise ValueError(f"Theme tokens are missing {sorted(missing)}")
         return cls(colors=colors, version=int(meta.get("theme_version", 1)), logo=root / meta["logo"])
@@ -647,7 +645,8 @@ class Renderer:
                 d.run(p, text, font=MONO, size=17, color=color, bold=bold, italic=italic)
 
     def _code_lines(self, filename: str, source: str, highlight: bool) -> list[list[tuple]]:
-        ink, navy = self.t.colors["ink"], self.t.colors["navy"]
+        c = self.t.colors
+        ink, navy, comment, string = c["ink"], c["navy"], c["code-comment"], c["code-string"]
         source = source.expandtabs(4).rstrip("\n")
         try:
             lexer = get_lexer_for_filename(filename, stripnl=False, ensurenl=False) if highlight else None
@@ -659,9 +658,9 @@ class Renderer:
             if tok is None:
                 style = (ink, False, False)
             elif tok in String.Doc or tok in Comment:
-                style = (CODE_COMMENT, False, True)
+                style = (comment, False, True)
             elif tok in String:
-                style = (CODE_STRING, False, False)
+                style = (string, False, False)
             elif tok in Keyword or tok in Operator.Word or tok in Name.Builtin.Pseudo:
                 style = (navy, True, False)
             else:
