@@ -1,7 +1,7 @@
 # Run your own copy
 
 Each student runs their own copy of this app, on their own machine, with their own
-CMS login, their own WhatsApp bot number and (from step 3) their own Claude Pro token.
+CMS login, their own WhatsApp bot number and their own Claude Pro account.
 Nobody holds anyone else's password, and every submission is reviewed by the student
 whose name is on it. Run it only for your own account.
 
@@ -21,12 +21,18 @@ whose name is on it. Run it only for your own account.
 | Service | What it is | Reachable from |
 | --- | --- | --- |
 | `worker` | Logs in to CMS, polls the LMS, downloads question files and papers, sends notifications | inside the stack only |
-| `api` | Answers your WhatsApp messages through the numbered menu (the web UI joins it later) | inside the stack only |
+| `api` | Answers your WhatsApp messages through the numbered menu, and serves the setup page (`/setup`): sign Claude in, link WhatsApp | its domain (port 8000) |
 | `postgres` | Jobs, audit trail, encrypted LMS session; Evolution's tables in their own schema | inside the stack only |
 | `evolution-api` | WhatsApp gateway. The worker creates and links its instance | inside the stack only |
 | `redis` | Evolution API's cache | inside the stack only |
+| `docker-proxy` | Lets the worker start solver containers; only container and image calls | inside the stack only |
+| `egress` | The solver containers' only way out: Claude, claude.ai and PyPI | inside the stack only |
+| solver containers | One per assignment, from the `lms-solver` image: Claude Code solves it and builds the report from your theme artifact, then the container is removed | nothing; no network but `egress` |
 
-Nothing publishes a port. You link WhatsApp from the worker (now) or the web UI (later).
+Only the api gets a domain. Claude runs under your claude.ai login, kept in the
+`lms-claude-home` volume: a full login can read your theme artifact, which a setup token
+cannot. Sign in from the setup page; if the login ever expires, the bot tells you and
+links you there.
 
 ## Option A: any machine with Docker
 
@@ -36,8 +42,12 @@ cd LMS-Assignment-Automation
 scripts/init-env.sh            # creates .env with random secrets, readable only by you
 nano .env                      # fill in CMS_ENROLLMENT, CMS_PASSWORD, WHATSAPP_NUMBER
 docker compose up -d --build
+docker compose run --rm solver-login   # sign Claude in: open the link it prints, paste the code back
 docker compose logs -f worker  # watch the first poll
 ```
+
+Without a domain, sign Claude in with `solver-login` as above and link WhatsApp from the
+terminal (below). With one, use the setup page instead.
 
 `.env` holds your CMS password. It is git-ignored; never commit or share it.
 
@@ -45,13 +55,26 @@ docker compose logs -f worker  # watch the first poll
 
 1. Fork or push this repo to your GitHub, then in Coolify add it as a **Docker Compose** resource.
 2. In the resource's **Environment Variables**, set `CMS_ENROLLMENT`, `CMS_PASSWORD`,
-   `WHATSAPP_NUMBER` and three secrets: `POSTGRES_PASSWORD`, `APP_SECRET_KEY` and
-   `EVOLUTION_API_KEY`. Make each secret 48 random letters and digits, for example from
-   `openssl rand -hex 24`.
-3. Deploy. No domain is needed for any service.
+   `WHATSAPP_NUMBER`, `ADMIN_PASSWORD` (the setup page's password), `PUBLIC_URL` (the api's
+   address, e.g. `https://lms.example.com`) and three secrets: `POSTGRES_PASSWORD`,
+   `APP_SECRET_KEY` and `EVOLUTION_API_KEY`. Make each secret 48 random letters and digits,
+   for example from `openssl rand -hex 24`.
+3. Give the **api** service that domain (port 8000) in its **Domains** setting. No other
+   service needs one.
+4. Deploy. The first deploy also builds the `lms-solver` image, which takes a few minutes.
+5. Open `https://<your domain>/setup`, sign in with `ADMIN_PASSWORD`, then:
+   - **Sign in to Claude**: open the link it shows, sign in with your Claude account, and
+     paste the code that page shows back into the setup page.
+   - **WhatsApp**: link the bot phone with the QR code, or type the bot phone's number for a
+     pairing code (WhatsApp, **Linked devices**, **Link a device**, **Link with phone number
+     instead**).
 
-Commands below run in the worker's terminal: `docker compose exec worker <command>`, or
-the **Terminal** tab of the worker container in Coolify.
+The worker starts solver containers through Docker, so the stack mounts
+`/var/run/docker.sock` (read-only, behind `docker-proxy`). Coolify allows this.
+
+The commands below run in the worker's terminal: `docker compose exec worker <command>`,
+or the **Terminal** tab of the worker container in Coolify. You need them only without the
+setup page.
 
 ## Link the bot's WhatsApp
 

@@ -5,9 +5,10 @@ POST /api/webhooks/evolution   Evolution posts every incoming message here. The 
                                (WHATSAPP_NUMBER) gets answers; a message delivered twice
                                is answered once. Replies go out after the response.
 GET  /api/health               last poll, for Coolify's health check
+/setup                         the setup page: Claude sign-in and WhatsApp linking (web.py)
 
 On start it points the Evolution instance's webhook at itself (API_INTERNAL_URL) with
-the secret, retrying until Evolution is up. The web UI will be served here as well.
+the secret, retrying until Evolution is up.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import hashlib
 import hmac
 import json
 import logging
+import shutil
 import threading
 from contextlib import asynccontextmanager
 
@@ -24,11 +26,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .bot import Bot, Reply
+from .claude_login import ClaudeLogin
 from .config import Settings
 from .db.models import InboundMessage
 from .kv import KeyValue
 from .notify import EvolutionNotifier, Notifier, NotifyError
 from .watcher import HEARTBEAT_KEY
+from .web import setup_router
 from .whatsapp import EvolutionAdmin, WhatsAppError
 
 log = logging.getLogger(__name__)
@@ -52,6 +56,7 @@ def create_app(
     admin: EvolutionAdmin | None = None,
     internal_url: str = DEFAULT_INTERNAL_URL,
     register_webhook: bool = True,
+    login: ClaudeLogin | None = None,
 ) -> FastAPI:
     secret = webhook_secret(settings.app_secret_key or "")
     owner = settings.evolution.number if settings.evolution else None
@@ -60,6 +65,8 @@ def create_app(
         sender = EvolutionNotifier(settings.evolution)
     if admin is None and settings.evolution:
         admin = EvolutionAdmin(settings.evolution)
+    if login is None and shutil.which("claude"):
+        login = ClaudeLogin(settings.claude_home)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -71,6 +78,8 @@ def create_app(
         stop.set()
 
     app = FastAPI(title="LMS Assignment Automation", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.include_router(setup_router(password=settings.admin_password, secret_key=settings.app_secret_key or "",
+                                    login=login, admin=admin))
 
     @app.get("/api/health")
     def health() -> dict:

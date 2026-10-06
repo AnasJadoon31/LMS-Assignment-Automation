@@ -18,7 +18,9 @@ sed \
   -e "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(secret)/" \
   -e "s/^APP_SECRET_KEY=.*/APP_SECRET_KEY=$(secret)/" \
   -e "s/^EVOLUTION_API_KEY=.*/EVOLUTION_API_KEY=$(secret)/" \
+  -e "s/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=$(secret | cut -c1-20)/" \
   .env.example > .env
 
 echo "Created .env with new secrets (readable only by you)."
-echo "Now fill in CMS_ENROLLMENT, CMS_PASSWORD and WHATSAPP_NUMBER (or DISCORD_WEBHOOK_URL)."
+echo "The setup page's password is ADMIN_PASSWORD in .env."
+echo "Now fill in CMS_ENROLLMENT, CMS_PASSWORD, WHATSAPP_NUMBER (or DISCORD_WEBHOOK_URL) and PUBLIC_URL."

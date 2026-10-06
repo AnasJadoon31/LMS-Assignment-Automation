@@ -3,9 +3,11 @@
 # Values come from .env (plain Docker) or the resource's environment variables (Coolify).
 #
 # Only the worker talks to the LMS. The api answers your WhatsApp messages through the
-# menu. Nothing here publishes a port: Evolution API posts incoming messages to the api
-# inside the stack. The web UI (on the api, with a domain) and the solver sandbox join
-# in later build steps.
+# menu and serves the setup page (/setup): give it a domain (port 8000; on Coolify, in the
+# api service's Domains), open it, sign Claude in and link WhatsApp there. Nothing else is
+# reachable from outside. Each assignment is solved in a throwaway container from the
+# solver image, started through the Docker socket proxy, with the internet only through the
+# egress proxy's allowlist.
 
 services:
   worker:
@@ -24,12 +26,23 @@ services:
       - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-lms}
       - WHATSAPP_NUMBER=${WHATSAPP_NUMBER:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - PUBLIC_URL=${PUBLIC_URL:-}
+      # Solving: sandbox containers through the socket proxy, under the claude.ai login
+      - DOCKER_HOST=tcp://docker-proxy:2375
+      - SOLVER_IMAGE=lms-solver:latest
+      - SOLVER_NETWORK=lms-sandbox
+      - SOLVER_PROXY=http://egress:3128
       - TZ=Asia/Karachi
     volumes:
       - artifacts:/data
+      - claude-home:/claude-home
     depends_on:
       postgres:
         condition: service_healthy
+      docker-proxy:
+        condition: service_started
+      egress:
+        condition: service_started
 
   # Answers WhatsApp messages through the numbered menu; same image as the worker
   api:
@@ -44,9 +57,13 @@ services:
       - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-lms}
       - WHATSAPP_NUMBER=${WHATSAPP_NUMBER:-}
       - API_INTERNAL_URL=http://api:8000
+      # The setup page's password; the page is closed without one
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
+      - PUBLIC_URL=${PUBLIC_URL:-}
       - TZ=Asia/Karachi
     volumes:
       - artifacts:/data:ro
+      - claude-home:/claude-home
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
       interval: 15s
@@ -129,14 +146,30 @@ services:
       timeout: 3s
       retries: 20
 
-  # One-time login for the solver: Claude Code signs in to your claude.ai account (it prints a
-  # link to open in any browser) and keeps the login in the claude-home volume. A full login,
-  # unlike a setup token, can read the theme artifact.
-  #   docker compose run --rm solver-login
-  #   docker compose run --rm solver-login claude auth status --text
-  solver-login:
+  # Starts solver containers for the worker. Only container and image calls are allowed.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.3.0
+    restart: unless-stopped
+    environment:
+      - CONTAINERS=1
+      - IMAGES=1
+      - POST=1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # The solver image (built here, so every deploy builds it) runs the sandbox's only way out:
+  # an HTTPS proxy that lets through Claude, claude.ai (the theme artifact) and PyPI.
+  egress:
     build: ./sandbox
-    image: lms-solver
+    image: lms-solver:latest
+    restart: unless-stopped
+    command: ["python3", "-m", "lms_sandbox.egress"]
+    networks: [default, sandbox]
+
+  # Optional: sign Claude in from a terminal instead of the setup page
+  #   docker compose run --rm solver-login
+  solver-login:
+    image: lms-solver:latest
     profiles: ["tools"]
     command: ["claude", "auth", "login", "--claudeai"]
     volumes:
@@ -149,5 +182,12 @@ volumes:
   artifacts:
   evolution_instances:
   evolution_redis:
+  # The claude.ai login: the api signs in here, solver containers mount it as their home
   claude-home:
     name: lms-claude-home
+
+networks:
+  # Solver containers: no route out except the egress proxy
+  sandbox:
+    name: lms-sandbox
+    internal: true

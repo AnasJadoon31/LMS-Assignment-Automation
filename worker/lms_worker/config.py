@@ -70,6 +70,9 @@ class Settings:
     data_dir: Path = Path("./data")
     evolution: EvolutionConfig | None = None
     discord_webhook_url: str | None = field(default=None, repr=False)
+    admin_password: str | None = field(default=None, repr=False)  # the setup page's password
+    claude_home: Path = Path("/claude-home")  # the claude.ai login the solver runs under
+    public_url: str | None = None  # where the setup page is reachable, for links in alerts
 
 
 def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
@@ -108,4 +111,7 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         data_dir=Path(os.environ.get("DATA_DIR", "./data")),
         evolution=evolution,
         discord_webhook_url=discord,
+        admin_password=os.environ.get("ADMIN_PASSWORD") or None,
+        claude_home=Path(os.environ.get("CLAUDE_HOME", "/claude-home")),
+        public_url=(os.environ.get("PUBLIC_URL") or "").rstrip("/") or None,
     )
