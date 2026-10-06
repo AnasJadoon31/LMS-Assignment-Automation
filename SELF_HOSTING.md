@@ -8,7 +8,8 @@ whose name is on it. Run it only for your own account.
 ## What you need
 
 - A machine that stays on, with Docker: a VPS (one in Pakistan gives the LMS a local
-  address), a home PC, or a laptop that is usually on. About 2 GB of free RAM and 5 GB of disk.
+  address), a home PC, or a laptop that is usually on. About 6 GB of RAM (a solver run may use
+  up to 4 GB) and 20 GB of free disk (the images take about 8 GB).
 - Your CMS enrollment and password. Institute and role default to Karachi Campus and
   Student; set `CMS_INSTITUTE` and `CMS_ROLE` if yours differ (they must match the CMS
   login form's dropdowns exactly).
@@ -42,11 +43,11 @@ cd LMS-Assignment-Automation
 scripts/init-env.sh            # creates .env with random secrets, readable only by you
 nano .env                      # fill in CMS_ENROLLMENT, CMS_PASSWORD, WHATSAPP_NUMBER
 docker compose up -d --build
-docker compose run --rm solver-login   # sign Claude in: open the link it prints, paste the code back
+docker compose exec worker env HOME=/claude-home claude auth login --claudeai   # sign Claude in: open the link, paste the code back
 docker compose logs -f worker  # watch the first poll
 ```
 
-Without a domain, sign Claude in with `solver-login` as above and link WhatsApp from the
+Without a domain, sign Claude in from the terminal as above and link WhatsApp from the
 terminal (below). With one, use the setup page instead.
 
 `.env` holds your CMS password. It is git-ignored; never commit or share it.

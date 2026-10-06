@@ -18,6 +18,7 @@ import os
 log = logging.getLogger(__name__)
 
 DEFAULT_ALLOW = ("anthropic.com", "*.anthropic.com", "claude.ai", "*.claude.ai", "claude.com", "*.claude.com",
+                 "claudeusercontent.com", "*.claudeusercontent.com",  # artifact files
                  "pypi.org", "files.pythonhosted.org")
 
 

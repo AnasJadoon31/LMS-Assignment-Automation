@@ -5,7 +5,7 @@ through the Docker socket proxy. The work folder goes in and comes back as tar a
 host paths are shared. Claude runs under your claude.ai login, kept in a
 Docker volume mounted as the solver's home: a full login, unlike a setup token, can read the
 theme artifact, and the volume keeps the refreshed login between runs. Log in once with
-`docker compose run --rm -it solver-login`. The container's only network is the sandbox
+the setup page (/setup). The container's only network is the sandbox
 network, whose way out is the egress proxy. Limits: 2 CPUs, 4 GB memory, 512 processes and
 the run's time limit.
 
@@ -224,14 +224,28 @@ def _find_network(client, name: str) -> str:
 
 
 def _own_volume(client, destination: str) -> str | None:
-    """The volume mounted at destination in this container (the worker's own login volume)."""
+    """The volume mounted at destination in this container (the worker's own login volume),
+    else in this stack's worker or api container, found by their compose labels."""
     import socket
 
-    try:
-        me = client.containers.get(socket.gethostname())
-    except Exception:
+    def mounted(container) -> str | None:
+        for m in container.attrs.get("Mounts") or []:
+            if m.get("Type") == "volume" and m.get("Destination") == destination:
+                return m.get("Name")
         return None
-    for m in me.attrs.get("Mounts") or []:
-        if m.get("Type") == "volume" and m.get("Destination") == destination:
-            return m.get("Name")
+
+    try:
+        found = mounted(client.containers.get(socket.gethostname()))
+        if found:
+            return found
+    except Exception:
+        pass
+    try:
+        for service in ("worker", "api"):
+            for c in client.containers.list(filters={"label": f"com.docker.compose.service={service}"}):
+                found = mounted(c)
+                if found:
+                    return found
+    except Exception:
+        pass
     return None

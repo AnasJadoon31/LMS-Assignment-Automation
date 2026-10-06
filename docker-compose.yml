@@ -61,6 +61,7 @@ services:
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-}
       - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-lms}
       - WHATSAPP_NUMBER=${WHATSAPP_NUMBER:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - API_INTERNAL_URL=http://api:8000
       # The setup page's password; the page is closed without one
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
@@ -174,23 +175,13 @@ services:
     command: ["python3", "-m", "lms_sandbox.egress"]
     networks: [default, sandbox]
 
-  # Optional: sign Claude in from a terminal instead of the setup page
-  #   docker compose run --rm solver-login
-  solver-login:
-    image: lms-solver:latest
-    profiles: ["tools"]
-    command: ["claude", "auth", "login", "--claudeai"]
-    volumes:
-      - claude-home:/home/solver
-    stdin_open: true
-    tty: true
-
 volumes:
   pgdata:
   artifacts:
   evolution_instances:
   evolution_redis:
-  # The claude.ai login: the api signs in here, solver containers mount it as their home
+  # The claude.ai login: the setup page signs in here, solver containers mount it as their home.
+  # Without a domain: docker compose exec worker env HOME=/claude-home claude auth login --claudeai
   claude-home:
     name: lms-claude-home
 
