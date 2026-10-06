@@ -1,0 +1,60 @@
+<!-- @dsCard group="Report" height=420 width=794 subtitle="A drawn graph: the answer path in navy and gold" -->
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400&display=swap">
+<style>
+  body { margin: 0; background: var(--paper); font-family: var(--font-sans); }
+  .wrap { width: 794px; padding: 24px 0 8px; }
+  svg { display: block; margin: 0 auto; font-family: "DejaVu Sans", var(--font-sans); }
+  .e { stroke: var(--edge); stroke-width: 1.6; fill: none; marker-end: url(#a); }
+  .p { stroke: var(--navy); stroke-width: 4; fill: none; marker-end: url(#ap); }
+  .n circle { fill: var(--sky); stroke: var(--navy); stroke-width: 2; }
+  .n text { fill: var(--navy); }
+  .n.on circle { fill: var(--navy); stroke: var(--gold); stroke-width: 4; }
+  .n.on text { fill: var(--paper); }
+  .n text { font-size: 20px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
+  .w { font-size: 15px; fill: var(--ink); text-anchor: middle; }
+  .w.on { fill: var(--navy); font-weight: 700; }
+  .h { font-size: 13px; fill: var(--muted); text-anchor: middle; }
+  .cap { font-size: 12px; font-style: italic; color: var(--muted); text-align: center; margin: 6px 0 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <svg width="520" height="250" viewBox="0 0 520 250" aria-label="Route graph">
+    <defs>
+      <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" style="fill: var(--edge)"/></marker>
+      <marker id="ap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="4" markerHeight="4" orient="auto"><path d="M0,0 L10,5 L0,10 z" style="fill: var(--navy)"/></marker>
+    </defs>
+    <!-- S(40,125) A(150,45) B(150,125) C(150,205) D(260,125) E(260,205) F(370,125) G(480,125) -->
+    <line class="e" x1="58" y1="112" x2="131" y2="58"/><text class="w" x="88" y="76">6</text>
+    <line class="e" x1="62" y1="125" x2="126" y2="125"/><text class="w" x="94" y="117">2</text>
+    <line class="p" x1="58" y1="139" x2="128" y2="190"/><text class="w on" x="84" y="178">1</text>
+    <line class="e" x1="168" y1="58" x2="240" y2="111"/><text class="w" x="212" y="78">3</text>
+    <line class="e" x1="172" y1="50" x2="456" y2="119"/><text class="w" x="318" y="80">20</text>
+    <line class="e" x1="172" y1="125" x2="236" y2="125"/><text class="w" x="204" y="117">2</text>
+    <line class="e" x1="168" y1="138" x2="240" y2="191"/><text class="w" x="214" y="150">6</text>
+    <line class="e" x1="150" y1="183" x2="150" y2="149"/><text class="w" x="138" y="170">3</text>
+    <line class="e" x1="172" y1="205" x2="236" y2="205"/><text class="w" x="204" y="222">6</text>
+    <line class="p" x1="171" y1="197" x2="344" y2="134"/><text class="w on" x="306" y="148">4</text>
+    <line class="e" x1="282" y1="125" x2="346" y2="125"/><text class="w" x="314" y="117">5</text>
+    <line class="e" x1="281" y1="197" x2="456" y2="134"/><text class="w" x="388" y="180">2</text>
+    <line class="p" x1="393" y1="125" x2="450" y2="125"/><text class="w on" x="422" y="145">1</text>
+    <g class="n on"><circle cx="40" cy="125" r="20"/><text x="40" y="125">S</text></g>
+    <g class="n"><circle cx="150" cy="45" r="20"/><text x="150" y="45">A</text></g>
+    <g class="n"><circle cx="150" cy="125" r="20"/><text x="150" y="125">B</text></g>
+    <g class="n on"><circle cx="150" cy="205" r="20"/><text x="150" y="205">C</text></g>
+    <g class="n"><circle cx="260" cy="125" r="20"/><text x="260" y="125">D</text></g>
+    <g class="n"><circle cx="260" cy="205" r="20"/><text x="260" y="205">E</text></g>
+    <g class="n on"><circle cx="370" cy="125" r="20"/><text x="370" y="125">F</text></g>
+    <g class="n on"><circle cx="480" cy="125" r="20"/><text x="480" y="125">G</text></g>
+    <text class="h" x="40" y="95">h=6</text><text class="h" x="150" y="16">h=8</text><text class="h" x="128" y="98">h=6</text>
+    <text class="h" x="150" y="244">h=5</text><text class="h" x="262" y="160">h=4</text><text class="h" x="260" y="244">h=2</text>
+    <text class="h" x="370" y="160">h=1</text><text class="h" x="480" y="160">h=0</text>
+  </svg>
+  <p class="cap">Figure 2: Route graph redrawn from the lab sheet. The thick path S, C, F, G is the one found by A*.</p>
+</div>
+</body>
+</html>

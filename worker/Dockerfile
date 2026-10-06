@@ -1,14 +1,5 @@
-# Worker: LMS adapter (Playwright + Chromium), poller, notifier, report renderer.
+# Worker: LMS adapter (Playwright + Chromium), poller, notifier, solver jobs.
 FROM mcr.microsoft.com/playwright/python:v1.56.0-noble
-
-# LibreOffice turns the .docx into a PDF. Carlito and Caladea have the same metrics as
-# Calibri and Cambria, so lines break as in Word; put licensed Calibri, Cambria and
-# Consolas .ttf files in worker/fonts/ to use the real ones.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libreoffice-writer-nogui fonts-crosextra-carlito fonts-crosextra-caladea fonts-dejavu-core \
-    && rm -rf /var/lib/apt/lists/*
-COPY fonts/ /usr/share/fonts/truetype/local/
-RUN fc-cache -f > /dev/null
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \

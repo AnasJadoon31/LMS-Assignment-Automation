@@ -1,0 +1,87 @@
+<!-- @dsCard group="Report" height=1123 width=794 subtitle="The first page of an exercise" -->
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caladea:wght@400;700&family=Carlito:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+  /* A4 at 96 px per inch: 794 x 1123; 1 pt = 1.333 px */
+  body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--font-sans); font-size: 14.67px; }
+  .page { position: relative; width: 794px; height: 1123px; background: var(--paper); box-sizing: border-box; padding: 100px 81px 80px; }
+  header { position: absolute; left: 81px; right: 81px; top: 37px; display: flex; align-items: flex-end; gap: 8px;
+           padding-bottom: 8px; border-bottom: 2px solid var(--navy); }
+  header img { width: 34px; }
+  header .t { font-family: var(--font-serif); font-weight: 700; font-size: 13.33px; color: var(--navy); }
+  header .c { margin-left: auto; font-size: 12px; color: var(--muted); white-space: pre; }
+  footer { position: absolute; left: 81px; right: 81px; bottom: 35px; display: flex; padding-top: 8px;
+           border-top: 3px solid var(--gold); font-size: 12px; color: var(--muted); white-space: pre; }
+  footer b { margin-left: auto; color: var(--navy); }
+  .banner { display: grid; grid-template-columns: 100px 1fr; border-bottom: 4px solid var(--gold); }
+  .banner .n { background: var(--navy); text-align: center; padding: 6px 9px; }
+  .banner .n small { display: block; font-size: 10px; font-weight: 700; letter-spacing: .267em; color: var(--sky); }
+  .banner .n strong { font-family: var(--font-serif); font-size: 29.33px; color: var(--paper); }
+  .banner .t { background: var(--sky); padding: 8px 9px 8px 17px; }
+  .banner h1 { font-family: var(--font-serif); font-size: 22.67px; color: var(--navy); margin: 0 0 1px; }
+  .banner .tag { font-size: 12px; letter-spacing: .111em; text-transform: uppercase; color: var(--muted); }
+  .box { margin-top: 11px; display: grid; grid-template-columns: 100px 1fr; border: 1px solid var(--rule); }
+  .box > div { border: 1px solid var(--rule); padding: 7px 11px 7px 17px; line-height: 1.21; display: flex; align-items: center; }
+  .box .l { justify-content: center; padding: 6px 9px; font-size: 11.33px; font-weight: 700; letter-spacing: .176em; }
+  .box .task { background: var(--navy); color: var(--paper); }
+  .box .res { background: var(--gold); color: var(--ink); }
+  .box .ans { font-size: 16px; font-weight: 700; color: var(--navy); margin-left: 6px; }
+  h2 { font-family: var(--font-serif); font-size: 17.33px; color: var(--navy); margin: 20px 0 7px; padding-bottom: 4px; border-bottom: 1px solid var(--rule); }
+  p { margin: 0 0 9px; line-height: 1.25; }
+  .grid { margin: 0 auto; border-collapse: collapse; }
+  .grid td { width: 84px; height: 54px; padding: 7px 5px; text-align: center; border: 2px solid var(--paper); }
+  .grid strong { display: block; font-family: var(--font-serif); font-size: 22.67px; }
+  .grid small { font-size: 12px; }
+  .grid .d { background: var(--navy); } .grid .d strong { color: var(--paper); } .grid .d small { color: var(--sky); }
+  .grid .s { background: var(--sky); } .grid .s strong { color: var(--navy); } .grid .s small { color: var(--muted); }
+  .cap { font-size: 12px; font-style: italic; color: var(--muted); text-align: center; margin: 5px 0 11px; }
+  .data { margin: 0 auto; width: 567px; border-collapse: collapse; text-align: center; font-size: 14px; }
+  .data th { background: var(--navy); color: var(--paper); font-size: 11.33px; letter-spacing: .118em; text-transform: uppercase;
+             padding: 6px 9px; border: 1px solid var(--navy); }
+  .data td { padding: 5px 9px; border: 1px solid var(--rule); }
+  .data td:first-child { font-weight: 700; }
+  .data tr:nth-child(odd) td { background: var(--sky-soft); }
+  .data tr.hit td { background: var(--sky); color: var(--navy); font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="page">
+  <header><img src="../../assets/Logos/bahria-university.png" alt=""><span class="t">Bahria University Karachi Campus</span><span class="c">CSL-411 Artificial Intelligence  |  Lab 05</span></header>
+
+  <div class="banner">
+    <div class="n"><small>EXERCISE</small><strong>01</strong></div>
+    <div class="t"><h1>Greedy Best First Search</h1><span class="tag">Greedy Search</span></div>
+  </div>
+  <div class="box">
+    <div class="l task">TASK</div><div>Write a Python program that performs greedy best first search algorithm for the given graph having starting node S and goal node G.</div>
+    <div class="l res">RESULT</div><div>The search reaches the goal through <span class="ans">S → A → B → F → G</span></div>
+  </div>
+
+  <h2>Given Graph</h2>
+  <p>The lab sheet gives only the table of heuristic values and no edges. So I treated the table as a grid, where every cell is connected to the cell above, below, left and right of it (no diagonal moves).</p>
+  <table class="grid">
+    <tr><td class="d"><strong>S</strong><small>h = 3</small></td><td class="d"><strong>A</strong><small>h = 5</small></td><td class="d"><strong>B</strong><small>h = 1</small></td></tr>
+    <tr><td class="s"><strong>D</strong><small>h = 9</small></td><td class="s"><strong>E</strong><small>h = 6</small></td><td class="d"><strong>F</strong><small>h = 4</small></td></tr>
+    <tr><td class="s"><strong>I</strong><small>h = 12</small></td><td class="s"><strong>O</strong><small>h = 2</small></td><td class="d"><strong>G</strong><small>h = 0</small></td></tr>
+  </table>
+  <p class="cap">Figure 1: Heuristic grid from the lab sheet. Dark cells show the path found by greedy search.</p>
+
+  <h2>How It Works</h2>
+  <p>Greedy best first search only looks at h(n). At every step it expands the node in the queue with the smallest heuristic value and ignores the cost travelled so far.</p>
+  <table class="data">
+    <tr><th>Step</th><th>Expanded</th><th>h(n)</th><th>Added to queue</th><th>Next pick</th></tr>
+    <tr><td>1</td><td>S</td><td>3</td><td>A (5), D (9)</td><td>A</td></tr>
+    <tr><td>2</td><td>A</td><td>5</td><td>B (1), E (6)</td><td>B</td></tr>
+    <tr><td>3</td><td>B</td><td>1</td><td>F (4)</td><td>F</td></tr>
+    <tr><td>4</td><td>F</td><td>4</td><td>E (6), G (0)</td><td>G</td></tr>
+    <tr class="hit"><td>5</td><td>G</td><td>0</td><td>Goal reached</td><td>Stop</td></tr>
+  </table>
+  <p class="cap">Table 1: Dry run of greedy best first search from S to G.</p>
+
+  <footer>{{STUDENT_NAME}}  |  {{ENROLLMENT}}  |  {{CLASS}}<b>Page 1</b></footer>
+</div>
+</body>
+</html>
