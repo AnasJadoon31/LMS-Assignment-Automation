@@ -1,16 +1,36 @@
 # LMS Assignment Automation
 
-Watches the Bahria LMS, solves new assignments with Claude Code (headless, on your
-Pro plan) in a sandbox, renders them on the assignment theme, and uploads them after
-approval. The design is in the tech spec; this repo is being built in the spec's order.
+Watches the Bahria LMS, solves new assignments with Claude Code on your Claude Pro plan,
+builds the report in your theme, sends you the PDF, and uploads it after your approval.
+The design is in the tech spec.
 
 | Step | Status |
 | --- | --- |
-| 1. Spike: CMS login, LMS mapping, `list_assignments()` | Done, except upload (see below) |
+| 1. Spike: CMS login, LMS mapping, `list_assignments()` | Done |
 | 2. Watcher: poller, fingerprints, database, notifier | Done: WhatsApp and Discord, lab papers, marks, reminders |
-| 3. Solver and renderer | Next |
-| 4. Submitter | Not started; upload form mapped |
-| 5. Web UI and auto mode | Not started |
+| 3. Solver | Done: one Claude run per assignment in a sandbox container; usage limits; Google Drive |
+| 4. Submitter | Done: uploads the PDF through the LMS Submit form after approval; not yet tried on a live assignment |
+| 5. Setup page and auto mode | Done: `/setup` signs Claude in, links WhatsApp, connects Drive; auto mode per course |
+
+## How an assignment is solved
+
+1. The worker downloads the question file and sends it to you.
+2. For a course in approve or auto mode, it starts a throwaway container from the `lms-solver`
+   image and runs Claude Code once, under your claude.ai login. Claude reads your theme
+   artifact (the "Anas Assignment Theme" design system) with its Artifact tool, solves the
+   sheet (programs are run for real output; theory gets diagrams), builds `report.docx` in
+   the theme, converts it to PDF, looks at every page and fixes what is off.
+3. The docx and PDF are kept as `Assignment 01 - <title>` and saved to
+   **University Assignments/<semester>/<course>/** on your Google Drive.
+4. The PDF comes to you on WhatsApp. Approve it from the menu and the worker uploads it; in
+   auto mode it uploads straight away. Handwritten work is solved in full and sent to you to
+   copy, never uploaded. Work that cannot be done here (hardware, group work) stops with the reason.
+
+Claude Pro limits: solving pauses when a usage window passes 80% (`SOLVER_PAUSE_AT`) or the
+limit is hit, never draws paid extra usage, and runs at most 6 times a day
+(`SOLVER_DAILY_CAP`). A stopped run resumes the same Claude session after the reset. If a
+deadline falls inside a pause, you get a warning. If Claude's login expires, the bot links
+you to the setup page to sign in again.
 
 ## Run it
 
@@ -18,21 +38,20 @@ Each student runs their own copy: see **[SELF_HOSTING.md](SELF_HOSTING.md)**. In
 
 ```sh
 scripts/init-env.sh                 # .env with random secrets; then fill in your CMS login and WhatsApp number
-docker compose up -d --build        # worker, api, PostgreSQL, Evolution API (WhatsApp), Redis; no public ports
-docker compose exec worker lms-worker whatsapp link --number <bot number>   # or without --number for a QR code
-docker compose exec worker lms-worker notify-test
+docker compose up -d --build        # worker, api, PostgreSQL, Evolution API, Redis, egress; builds lms-solver
+# then open https://<api domain>/setup: sign in to Claude, link WhatsApp, connect Google Drive
 ```
 
-The same `docker-compose.yml` deploys on Coolify as a Docker Compose resource.
+The same `docker-compose.yml` deploys on Coolify as a Docker Compose resource; give the api
+service a domain and set `PUBLIC_URL` to it.
 
 ## How WhatsApp is wired
 
 Evolution API runs inside the stack and is reachable only by the worker, at
 `EVOLUTION_API_URL` (default `http://evolution-api:8080`) with `EVOLUTION_API_KEY`, both from the
 environment. The worker owns the WhatsApp instance: it creates it on first use, links it by QR code
-or by phone-number pairing code, and sends through it to `WHATSAPP_NUMBER`. The web UI will offer
-the same QR and phone-number linking on its WhatsApp page, through the same code
-(`lms_worker/whatsapp.py`). Your replies reach the app through an Evolution webhook to the api
+or by phone-number pairing code, and sends through it to `WHATSAPP_NUMBER`. The setup page offers
+the same QR and phone-number linking, through the same code (`lms_worker/whatsapp.py`). Your replies reach the app through an Evolution webhook to the api
 service, also inside the stack: the api registers it at start, with a secret header derived from
 `APP_SECRET_KEY`, and answers only `WHATSAPP_NUMBER`.
 
@@ -82,8 +101,8 @@ note, and History. Approve, Reject and switching a course to auto ask 1. Yes / 2
   A lost session logs in again through CMS; 2 rejected logins or a CAPTCHA pause that and alert you.
   An unreachable LMS backs off 5, 15, then 60 minutes and alerts after 3 failed polls.
 - **Never loses a message.** Messages go through an outbox in PostgreSQL, one row per channel, retried until
-  delivered. WhatsApp and Discord deliver independently. Discord webhooks are one-way, so approvals will
-  happen on WhatsApp and the web UI.
+  delivered. WhatsApp and Discord deliver independently. Discord webhooks are one-way, so approvals
+  happen on WhatsApp.
 
 ## Worker setup
 
@@ -103,7 +122,8 @@ the failed-login counter and any spike recordings. With it, they live in Postgre
 
 | Command | What it does |
 | --- | --- |
-| `lms-worker run` | Polls on schedule until stopped; the worker container's command |
+| `lms-worker run` | Polls on schedule and solves until stopped; the worker container's command |
+| `lms-worker solve` | Solves the next waiting assignment now and prints the outcome |
 | `lms-worker api` | Answers WhatsApp messages through the menu; the api container's command |
 | `lms-worker poll` | Runs one poll now and prints what it found |
 | `lms-worker status` | Last poll, pauses, login state and recent jobs |
@@ -137,4 +157,5 @@ the failed-login counter and any spike recordings. With it, they live in Postgre
 - **Upload** is a multipart POST to `includes/studentprocess.php?s=assignmentSubmissionAdd` with `assignmentID`,
   `offeredCourseID`, `ocID`, `studentID` and `assignmentSubmissionFile` (.pdf .doc .docx .xls .xlsx .zip,
   no special symbols in the name). **A submitted assignment shows Delete, not a re-upload**, so a correction
-  means deleting the old file and then submitting again. Delete is a plain GET link, and the poller never follows it.
+  means deleting the old file and then submitting again. Delete is a plain GET link; nothing in the service
+  follows it. The service uploads only to a row showing Submit, and only after your approval.

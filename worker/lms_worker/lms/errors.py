@@ -30,3 +30,11 @@ class SessionExpired(LMSError):
 class ReloginPaused(SessionExpired):
     """Automatic re-login is paused after repeated failures or a CAPTCHA.
     Needs a pasted session or a manual Retry."""
+
+
+class AlreadySubmitted(LMSError):
+    """The row already shows a submission; the service never deletes one to upload again."""
+
+    def __init__(self, filename: str | None):
+        super().__init__(f"The LMS already shows a submission ({filename or 'unnamed'})")
+        self.filename = filename

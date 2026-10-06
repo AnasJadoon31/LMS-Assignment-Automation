@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -15,6 +16,7 @@ from ..kv import FileKV
 from .bahria_pages import AssignmentRow, b64_id, parse_assignments_page, parse_papers_page
 from .cms_login import login
 from .errors import (
+    AlreadySubmitted,
     BadCredentials,
     CaptchaRequired,
     ContractBroken,
@@ -30,6 +32,8 @@ from .session import USER_AGENT, SessionStore, Throttle, lms_cookies, session_is
 ASSIGNMENTS = "Assignments.php"
 PAPERS = "Papers.php"
 PAGES = {ASSIGNMENT: (ASSIGNMENTS, parse_assignments_page), PAPER: (PAPERS, parse_papers_page)}
+SUBMIT_ACTION = re.compile(r"includes/studentprocess\.php\?s=assignmentSubmissionAdd")
+UPLOAD_TYPES = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip"}
 
 
 class BahriaAdapter:
@@ -131,10 +135,35 @@ class BahriaAdapter:
         return [path]
 
     def submit(self, a: AssignmentMeta, file: Path) -> Receipt:
-        raise NotImplementedError(
-            "Upload form not mapped: it only appears on an assignment before its deadline. "
-            "Record one with `lms-worker record` when a course posts an open assignment."
-        )
+        """Upload file through the row's Submit form, then read the row back to confirm.
+
+        Only an open row with nothing submitted: a row showing Delete raises AlreadySubmitted,
+        since the service never deletes a submission. Papers are never uploaded."""
+        if a.kind != ASSIGNMENT:
+            raise LMSError("Only assignments are uploaded; lab papers never are")
+        if file.suffix.lower() not in UPLOAD_TYPES:
+            raise LMSError(f"The LMS takes {', '.join(sorted(UPLOAD_TYPES))}, not {file.suffix}")
+        row = self._row(a)
+        if row.action == "delete":
+            raise AlreadySubmitted(row.submission_file)
+        if row.action != "submit":
+            raise LMSError(f"{a.title} is not open for submission ({row.action})")
+        form = row.submit_form
+        if form is None or not SUBMIT_ACTION.fullmatch(form.action):
+            raise ContractBroken(f"The Submit form for {a.title} changed: {form.action if form else 'missing'}")
+        self.throttle.wait()
+        r = self._client().post(form.action, data=dict(form.fields),
+                                files={form.file_field: (upload_name(file), file.read_bytes(), _mime(file))})
+        if r.is_redirect:
+            target = urljoin(str(r.url), r.headers.get("location", ""))
+            if urlsplit(target).hostname != self.settings.urls.lms_host:
+                raise SessionExpired(f"The upload was redirected to {target}; the session ended")
+        elif r.status_code >= 400:
+            raise LMSError(f"The LMS answered the upload with HTTP {r.status_code}")
+        after = self._row(a)
+        if not after.submission_file:
+            raise LMSError("The LMS does not show the file after the upload")
+        return Receipt(filename=after.submission_file, submitted_at=datetime.now(timezone.utc))
 
     def submission_status(self, a: AssignmentMeta) -> SubmissionStatus:
         row = self._row(a)
@@ -205,3 +234,16 @@ class BahriaAdapter:
 def _attachment_name(r: httpx.Response) -> str | None:
     m = re.search(r'filename="?([^";]+)"?', r.headers.get("content-disposition", ""))
     return m.group(1) if m else None
+
+
+def upload_name(file: Path) -> str:
+    """The LMS refuses special symbols in file names: 'Assignment 01 - Sorting.pdf' -> 'Assignment_01_Sorting.pdf'."""
+    stem = re.sub(r"[^A-Za-z0-9]+", "_", file.stem).strip("_")[:80] or "submission"
+    return stem + file.suffix.lower()
+
+
+def _mime(file: Path) -> str:
+    return {".pdf": "application/pdf", ".zip": "application/zip", ".doc": "application/msword",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".xls": "application/vnd.ms-excel",
+            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}[file.suffix.lower()]

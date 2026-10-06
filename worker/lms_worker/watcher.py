@@ -51,7 +51,7 @@ from .lms import models as lms
 from .lms.models import PAPER, PAPER_MISSED, PAPER_NOT_SUBMITTED, PAPER_SUBMITTED
 from .lms.adapter import LMSAdapter
 from .lms.bahria_pages import LMS_TZ
-from .lms.errors import BadCredentials, ContractBroken, LMSError, LoginError, ReloginPaused, SessionExpired
+from .lms.errors import AlreadySubmitted, BadCredentials, ContractBroken, LMSError, LoginError, ReloginPaused, SessionExpired
 
 log = logging.getLogger(__name__)
 
@@ -401,8 +401,9 @@ class Watcher:
     # --- uploads ---
 
     def _submit_pending(self, result: PollResult) -> None:
-        """Approved and auto-mode reports go up as their PDF. Until the LMS upload form is mapped,
-        the PDF comes back to you to upload yourself."""
+        """Approved and auto-mode reports go up as their PDF, through the row's Submit form. The
+        LMS then shows the file, which is recorded as the service's own. An adapter that cannot
+        upload sends the PDF back to you to upload yourself."""
         with self.sessions() as s:
             jobs = s.scalars(
                 select(Job).where(Job.state == JobState.SUBMITTING).order_by(Job.id).with_for_update(skip_locked=True)
@@ -418,16 +419,25 @@ class Watcher:
                 else:
                     try:
                         receipt = self.adapter.submit(_meta(a), pdf)
+                    except AlreadySubmitted as e:
+                        if job.attempts and e.filename:  # an earlier try went through before it could be confirmed
+                            receipt = lms.Receipt(filename=e.filename, submitted_at=self.now())
+                        else:
+                            self._stop(s, job, "The LMS already shows a submission; the service never replaces one")
+                            s.commit()
+                            continue
                     except NotImplementedError:
-                        job.last_error = "Automatic upload is not set up yet"
-                        self._transition(s, job, JobState.NEEDS_HUMAN, "upload form not mapped; PDF sent to upload by hand")
+                        job.last_error = "Automatic upload is not available"
+                        self._transition(s, job, JobState.NEEDS_HUMAN, "no automatic upload; PDF sent to upload by hand")
                         self.outbox.queue(
                             s, "upload",
                             f"Upload this yourself: {a.course.name} · {a.title}\n"
                             + (f"Due {_pkt(a.deadline)}\n" if a.deadline else "")
-                            + "Automatic upload is not set up yet: the LMS upload form is not mapped.",
+                            + "Automatic upload is not available here.",
                             file=pdf, job_id=job.id,
                         )
+                        s.commit()
+                        continue
                     except (ContractBroken, SessionExpired, httpx.HTTPError):
                         s.commit()
                         raise
@@ -437,16 +447,23 @@ class Watcher:
                         result.errors.append(f"{a.title}: upload failed: {e}")
                         if job.attempts >= DOWNLOAD_ALERT_AFTER:
                             self._stop(s, job, f"The upload failed {job.attempts} times: {e}")
-                    else:
-                        job.lms_submission_file = receipt.filename
-                        data = receipt.screenshot.read_bytes()
-                        s.add(Artifact(job=job, kind="receipt", path=str(receipt.screenshot),
-                                       sha256=hashlib.sha256(data).hexdigest(), size=len(data)))
-                        self._transition(s, job, JobState.CONFIRMED, f"uploaded as {receipt.filename}")
-                        self.outbox.queue(s, "receipt", f"Uploaded: {a.course.name} · {a.title}\nThe LMS shows {receipt.filename}.",
-                                          file=receipt.screenshot, job_id=job.id)
-                        result.uploaded += 1
+                        s.commit()
+                        continue
+                    self._confirm(s, job, receipt)
+                    result.uploaded += 1
                 s.commit()
+
+    def _confirm(self, s: Session, job: Job, receipt: lms.Receipt) -> None:
+        a = job.assignment
+        job.lms_submission_file = receipt.filename
+        job.last_error = None
+        if receipt.screenshot is not None:
+            data = receipt.screenshot.read_bytes()
+            s.add(Artifact(job=job, kind="receipt", path=str(receipt.screenshot),
+                           sha256=hashlib.sha256(data).hexdigest(), size=len(data)))
+        self._transition(s, job, JobState.CONFIRMED, f"uploaded as {receipt.filename}")
+        self.outbox.queue(s, "receipt", f"Uploaded: {a.course.name} · {a.title}\nThe LMS shows {receipt.filename}.",
+                          file=receipt.screenshot, job_id=job.id)
 
     def _announce_papers(self, result: PollResult) -> None:
         """A scheduled paper gets one message; when its window opens, the paper file follows."""

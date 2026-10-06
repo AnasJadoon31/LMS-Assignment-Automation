@@ -6,8 +6,11 @@ LMS (localhost): the link sets PHPSESSID; the dashboard redirects to CMS without
 
 from __future__ import annotations
 
+import base64
 import re
 import threading
+from email.parser import BytesParser
+from email.policy import default
 from dataclasses import dataclass, field
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +47,8 @@ class PortalState:
     dashboard_link: str = '<a href="{lms}/sso.php?token=t0k3n" target="_blank">LMS</a>'
     posts: list[dict] = field(default_factory=list)
     lms_requests: list[str] = field(default_factory=list)
+    uploads: list[dict] = field(default_factory=list)  # Submit form posts to the LMS
+    uploaded: str | None = None  # the file name the LMS shows on row 3 after an upload
 
     @property
     def cms(self) -> str:
@@ -54,9 +59,16 @@ class PortalState:
         return f"http://localhost:{self.lms_port}"
 
 
-def assignments_page(oc: str | None) -> str:
-    """The fixture course (MTAwMDAy) has three assignments; any other course has none."""
+def assignments_page(oc: str | None, uploaded: str | None = None) -> str:
+    """The fixture course (MTAwMDAy) has three assignments; any other course has none.
+    After an upload, row 3 shows the file and a Delete button, as the LMS does."""
     html = ASSIGNMENTS_HTML if oc == "MTAwMDAy" else EMPTY_ASSIGNMENTS_HTML
+    if uploaded and oc == "MTAwMDAy":
+        key = base64.b64encode(f"100001,2026-10-06,AssignmentSubmissions,0,{uploaded},x".encode()).decode()
+        html = html.replace("<td>No Submission </td>",
+                            f'<td> <a href="Download.php?k={key}" class="label label-info">Submission</a></td>')
+        html = re.sub(r'data-target="#modal-assignment-solution-3"(.*?)Submit</div>',
+                      r'data-target="#modal-delete-assignment-submission-3"\1Delete</div>', html, flags=re.S)
     html = re.sub(r'(<option value="MTAw[^"]*")\s*selected', r"\1", html)
     if oc:
         html = html.replace(f'<option value="{oc}"', f'<option value="{oc}" selected')
@@ -99,6 +111,27 @@ def _handler(portal: PortalState, site: str):
             self.end_headers()
             self.wfile.write(data)
 
+        def _upload(self, body: bytes):
+            path = urlsplit(self.path)
+            portal.lms_requests.append(path.path + "?" + path.query)
+            if self._cookies().get("PHPSESSID") != "good":
+                return self._send(302, headers={"Location": f"{portal.cms}/"})
+            if path.path != "/Student/includes/studentprocess.php" or path.query != "s=assignmentSubmissionAdd":
+                return self._send(404, "not found")
+            msg = BytesParser(policy=default).parsebytes(
+                f"Content-Type: {self.headers['Content-Type']}\r\n\r\n".encode() + body)
+            fields, file = {}, None
+            for part in msg.iter_parts():
+                name = part.get_param("name", header="content-disposition")
+                if part.get_filename():
+                    file = {"field": name, "filename": part.get_filename(), "data": part.get_payload(decode=True),
+                            "type": part.get_content_type()}
+                else:
+                    fields[name] = part.get_content()
+            portal.uploads.append({"fields": fields, "file": file})
+            portal.uploaded = f"02-000000-001-100002{file['filename']}"
+            return self._send(302, headers={"Location": "/Student/Assignments.php?msg=added"})
+
         def _login_page(self, alert: str = ""):
             html = LOGIN_HTML.replace("{{ALERT}}", alert).replace(
                 "{{CAPTCHA}}", CAPTCHA_HTML if portal.captcha else ""
@@ -136,13 +169,15 @@ def _handler(portal: PortalState, site: str):
                     return self._send_file(QUESTION_PDF, "Lab-2-Q-25092026-105052pm.pdf")
                 if path == "/Student/Papers.php":
                     return self._send(200, papers_page(query.get("oc", [None])[0]))
-                return self._send(200, assignments_page(query.get("oc", [None])[0]))
+                return self._send(200, assignments_page(query.get("oc", [None])[0], portal.uploaded))
             if path == "/Student/Hop.php":
                 return self._send(302, headers={"Location": "/Student/Dashboard.php"})
             return self._send(404, "not found")
 
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
+            if site == "lms":
+                return self._upload(self.rfile.read(length))
             form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode(), keep_blank_values=True).items()}
             portal.posts.append(form)
             ok = (

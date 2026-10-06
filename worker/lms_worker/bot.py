@@ -211,6 +211,7 @@ class Bot:
         if action in ("approve", "reject") and job.state != JobState.AWAITING_APPROVAL:
             return f"Nothing changed: {a.title} is {JOB_WORDS.get(job.state, job.state)} now."
         if action == "approve":
+            job.attempts = 0  # counts upload tries from here
             self._move(s, job, JobState.SUBMITTING, "approved on WhatsApp")
             self.kv.set(POLL_NOW_KEY, self.now().isoformat())  # the worker uploads within seconds
             return f"Approved: {a.title}. Uploading now; the LMS receipt will follow."

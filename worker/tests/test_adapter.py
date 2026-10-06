@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from lms_worker.lms.bahria import BahriaAdapter
-from lms_worker.lms.errors import BadCredentials, ReloginPaused, SessionExpired
+from lms_worker.lms.bahria import BahriaAdapter, upload_name
+from lms_worker.lms.errors import AlreadySubmitted, BadCredentials, LMSError, ReloginPaused, SessionExpired
 from lms_worker.lms.session import Throttle, session_is_valid
 
 from .conftest import make_settings
@@ -145,11 +145,33 @@ def test_poller_never_requests_submit_or_delete_endpoints(portal, urls, tmp_path
     assert not [p for p in portal.lms_requests if "studentprocess" in p]
 
 
-def test_submit_is_not_built_yet(portal, urls, tmp_path):
+def test_submit_uploads_through_the_form_and_reads_the_row_back(portal, urls, tmp_path):
+    pdf = tmp_path / "Assignment 01 - Recurrence Relations.pdf"
+    pdf.write_bytes(b"%PDF solved")
     with logged_in(urls, tmp_path) as adapter:
-        a = adapter.list_assignments(adapter.list_courses()[0])[2]
-        with pytest.raises(NotImplementedError):
-            adapter.submit(a, tmp_path / "x.pdf")
+        lab = adapter.list_courses()[0]
+        a = adapter.list_assignments(lab)[2]
+        receipt = adapter.submit(a, pdf)
+        assert receipt.filename == "02-000000-001-100002Assignment_01_Recurrence_Relations.pdf"
+        assert adapter.submission_status(a).submitted
+        with pytest.raises(AlreadySubmitted) as e:  # never a second upload over the first
+            adapter.submit(a, pdf)
+        assert e.value.filename == receipt.filename
+        with pytest.raises(AlreadySubmitted):
+            adapter.submit(adapter.list_assignments(lab)[1], pdf)  # submitted by you: left alone
+        with pytest.raises(LMSError, match="not open"):
+            adapter.submit(adapter.list_assignments(lab)[0], pdf)  # closed
+    [upload] = portal.uploads
+    assert upload["fields"] == {"assignmentID": "MjMwMzY4", "offeredCourseID": "MTAwMDAy", "ocID": "MTAwMDAy",
+                                "studentID": "MTAwMDAx"}
+    assert upload["file"] == {"field": "assignmentSubmissionFile", "filename": "Assignment_01_Recurrence_Relations.pdf",
+                              "data": b"%PDF solved", "type": "application/pdf"}
+    assert [p for p in portal.lms_requests if "studentprocess" in p] == [
+        "/Student/includes/studentprocess.php?s=assignmentSubmissionAdd"]  # never Delete
+
+
+def test_upload_names_have_no_special_symbols():
+    assert upload_name(Path("Lab 05 - Pipelining & Hazards (v2).PDF")) == "Lab_05_Pipelining_Hazards_v2.pdf"
 
 
 def test_list_papers(portal, urls, tmp_path):

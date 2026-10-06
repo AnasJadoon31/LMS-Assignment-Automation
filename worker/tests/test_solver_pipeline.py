@@ -10,6 +10,7 @@ from lms_worker.db import Artifact, Assignment, Course, Event, Job, JobState
 from lms_worker.kv import DbKV
 from lms_worker.lms import models as lms
 from lms_worker.lms.bahria_pages import LMS_TZ
+from lms_worker.lms.errors import AlreadySubmitted
 from lms_worker.notify import Outbox
 from lms_worker.solver.claude import rate_limit
 from lms_worker.solver.pipeline import CONTINUE, SIGNED_OUT_KEY, Solver, report_name
@@ -179,7 +180,7 @@ def test_a_solved_assignment_comes_to_you_for_approval(solver, sandbox, drive, c
         arts = {a.kind: Path(a.path).name for a in job.artifacts}
         assert arts == {"question": "DAA-Assignment-01.pdf", "docx": "Assignment 01 - Recurrence Relations.docx",
                         "pdf": "Assignment 01 - Recurrence Relations.pdf"}
-        assert (job.claude_session, job.cost_tokens, job.cost_usd, job.attempts) == ("sess-1", 1400, 1.5, 1)
+        assert (job.claude_session, job.cost_tokens, job.cost_usd, job.attempts) == ("sess-1", 1400, 1.5, 0)
         assert json.loads(job.summary)["pages"] == 7
     assert drive.saved == [(["University Assignments", "Fall-2026", "Design & Analysis of Algorithms",
                              "Assignment 01 - Recurrence Relations"],
@@ -228,7 +229,7 @@ def test_auto_mode_uploads_through_the_poller(solver, sandbox, channel, sessions
                                 "receipt.png")
 
 
-def test_until_the_upload_form_is_mapped_the_pdf_comes_back_to_upload_by_hand(sessions, channel, tmp_path):
+def test_without_an_upload_the_pdf_comes_back_to_upload_by_hand(sessions, channel, tmp_path):
     job_id = add_job(sessions, tmp_path, state=JobState.SUBMITTING, fingerprint=LISTED.fingerprint())
     pdf = tmp_path / "Assignment 01 - Recurrence Relations.pdf"
     pdf.write_bytes(b"%PDF")
@@ -237,7 +238,7 @@ def test_until_the_upload_form_is_mapped_the_pdf_comes_back_to_upload_by_hand(se
 
     class Unmapped(FakeLMS):
         def submit(self, a, file):
-            raise NotImplementedError("Upload form not mapped")
+            raise NotImplementedError("no upload")
 
     fake = Unmapped()
     fake.set(DAA, LISTED)
@@ -406,3 +407,25 @@ def test_report_names():
     a = Assignment(number="3", title="Lab 3: Pipelining")
     assert report_name({"kind": "lab", "number": 5, "title": "Pipelining / Hazards"}, a) == "Lab 05 - Pipelining Hazards"
     assert report_name({"kind": "assignment", "title": ""}, a) == "Assignment 03 - Lab 3 Pipelining"
+
+
+@pytest.mark.parametrize("attempts, expected", [(1, "CONFIRMED"), (0, "NEEDS_HUMAN")])
+def test_a_submission_already_there_counts_as_ours_only_after_our_own_try(sessions, channel, tmp_path, attempts, expected):
+    job_id = add_job(sessions, tmp_path, state=JobState.SUBMITTING, fingerprint=LISTED.fingerprint())
+    pdf = tmp_path / "Assignment 01 - Recurrence Relations.pdf"
+    pdf.write_bytes(b"%PDF")
+    with sessions.begin() as s:
+        s.add(Artifact(job_id=job_id, kind="pdf", path=str(pdf), sha256="0" * 64, size=4))
+        s.get(Job, job_id).attempts = attempts  # 1: an earlier upload timed out before the LMS was read back
+
+    class Lagging(FakeLMS):
+        def submit(self, a, file):
+            raise AlreadySubmitted("Assignment_01.pdf")
+
+    fake = Lagging()
+    fake.set(DAA, LISTED)
+    Watcher(fake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data", now=Clock(NOW)).poll_once()
+    with sessions() as s:
+        job = s.get(Job, job_id)
+        assert job.state == expected
+        assert job.lms_submission_file == ("Assignment_01.pdf" if expected == "CONFIRMED" else None)

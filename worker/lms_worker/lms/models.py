@@ -72,9 +72,9 @@ class AssignmentMeta:
 
 @dataclass(frozen=True)
 class Receipt:
-    filename: str
+    filename: str  # as the LMS shows it after the upload
     submitted_at: datetime
-    screenshot: Path
+    screenshot: Path | None = None
 
 
 @dataclass(frozen=True)

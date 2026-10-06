@@ -295,6 +295,7 @@ class Solver:
             name = report_name(summary, a)
             files = self._store(s, job, work.parent, name, pdf, docx)
             job.last_error = None
+            job.attempts = 0  # from here on, attempts count uploads
             handwritten = summary.get("status") == "handwritten"
             if handwritten:
                 to, status = JobState.HANDWRITTEN, "handwritten"
