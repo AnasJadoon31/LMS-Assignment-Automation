@@ -8,6 +8,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from lms_worker.claude_login import ClaudeLogin, LoginError
+from lms_worker.kv import FileKV
+from lms_worker.notify import NotifyError, WhatsAppNumber
 from lms_worker.web import COOKIE, session_cookie, session_valid, setup_router
 from lms_worker.whatsapp import LinkChallenge, LinkState
 
@@ -66,10 +68,10 @@ class StubAdmin:
         self.linked = False
 
 
-def client(tmp_path, claude_bin=None, password=PASSWORD, admin=None):
+def client(tmp_path, claude_bin=None, password=PASSWORD, admin=None, **parts):
     login = ClaudeLogin(tmp_path / "home", binary=str(claude_bin)) if claude_bin else None
     app = FastAPI()
-    app.include_router(setup_router(password=password, secret_key=KEY, login=login, admin=admin or StubAdmin()))
+    app.include_router(setup_router(password=password, secret_key=KEY, login=login, admin=admin or StubAdmin(), **parts))
     return TestClient(app, base_url="https://lms.example.com")
 
 
@@ -150,3 +152,45 @@ def test_whatsapp_linking_from_the_page(tmp_path):
     admin.linked = True
     assert c.get("/api/setup/status", headers=h).json()["whatsapp"]["name"] == "LMS Bot"
     assert c.post("/api/setup/whatsapp/unlink", headers=h, json={}).json() == {"ok": True}
+
+
+class Phone:
+    """Stands in for the WhatsApp sender; it sends to whatever number is saved, as the real one does."""
+
+    def __init__(self, number):
+        self.number, self.sent = number, []
+
+    def text(self, message):
+        if not self.number.get():
+            raise NotifyError("WhatsApp has no number to send to")
+        self.sent.append((self.number.get(), message))
+
+
+def test_the_number_messages_go_to_is_saved_on_the_page(tmp_path):
+    number = WhatsAppNumber(FileKV(tmp_path / "kv"))
+    phone = Phone(number)
+    c = signed_in(client(tmp_path, whatsapp=number, sender=phone))
+    h = {"X-LMS": "1"}
+    assert "Messages go to" in c.get("/setup").text
+    assert c.get("/api/setup/status", headers=h).json()["whatsapp"]["send_to"] is None
+    assert c.post("/api/setup/whatsapp/test", headers=h, json={}).status_code == 502  # nowhere to send yet
+    for bad in ("", "12345", "0300 1234567"):  # too short, or no country code
+        assert c.post("/api/setup/whatsapp/number", headers=h, json={"number": bad}).status_code == 400
+    r = c.post("/api/setup/whatsapp/number", headers=h, json={"number": "+92 300 1234567"})
+    assert r.json() == {"ok": True, "number": "923001234567"}
+    w = c.get("/api/setup/status", headers=h).json()["whatsapp"]
+    assert (w["send_to"], w["send_to_source"]) == ("923001234567", "page")
+    assert c.post("/api/setup/whatsapp/test", headers=h, json={}).json() == {"ok": True}
+    assert phone.sent[0][0] == "923001234567"
+    assert c.post("/api/setup/whatsapp/number/remove", headers=h, json={}).json() == {"ok": True}
+    assert c.get("/api/setup/status", headers=h).json()["whatsapp"]["send_to"] is None
+    assert c.post("/api/setup/whatsapp/number", json={"number": "923001234567"}).status_code == 403  # no X-LMS header
+
+
+def test_a_saved_number_wins_over_the_variable(tmp_path):
+    number = WhatsAppNumber(FileKV(tmp_path / "kv"), "923001234567")
+    assert (number.get(), number.source()) == ("923001234567", "env")
+    number.save("923119999999")
+    assert (number.get(), number.source()) == ("923119999999", "page")
+    number.remove()
+    assert (number.get(), number.source()) == ("923001234567", "env")

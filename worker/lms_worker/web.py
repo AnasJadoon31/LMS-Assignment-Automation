@@ -8,6 +8,9 @@ POST /api/setup/claude/code         {code}: the code the sign-in page shows
 POST /api/setup/whatsapp/link       {number?}: a QR code, or a pairing code for that number
 GET  /api/setup/whatsapp/qr         the current QR code (they rotate)
 POST /api/setup/whatsapp/unlink
+POST /api/setup/whatsapp/number     {number}: your own number, which messages go to
+POST /api/setup/whatsapp/number/remove
+POST /api/setup/whatsapp/test       a test message to that number
 GET  /setup/google/start            go to Google to connect Drive (drive.file only)
 GET  /setup/google/callback         Google comes back here
 POST /api/setup/google/disconnect
@@ -36,7 +39,7 @@ from pydantic import BaseModel
 
 from .claude_login import ClaudeLogin, LoginError
 from .gdrive import CALLBACK, DriveError, GoogleDrive
-from .notify import DiscordSetting, NotifyError, masked
+from .notify import DiscordSetting, Notifier, NotifyError, WhatsAppNumber, masked
 from .whatsapp import EvolutionAdmin, WhatsAppError
 
 COOKIE = "lms_session"
@@ -92,7 +95,8 @@ class Number(BaseModel):
 
 def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | None, admin: EvolutionAdmin | None,
                  drive: GoogleDrive | None = None, discord: DiscordSetting | None = None, public_url: str | None = None,
-                 clock=time.time, auth: Auth | None = None) -> APIRouter:
+                 clock=time.time, auth: Auth | None = None, whatsapp: WhatsAppNumber | None = None,
+                 sender: Notifier | None = None) -> APIRouter:
     router = APIRouter()
     auth = auth or Auth(password, secret_key, clock)
     failures: dict[str, list[float]] = defaultdict(list)
@@ -163,6 +167,8 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
                                    "name": st.name}
             except WhatsAppError as e:
                 out["whatsapp"] = {"available": True, "state": "unreachable", "linked": False, "detail": str(e)}
+        if whatsapp is not None:
+            out["whatsapp"].update(send_to=whatsapp.get(), send_to_source=whatsapp.source())
         if drive is None:
             out["drive"] = {"available": False, "detail": "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET"}
         else:
@@ -298,6 +304,36 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
             raise HTTPException(status_code=502, detail=str(e))
         return {"ok": True}
 
+    def _whatsapp() -> WhatsAppNumber:
+        if whatsapp is None:
+            raise HTTPException(status_code=503, detail="WhatsApp is not available here")
+        return whatsapp
+
+    @router.post("/api/setup/whatsapp/number")
+    def whatsapp_number_save(request: Request, body: Number) -> dict:
+        guard(request)
+        try:
+            return {"ok": True, "number": _whatsapp().save(body.number or "")}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @router.post("/api/setup/whatsapp/number/remove")
+    def whatsapp_number_remove(request: Request) -> dict:
+        guard(request)
+        _whatsapp().remove()
+        return {"ok": True}
+
+    @router.post("/api/setup/whatsapp/test")
+    def whatsapp_test(request: Request) -> dict:
+        guard(request)
+        if sender is None:
+            raise HTTPException(status_code=503, detail="WhatsApp is not configured")
+        try:
+            sender.text("Test message from LMS Assignment Automation. WhatsApp notifications work.")
+        except NotifyError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        return {"ok": True}
+
     return router
 
 
@@ -423,6 +459,13 @@ SETUP_BODY = """
   </div>
   <div class="row"><button class="secondary" id="w-unlink" hidden>Unlink</button></div>
   <div class="err" id="w-err"></div>
+  <div class="step">
+    <div>Messages go to: <span class="state" id="t-state">checking…</span></div>
+    <div class="muted" id="t-detail"></div>
+    <div class="row"><input id="t-number" inputmode="numeric" autocomplete="off" placeholder="Your own number, e.g. 923001234567"><button id="t-save">Save</button></div>
+    <div class="row"><button class="secondary" id="t-test" hidden>Send a test message</button><button class="secondary" id="t-remove" hidden>Remove</button></div>
+    <div class="err" id="t-err"></div>
+  </div>
 </div>
 <div class="card" id="drive">
   <h2>Google Drive</h2>
@@ -461,6 +504,12 @@ async function refresh() {
   $("w-detail").textContent = w.linked ? [w.name, w.number].filter(Boolean).join(" · ") : (w.detail || "");
   $("w-unlink").hidden = !w.linked;
   if (w.linked) { $("w-step").hidden = true; clearInterval(qrTimer); }
+  $("t-state").textContent = w.send_to ? "+" + w.send_to : "not set";
+  $("t-state").className = "state " + (w.send_to ? "ok" : "bad");
+  $("t-detail").textContent = w.send_to ? (w.send_to_source === "env" ? "From WHATSAPP_NUMBER" : "Saved here") + " · the bot answers only this number"
+    : "Your own WhatsApp number, country code first. The bot sends to it and answers only it.";
+  $("t-test").hidden = !w.send_to || !w.linked; $("t-remove").hidden = w.send_to_source !== "page";
+  $("t-save").textContent = w.send_to ? "Replace" : "Save";
   const g = s.drive || {};
   $("g-state").textContent = !g.available ? "not configured" : g.connected ? "connected" : "not connected";
   $("g-state").className = "state " + (g.connected ? "ok" : "bad");
@@ -508,6 +557,20 @@ $("w-qr").onclick = () => link(null);
 $("w-pair").onclick = () => link($("w-number").value);
 $("w-unlink").onclick = async () => { if (!confirm("Unlink the bot's WhatsApp?")) return;
   try { await call("/api/setup/whatsapp/unlink", {}); await refresh(); } catch (e) { $("w-err").textContent = e.message; } };
+$("t-save").onclick = async () => {
+  $("t-err").textContent = ""; busy($("t-save"), true);
+  try { await call("/api/setup/whatsapp/number", { number: $("t-number").value }); $("t-number").value = ""; await refresh(); }
+  catch (e) { $("t-err").textContent = e.message; }
+  busy($("t-save"), false);
+};
+$("t-test").onclick = async () => {
+  $("t-err").textContent = ""; busy($("t-test"), true);
+  try { await call("/api/setup/whatsapp/test", {}); $("t-detail").textContent = $("t-detail").textContent.replace(/ · test message sent$/, "") + " · test message sent"; }
+  catch (e) { $("t-err").textContent = e.message; }
+  busy($("t-test"), false);
+};
+$("t-remove").onclick = async () => { if (!confirm("Stop sending WhatsApp messages to this number?")) return;
+  try { await call("/api/setup/whatsapp/number/remove", {}); await refresh(); } catch (e) { $("t-err").textContent = e.message; } };
 $("d-save").onclick = async () => {
   $("d-err").textContent = ""; busy($("d-save"), true);
   try { await call("/api/setup/discord", { url: $("d-url").value }); $("d-url").value = "";

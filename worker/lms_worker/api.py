@@ -2,7 +2,7 @@
 
 POST /api/webhooks/evolution   Evolution posts every incoming message here. The request
                                must carry the shared secret header; only your own number
-                               (WHATSAPP_NUMBER) gets answers; a message delivered twice
+                               (saved on the setup page, or WHATSAPP_NUMBER) gets answers; a message delivered twice
                                is answered once. Replies go out after the response.
 GET  /api/health               last poll, for Coolify's health check
 /setup                         the setup page: Claude sign-in and WhatsApp linking (web.py)
@@ -31,7 +31,7 @@ from .gdrive import GoogleDrive
 from .config import Settings
 from .db.models import InboundMessage
 from .kv import KeyValue, SecretBox
-from .notify import DiscordSetting, EvolutionNotifier, Notifier, NotifyError
+from .notify import DiscordSetting, EvolutionNotifier, Notifier, NotifyError, WhatsAppNumber
 from .watcher import HEARTBEAT_KEY
 from .dashboard import dashboard_router
 from .web import Auth, setup_router
@@ -61,11 +61,13 @@ def create_app(
     login: ClaudeLogin | None = None,
     drive: GoogleDrive | None = None,
     discord: DiscordSetting | None = None,
+    whatsapp: WhatsAppNumber | None = None,
 ) -> FastAPI:
     secret = webhook_secret(settings.app_secret_key or "")
-    owner = settings.evolution.number if settings.evolution else None
-    if sender is None and settings.evolution and owner:
-        sender = EvolutionNotifier(settings.evolution)
+    if whatsapp is None:
+        whatsapp = WhatsAppNumber(kv, settings.evolution.number if settings.evolution else None)
+    if sender is None and settings.evolution:
+        sender = EvolutionNotifier(settings.evolution, number=whatsapp.get)
     if admin is None and settings.evolution:
         admin = EvolutionAdmin(settings.evolution)
     if login is None and shutil.which("claude"):
@@ -90,6 +92,7 @@ def create_app(
     auth = Auth(settings.admin_password, settings.app_secret_key or "")
     app.include_router(setup_router(password=settings.admin_password, secret_key=settings.app_secret_key or "",
                                     login=login, admin=admin, drive=drive, discord=discord,
+                                    whatsapp=whatsapp, sender=sender,
                                     public_url=settings.public_url, auth=auth))
     app.include_router(dashboard_router(auth, sessions, kv))
 
@@ -112,8 +115,8 @@ def create_app(
         if message is None:
             return {"handled": False, "reason": "not a text message to the bot"}
         number, message_id, text = message
-        if not owner or number != owner:
-            log.info("Ignored a WhatsApp message from a number that is not WHATSAPP_NUMBER")
+        if number != whatsapp.get():
+            log.info("Ignored a WhatsApp message from a number that is not the one messages go to")
             return {"handled": False, "reason": "sender"}
         if not _first_time(sessions, message_id):
             return {"handled": False, "reason": "duplicate"}

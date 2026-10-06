@@ -13,7 +13,8 @@ from .kv import DbKV, FileKV, KeyValue, SecretBox
 from .lms.bahria import BahriaAdapter
 from .lms.login_guard import LoginGuard
 from .lms.session import SessionStore
-from .notify import ConsoleNotifier, DiscordSetting, EvolutionNotifier, LiveDiscord, Notifier, Outbox, active
+from .notify import (ConsoleNotifier, DiscordSetting, EvolutionNotifier, LiveDiscord, Notifier, Outbox,
+                     WhatsAppNumber, active)
 from .watcher import Watcher
 
 
@@ -30,12 +31,16 @@ class Runtime:
         box = SecretBox(st.app_secret_key) if st.app_secret_key and self.sessions is not None else None
         return DiscordSetting(self.kv if box else None, box, st.discord_webhook_url)
 
+    def whatsapp_number(self) -> WhatsAppNumber:
+        evo = self.settings.evolution
+        return WhatsAppNumber(self.kv, evo.number if evo else None)
+
     def outbox(self) -> Outbox:
         """Every channel that is on gets every message; with none on, they go to the log."""
         channels: dict[str, Notifier] = {}
         evo = self.settings.evolution
-        if evo and evo.number:
-            channels["whatsapp"] = EvolutionNotifier(evo)
+        if evo:
+            channels["whatsapp"] = EvolutionNotifier(evo, number=self.whatsapp_number().get)
         channels["discord"] = LiveDiscord(self.discord())
         others = dict(channels)
         channels["console"] = ConsoleNotifier(when=lambda: not any(active(n) for n in others.values()))

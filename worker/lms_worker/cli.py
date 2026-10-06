@@ -178,7 +178,8 @@ def cmd_whatsapp(rt: Runtime, args) -> int:
             print(f"Linked: {st.name or 'WhatsApp'} (+{st.number})")
         else:
             print(f"Not linked (instance {evo.instance}: {st.state}). Run: lms-worker whatsapp link")
-        print(f"Messages go to: +{evo.number}" if evo.number else "WHATSAPP_NUMBER is not set: nothing will be sent")
+        to = rt.whatsapp_number().get()
+        print(f"Messages go to: +{to}" if to else "No number to send to: save one on the setup page, or set WHATSAPP_NUMBER")
         return 0 if st.linked else 1
 
     if args.action == "unlink":
@@ -205,8 +206,8 @@ def cmd_whatsapp(rt: Runtime, args) -> int:
         st = admin.state()
         if st.linked:
             print(f"\nLinked: {st.name or 'WhatsApp'} (+{st.number})")
-            if not evo.number:
-                print("Now set WHATSAPP_NUMBER to the number that should receive messages.")
+            if not rt.whatsapp_number().get():
+                print("Now save the number that should receive messages on the setup page, or set WHATSAPP_NUMBER.")
             return 0
         if not args.number:
             latest = admin.current_challenge()
@@ -229,9 +230,11 @@ def _print_qr(text: str | None) -> None:
 def cmd_api(rt: Runtime, args) -> int:
     from .api import DEFAULT_INTERNAL_URL, create_app, serve
 
-    if not rt.settings.evolution or not rt.settings.evolution.number:
-        print("WhatsApp is not configured (EVOLUTION_API_URL, EVOLUTION_API_KEY, WHATSAPP_NUMBER); "
+    if not rt.settings.evolution:
+        print("WhatsApp is not configured (EVOLUTION_API_URL, EVOLUTION_API_KEY); "
               "the api will run but cannot answer messages", flush=True)
+    elif not rt.whatsapp_number().get():
+        print("WhatsApp has no number to send to yet; save one on the setup page, or set WHATSAPP_NUMBER", flush=True)
     app = create_app(
         rt.settings,
         rt.sessions,

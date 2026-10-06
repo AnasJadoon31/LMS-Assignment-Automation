@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from lms_worker.api import SECRET_HEADER, create_app, webhook_secret
 from lms_worker.config import EvolutionConfig, PortalUrls, Settings
 from lms_worker.kv import DbKV
+from lms_worker.notify import WhatsAppNumber
 from lms_worker.whatsapp import EvolutionAdmin
 
 from .test_notify import Flaky
@@ -63,6 +64,15 @@ def test_extended_text_messages_count_too(client, phone):
     body["data"]["message"] = {"extendedTextMessage": {"text": "menu"}}
     assert post(client, body).json()["handled"]
     assert phone.sent[0][0].startswith("*LMS BOT*")
+
+
+def test_a_number_saved_on_the_setup_page_is_the_one_answered(sessions, phone):
+    kv = DbKV(sessions)
+    app = create_app(SETTINGS, sessions, kv, sender=phone, register_webhook=False)
+    WhatsAppNumber(kv).save("923119999999")
+    with TestClient(app) as c:
+        assert post(c, upsert(jid="923119999999@s.whatsapp.net")).json()["handled"]
+        assert post(c, upsert(msg_id="m2")).json()["reason"] == "sender"  # WHATSAPP_NUMBER no longer applies
 
 
 def test_wrong_or_missing_secret_is_refused(client, phone):

@@ -50,10 +50,11 @@ service a domain and set `PUBLIC_URL` to it.
 Evolution API runs inside the stack and is reachable only by the worker, at
 `EVOLUTION_API_URL` (default `http://evolution-api:8080`) with `EVOLUTION_API_KEY`, both from the
 environment. The worker owns the WhatsApp instance: it creates it on first use, links it by QR code
-or by phone-number pairing code, and sends through it to `WHATSAPP_NUMBER`. The setup page offers
+or by phone-number pairing code, and sends through it to your own number: the one saved on the setup
+page, else `WHATSAPP_NUMBER`. The setup page offers
 the same QR and phone-number linking, through the same code (`lms_worker/whatsapp.py`). Your replies reach the app through an Evolution webhook to the api
 service, also inside the stack: the api registers it at start, with a secret header derived from
-`APP_SECRET_KEY`, and answers only `WHATSAPP_NUMBER`.
+`APP_SECRET_KEY`, and answers only that number.
 
 ## The WhatsApp menu
 

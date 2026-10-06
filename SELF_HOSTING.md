@@ -68,7 +68,8 @@ terminal (below). With one, use the setup page instead.
      paste the code that page shows back into the setup page.
    - **WhatsApp**: link the bot phone with the QR code, or type the bot phone's number for a
      pairing code (WhatsApp, **Linked devices**, **Link a device**, **Link with phone number
-     instead**).
+     instead**). Then, under **Messages go to**, save your own number (unless you set
+     `WHATSAPP_NUMBER`) and send a test message.
    - **Google Drive** (optional, see below): **Connect Google Drive**.
    - **Discord** (optional): paste a channel webhook URL.
 
@@ -129,10 +130,11 @@ lms-worker whatsapp status    # Linked: <name> (+92...), and where messages go
 lms-worker notify-test        # sends a test message to each channel
 ```
 
-Now send `menu` to the bot's number from your own WhatsApp. It answers only `WHATSAPP_NUMBER`.
+Now send `menu` to the bot's number from your own WhatsApp. It answers only the number messages go to.
 If it stays silent, check `docker compose logs api` for "Evolution webhook points at".
 
-`WHATSAPP_NUMBER` is your own number: the bot sends to it. Open WhatsApp on the bot phone
+`WHATSAPP_NUMBER` is your own number: the bot sends to it. You can save it on the setup page
+instead (**Messages go to**); a number saved there wins, and takes effect at once. Open WhatsApp on the bot phone
 at least every two weeks; WhatsApp logs out linked devices when the phone has been away
 longer than that. `lms-worker whatsapp unlink` removes the link.
 
