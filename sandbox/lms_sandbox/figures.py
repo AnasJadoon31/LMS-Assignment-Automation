@@ -1,4 +1,5 @@
-"""Figures in the report's colours, for the agent to call from its own scripts.
+"""Graphs in the theme's colours (read from the theme artifact's tokens.json), for Claude to call from its
+own scripts. Other diagrams it draws itself, following the theme's Figures section.
 
     from lms_figures import draw_graph
     draw_graph(
@@ -27,8 +28,22 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import FancyArrowPatch  # noqa: E402
 
-NAVY, SKY, GOLD, INK, MUTED, EDGE = "#2D398C", "#C4E4F5", "#FFCA0B", "#1B1C1F", "#565B6B", "#9AA3B8"
 FIGURES = Path(os.environ.get("LMS_FIGURES_DIR", "/work/out/figures"))
+TOKENS = Path(os.environ.get("LMS_THEME_DIR", "/work/theme")) / "tokens.json"
+
+
+def _colours() -> dict[str, str]:
+    """The theme artifact's colours (tokens.json), so figures follow the theme."""
+    import json
+    try:
+        return {t["name"]: t["value"] for t in json.loads(TOKENS.read_text())["color"]["tokens"]}
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+_C = _colours()
+NAVY, SKY, GOLD = _C.get("navy", "#2d398c"), _C.get("sky", "#c4e4f5"), _C.get("gold", "#ffca0b")
+INK, MUTED, EDGE = _C.get("ink", "#1b1c1f"), _C.get("muted", "#565b6b"), _C.get("edge", "#9aa3b8")
 
 
 def draw_graph(nodes: dict[str, tuple[float, float]], edges: list[tuple], path: list[str] | tuple = (),

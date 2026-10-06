@@ -1,0 +1,85 @@
+"""The sandbox's entry point: prepare the work folder, then run Claude Code on the job.
+
+/work/job.json holds the prompts, the summary schema and the limits (written by the worker).
+The question files in /work/in are rendered to page images first, so Claude sees figures in
+the sheet. Claude's stream-json output goes to stdout, for the worker to read live, and to
+/work/out/stream.jsonl.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+WORK = Path(os.environ.get("LMS_WORK", "/work"))
+TOOLS = "Bash,Read,Write,Edit,Glob,Grep"
+OFFICE = {".doc", ".docx", ".ppt", ".pptx", ".odt", ".odp", ".rtf", ".xls", ".xlsx"}
+MAX_PAGES = 40
+
+
+def render_pages(inbox: Path) -> list[Path]:
+    """Each PDF and office file in inbox -> inbox/pages/<name>-<n>.png."""
+    pages = inbox / "pages"
+    made = []
+    for f in sorted(p for p in inbox.iterdir() if p.is_file()):
+        pdf = f if f.suffix.lower() == ".pdf" else None
+        if f.suffix.lower() in OFFICE:
+            tmp = Path(tempfile.mkdtemp(prefix="pages-"))
+            subprocess.run(["soffice", f"-env:UserInstallation=file://{tmp}/profile", "--headless", "--convert-to", "pdf",
+                            "--outdir", str(tmp), str(f)], capture_output=True, timeout=180)
+            converted = tmp / (f.stem + ".pdf")
+            pdf = converted if converted.exists() else None
+        if pdf is None:
+            continue
+        pages.mkdir(exist_ok=True)
+        subprocess.run(["pdftoppm", "-r", "110", "-png", "-l", str(MAX_PAGES), str(pdf), str(pages / f.stem)],
+                       capture_output=True, timeout=300)
+        made += sorted(pages.glob(f"{f.stem}*.png"))
+    return made
+
+
+def claude_args(job: dict) -> list[str]:
+    tools = job.get("tools", TOOLS)
+    args = ["claude", "-p", job["prompt"], "--output-format", "stream-json", "--verbose",
+            "--permission-mode", "dontAsk", "--tools", tools, "--allowedTools", tools,
+            "--strict-mcp-config", "--disable-slash-commands", "--max-turns", str(job.get("max_turns", 200))]
+    if job.get("system"):
+        args += ["--append-system-prompt", job["system"]]
+    if job.get("schema"):
+        args += ["--json-schema", json.dumps(job["schema"])]
+    if job.get("model"):
+        args += ["--model", job["model"]]
+    if job.get("resume"):
+        args += ["--resume", job["resume"]]
+    return args
+
+
+def main() -> int:
+    job = json.loads((WORK / "job.json").read_text())
+    out = WORK / "out"
+    out.mkdir(parents=True, exist_ok=True)
+    (WORK / "code").mkdir(exist_ok=True)
+    if (WORK / "in").is_dir() and not job.get("resume"):
+        render_pages(WORK / "in")
+    if not shutil.which("claude"):
+        print(json.dumps({"type": "result", "is_error": True, "result": "claude is not installed in the sandbox"}), flush=True)
+        return 127
+    proc = subprocess.Popen(claude_args(job), cwd=WORK, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    with open(out / "stream.jsonl", "a") as log:
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            log.write(line)
+    err = proc.stderr.read()
+    if err:
+        (out / "stderr.txt").write_text(err[-20000:])
+    return proc.wait()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

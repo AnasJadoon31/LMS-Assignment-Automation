@@ -229,3 +229,39 @@ def screenshot(run: NotebookRun, shots: Path, *, browser_path: str | None = None
             result.shot = name
         browser.close()
     return run
+
+
+def main(argv: list[str] | None = None) -> int:
+    """lms-notebook spec.json: build, run and screenshot the report's notebook.
+
+    spec.json: {"name": "AI_Lab_05_First_Last", "title": "Lab 5: ...", "student_line": "**First Last** | ...",
+                "cwd": "/work/code", "exercises": [{"heading": "Exercise 1: ...", "cells": [{"caption": "...", "code": "..."}]}]}
+    Writes <out>/<name>.ipynb, <out>/shots/notebook.png and cell_<n>.png, and <out>/notebook.json with every
+    cell's caption, output, error and screenshot file.
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="lms-notebook", description=main.__doc__.splitlines()[0])
+    ap.add_argument("spec")
+    ap.add_argument("--out", default="/work/out/notebook")
+    ap.add_argument("--no-shots", action="store_true", help="run only, no screenshots")
+    args = ap.parse_args(argv)
+    spec = json.loads(Path(args.spec).read_text())
+    out = Path(args.out)
+    path = out / f"{spec['name']}.ipynb"
+    exercises = [Exercise(heading=e["heading"], cells=[(c.get("caption", ""), c["code"]) for c in e["cells"]])
+                 for e in spec["exercises"]]
+    build(path, spec["title"], spec["student_line"], exercises)
+    run = execute(path, Path(spec.get("cwd") or out))
+    if not args.no_shots:
+        screenshot(run, out / "shots")
+    report = {"notebook": str(path), "overview_shot": run.overview_shot and str(out / "shots" / run.overview_shot),
+              "cells": [{"number": c.number, "exercise": c.exercise + 1, "caption": c.caption, "output": c.output,
+                         "error": c.error, "shot": c.shot and str(out / "shots" / c.shot)} for c in run.cells]}
+    (out / "notebook.json").write_text(json.dumps(report, indent=2))
+    print(json.dumps({"cells": len(run.cells), "errors": [c.error for c in run.failed], "report": str(out / "notebook.json")}))
+    return 1 if run.failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
