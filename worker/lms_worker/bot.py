@@ -22,7 +22,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from . import actions
-from .actions import JOB_WORDS
 from .db.models import TERMINAL_STATES, Artifact, Assignment, ChatSession, Course, CourseMode, Event, Job, JobState, utcnow
 from .kv import KeyValue
 from .lms.bahria_pages import LMS_TZ
@@ -287,7 +286,7 @@ class Bot:
             lines.append(f"Teacher's note: {a.remarks}")
         if a.kind == ASSIGNMENT:
             if job:
-                state = JOB_WORDS.get(job.state, job.state) + (f": {job.last_error}" if job.state == JobState.NEEDS_HUMAN and job.last_error else "")
+                state = actions.job_words(job) + (f": {job.last_error}" if job.state == JobState.NEEDS_HUMAN and job.last_error else "")
                 lines.append(f"Service: {state} (revision {job.revision})")
             elif a.skipped_reason:
                 lines.append(f"Service: not handled; {a.skipped_reason.lower()}")
@@ -358,8 +357,9 @@ class Bot:
             if job is None:
                 return "", ["That job no longer exists."], [("OK", {"do": "no"})]
             a = job.assignment
+            typed = ["The sheet asks for handwritten work; this uploads the typed report as it is."] * actions.handwritten(job)
             question = {
-                "approve": [f"Upload the solved PDF for {a.title} to the LMS now?"],
+                "approve": [f"Upload the solved PDF for {a.title} to the LMS now?", *typed],
                 "reject": [f"Reject the solution for {a.title}? Nothing will be uploaded."],
                 "redo": [f"Redo {a.title} with this note?", f'"{screen.get("note", "")}"'],
             }[action]

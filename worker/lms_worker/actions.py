@@ -7,6 +7,7 @@ open. Approving asks the worker to poll at once, so the upload starts within sec
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -30,8 +31,9 @@ JOB_WORDS = {
     JobState.NEEDS_HUMAN: "stopped",
     JobState.REJECTED: "rejected by you",
     JobState.SUPERSEDED: "replaced by a newer revision",
-    JobState.HANDWRITTEN: "solved; handwritten, sent to you to copy",
+    JobState.HANDWRITTEN: "solved; handwritten, sent to you to copy",  # older jobs only
 }
+HANDWRITTEN_WORDS = "solved; the sheet asks for handwritten work; waiting for your approval"
 MODE_WORDS = {
     CourseMode.APPROVE: "send me the PDF, upload when I say yes",
     CourseMode.AUTO: "upload after the checks, without asking",
@@ -42,6 +44,21 @@ MODE_WORDS = {
 def move(s: Session, job: Job, to: JobState, detail: str) -> None:
     s.add(Event(job_id=job.id, from_state=job.state, to_state=to, detail=detail))
     job.state = to
+
+
+def handwritten(job: Job) -> bool:
+    """The sheet asks for handwritten work. The report is still yours to approve: copy it by
+    hand, or have it uploaded as it is."""
+    try:
+        return json.loads(job.summary or "{}").get("status") == "handwritten"
+    except ValueError:
+        return False
+
+
+def job_words(job: Job) -> str:
+    if job.state == JobState.AWAITING_APPROVAL and handwritten(job):
+        return HANDWRITTEN_WORDS
+    return JOB_WORDS.get(job.state, job.state)
 
 
 def can_redo(job: Job) -> bool:

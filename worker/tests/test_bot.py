@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -141,6 +142,21 @@ def test_remaining_list_is_sorted_by_deadline_and_opens_an_item(bot, semester):
     assert "Service: solved; waiting for your approval (revision 1)" in item
     assert "1. Send the question file" in item and "2. Send the solved PDF" in item
     assert "3. Approve and upload" in item and "4. Reject" in item and "5. Redo with a note" in item
+
+
+def test_a_typed_report_for_a_handwritten_sheet_can_be_approved(bot, semester, sessions):
+    with sessions.begin() as s:
+        s.scalar(select(Job)).summary = json.dumps({"status": "handwritten"})
+    assert "3. Waiting for your approval (1)" in text(say(bot, "menu", "1"))
+    item = text(say(bot, "3", "1"))
+    assert "Service: solved; the sheet asks for handwritten work; waiting for your approval (revision 1)" in item
+    assert "3. Approve and upload" in item
+    confirm = text(say(bot, "3"))
+    assert "Upload the solved PDF for Recurrence Relations to the LMS now?" in confirm
+    assert "The sheet asks for handwritten work; this uploads the typed report as it is." in confirm
+    assert text(say(bot, "1")).startswith("Approved: Recurrence Relations.")
+    with sessions() as s:
+        assert s.scalar(select(Job.state)) == "SUBMITTING"
 
 
 def test_files_are_sent_as_documents(bot, semester):

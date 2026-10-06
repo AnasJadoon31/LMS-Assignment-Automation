@@ -24,7 +24,7 @@ The design is in the tech spec.
    **University Assignments/<semester>/<course>/** on your Google Drive.
 4. The PDF comes to you on WhatsApp. Approve it from the menu and the worker uploads it; in
    auto mode it uploads straight away. Handwritten work is solved in full and sent to you to
-   copy, never uploaded. Work that cannot be done here (hardware, group work) stops with the reason.
+   copy; it waits for your approval in every mode, and is uploaded only if you approve it as it is. Work that cannot be done here (hardware, group work) stops with the reason.
 
 Claude Pro limits: solving pauses when a usage window passes 80% (`SOLVER_PAUSE_AT`) or the
 limit is hit, never draws paid extra usage, and runs at most 6 times a day

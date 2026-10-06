@@ -36,7 +36,7 @@ class JobState(StrEnum):
     NEEDS_HUMAN = "NEEDS_HUMAN"
     REJECTED = "REJECTED"
     SUPERSEDED = "SUPERSEDED"  # the teacher changed the assignment; a newer revision took over
-    HANDWRITTEN = "HANDWRITTEN"  # solved and sent to you to copy by hand; never uploaded
+    HANDWRITTEN = "HANDWRITTEN"  # older jobs only; handwritten work now waits in AWAITING_APPROVAL
 
 
 TERMINAL_STATES = {JobState.CONFIRMED, JobState.NEEDS_HUMAN, JobState.REJECTED, JobState.SUPERSEDED, JobState.HANDWRITTEN}

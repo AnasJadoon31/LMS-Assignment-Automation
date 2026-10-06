@@ -7,7 +7,8 @@ report.docx and report.pdf and checks every page (see prompt.py). Then, by Claud
 
 - done: the PDF comes to you. In approve mode it waits for your approval; in auto mode it
   goes to the upload.
-- handwritten: the PDF comes to you to copy by hand; nothing is ever uploaded.
+- handwritten: the PDF comes to you to copy by hand. It waits for your approval in every
+  mode, auto too: it is uploaded only if you approve it as it is.
 - blocked: the job stops with Claude's reason (NEEDS_HUMAN).
 
 Both formats are kept next to the question file and, with Google Drive connected, saved to
@@ -299,12 +300,10 @@ class Solver:
             job.last_error = None
             job.attempts = 0  # from here on, attempts count uploads
             handwritten = summary.get("status") == "handwritten"
-            if handwritten:
-                to, status = JobState.HANDWRITTEN, "handwritten"
-            elif a.course.mode == CourseMode.AUTO:
+            if a.course.mode == CourseMode.AUTO and not handwritten:
                 to, status = JobState.SUBMITTING, "solved"
-            else:
-                to, status = JobState.AWAITING_APPROVAL, "solved"
+            else:  # a typed report for a sheet that asks for handwriting is never uploaded unasked
+                to, status = JobState.AWAITING_APPROVAL, "handwritten" if handwritten else "solved"
             _move(s, job, to, f"solved: {len(summary.get('exercises') or [])} part(s), {summary.get('pages') or '?'} page(s)")
             questions = [Path(x.path) for x in job.artifacts if x.kind == "question" and Path(x.path).is_file()]
             folders = [DRIVE_ROOT, a.course.semester_name or a.course.semester, a.course.name, name]
@@ -467,7 +466,8 @@ def _pkt(dt: datetime) -> str:
 
 def _solved_text(summary: dict, name: str, course: str, deadline: datetime | None, to: JobState,
                  folders: list[str] | None, drive_error: str | None) -> str:
-    head = "Solved, handwritten" if to == JobState.HANDWRITTEN else "Solved"
+    handwritten = summary.get("status") == "handwritten"
+    head = "Solved, handwritten" if handwritten else "Solved"
     lines = [f"{head}: {name}", course, f"Due {_pkt(deadline)}" if deadline else "No deadline shown"]
     parts = summary.get("exercises") or []
     pages = summary.get("pages")
@@ -480,10 +480,11 @@ def _solved_text(summary: dict, name: str, course: str, deadline: datetime | Non
         lines.append("Saved to Google Drive: " + " › ".join(folders))
     elif drive_error:
         lines.append(drive_error)
-    if to == JobState.HANDWRITTEN:
-        lines.append("The sheet asks for handwritten work: copy this by hand. Nothing will be uploaded.")
-    elif to == JobState.SUBMITTING:
+    if to == JobState.SUBMITTING:
         lines.append("Auto mode: uploading it now; the LMS receipt will follow.")
+    elif handwritten:
+        lines.append("The sheet asks for handwritten work, so it was not uploaded: copy this by hand. "
+                     "To upload this report as it is, reply menu, then Waiting for your approval.")
     else:
         lines.append("To upload it, reply menu, then Waiting for your approval.")
     return "\n".join(lines)

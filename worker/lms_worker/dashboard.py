@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from . import actions
-from .actions import JOB_WORDS, MODE_WORDS
+from .actions import MODE_WORDS
 from .bot import _in, _paper_timing, _question_file, _relative, _status, _when, _window
 from .db.models import Artifact, Assignment, Course, Event, Job, JobState, utcnow
 from .kv import KeyValue
@@ -208,7 +208,7 @@ def _item(s: Session, a: Assignment, now: datetime) -> dict:
                 latest[art.kind] = art
         files += [{"label": FILE_LABELS[k], "url": f"/files/{art.id}"} for k, art in sorted(latest.items(), key=lambda kv: list(FILE_LABELS).index(kv[0]))]
         events = s.scalars(select(Event).where(Event.job_id == job.id).order_by(Event.id.desc()).limit(8)).all()
-        words = JOB_WORDS.get(job.state, job.state)
+        words = actions.job_words(job)
         if job.state == JobState.NEEDS_HUMAN and job.last_error:
             words += f": {job.last_error}"
         item["job"] = {

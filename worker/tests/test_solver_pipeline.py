@@ -1,10 +1,14 @@
+import importlib
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy import select
 
+from lms_worker import actions
 from lms_worker.claude_login import LoginStatus
 from lms_worker.db import Artifact, Assignment, Course, Event, Job, JobState
 from lms_worker.kv import DbKV
@@ -250,16 +254,42 @@ def test_without_an_upload_the_pdf_comes_back_to_upload_by_hand(sessions, channe
     assert file == pdf.name
 
 
-def test_handwritten_work_is_sent_to_copy_and_never_uploaded(solver, sandbox, channel, sessions, tmp_path):
+def test_handwritten_work_waits_for_approval_even_in_auto_mode(solver, sandbox, channel, sessions, tmp_path):
     job_id = add_job(sessions, tmp_path, mode="auto")
     sandbox.script = play(stream({**SUMMARY, "status": "handwritten"}))
 
     assert solver.run_once().status == "handwritten"
-    assert state(sessions, job_id) == "HANDWRITTEN"
+    assert state(sessions, job_id) == "AWAITING_APPROVAL"  # not SUBMITTING: a typed report is never uploaded unasked
+    assert DbKV(sessions).get(POLL_NOW_KEY) is None
     text, file = channel.sent[-1]
     assert text.startswith("Solved, handwritten: Assignment 01 - Recurrence Relations")
-    assert text.endswith("The sheet asks for handwritten work: copy this by hand. Nothing will be uploaded.")
+    assert text.endswith("The sheet asks for handwritten work, so it was not uploaded: copy this by hand. "
+                         "To upload this report as it is, reply menu, then Waiting for your approval.")
     assert file.endswith(".pdf")
+    with sessions.begin() as s:
+        job = s.get(Job, job_id)
+        assert actions.handwritten(job) and actions.job_words(job) == actions.HANDWRITTEN_WORDS
+        done, message = actions.approve(s, job, DbKV(sessions), NOW, "WhatsApp")
+        assert done and message.startswith("Approved: Recurrence Relations.") and job.state == "SUBMITTING"
+
+
+def test_older_handwritten_jobs_that_can_still_be_uploaded_become_approvable(engine, sessions, tmp_path):
+    waiting = add_job(sessions, tmp_path, state=JobState.HANDWRITTEN)
+    closed = add_job(sessions, tmp_path, state=JobState.HANDWRITTEN, ref="155150:2")
+    submitted = add_job(sessions, tmp_path, state=JobState.HANDWRITTEN, ref="155150:3")
+    with sessions.begin() as s:
+        s.get(Job, closed).assignment.deadline_passed = True
+        s.get(Job, submitted).assignment.submitted_file = "mine.pdf"
+
+    migration = importlib.import_module("lms_worker.db.migrations.versions.0006_handwritten_waits_for_approval")
+    with engine.begin() as conn, Operations.context(MigrationContext.configure(conn)):
+        migration.upgrade()
+
+    assert [state(sessions, j) for j in (waiting, closed, submitted)] == ["AWAITING_APPROVAL", "HANDWRITTEN", "HANDWRITTEN"]
+    with sessions() as s:
+        moved = s.scalars(select(Event).where(Event.to_state == "AWAITING_APPROVAL")).all()
+        assert [(e.job_id, e.from_state, e.detail) for e in moved] == [
+            (waiting, "HANDWRITTEN", "handwritten work now waits for your approval")]
 
 
 def test_blocked_work_stops_with_claudes_reason(solver, sandbox, channel, sessions, tmp_path):
