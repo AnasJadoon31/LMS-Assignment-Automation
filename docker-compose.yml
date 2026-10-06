@@ -1,6 +1,7 @@
 # Self-hosted LMS Assignment Automation: one stack per student.
-# Works with `docker compose up -d` on any machine, or as a Docker Compose resource on Coolify.
-# Values come from .env (plain Docker) or the resource's environment variables (Coolify).
+# This branch is for a Coolify server that already runs PostgreSQL and Evolution API: it bundles
+# neither. Set DATABASE_URL, EVOLUTION_API_URL, EVOLUTION_API_KEY and API_INTERNAL_URL.
+# Deploy it as a Docker Compose resource; values come from the resource's environment variables.
 #
 # Only the worker talks to the LMS. The api answers your WhatsApp messages through the
 # menu and serves the setup page (/setup): give it a domain (port 8000; on Coolify, in the
@@ -14,14 +15,14 @@ services:
     build: ./worker
     restart: unless-stopped
     environment:
-      - DATABASE_URL=postgresql://lms:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/lms
+      - DATABASE_URL=${DATABASE_URL:?set DATABASE_URL}
       - APP_SECRET_KEY=${APP_SECRET_KEY:?set APP_SECRET_KEY}
       - CMS_ENROLLMENT=${CMS_ENROLLMENT:?set CMS_ENROLLMENT}
       - CMS_PASSWORD=${CMS_PASSWORD:?set CMS_PASSWORD}
       - CMS_INSTITUTE=${CMS_INSTITUTE:-Karachi Campus}
       - CMS_ROLE=${CMS_ROLE:-Student}
-      # WhatsApp: the bundled Evolution API below, unless you point this at your own
-      - EVOLUTION_API_URL=${EVOLUTION_API_URL:-http://evolution-api:8080}
+      # WhatsApp: an Evolution API running outside this stack (this branch bundles none)
+      - EVOLUTION_API_URL=${EVOLUTION_API_URL:-}
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-}
       - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-lms}
       - WHATSAPP_NUMBER=${WHATSAPP_NUMBER:-}
@@ -41,9 +42,8 @@ services:
     volumes:
       - artifacts:/data
       - claude-home:/claude-home
+    networks: [default, coolify]
     depends_on:
-      postgres:
-        condition: service_healthy
       docker-proxy:
         condition: service_started
       egress:
@@ -55,14 +55,15 @@ services:
     restart: unless-stopped
     command: ["sh", "-c", "lms-worker db-upgrade && exec lms-worker api"]
     environment:
-      - DATABASE_URL=postgresql://lms:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/lms
+      - DATABASE_URL=${DATABASE_URL:?set DATABASE_URL}
       - APP_SECRET_KEY=${APP_SECRET_KEY:?set APP_SECRET_KEY}
-      - EVOLUTION_API_URL=${EVOLUTION_API_URL:-http://evolution-api:8080}
+      - EVOLUTION_API_URL=${EVOLUTION_API_URL:-}
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-}
       - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-lms}
       - WHATSAPP_NUMBER=${WHATSAPP_NUMBER:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
-      - API_INTERNAL_URL=http://api:8000
+      # Where Evolution API reaches this api; set it when Evolution runs outside this stack
+      - API_INTERNAL_URL=${API_INTERNAL_URL:-http://api:8000}
       # The setup page's password; the page is closed without one
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
       - PUBLIC_URL=${PUBLIC_URL:-}
@@ -78,81 +79,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      - POSTGRES_USER=lms
-      - POSTGRES_DB=lms
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lms -d lms -h 127.0.0.1"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
-  # WhatsApp gateway. The worker creates and links its instance; you never open its pages.
-  # It keeps its tables in their own schema (evolution_api) of the same database, and
-  # stores no chat history: the bot only needs to send, and later to read your replies.
-  evolution-api:
-    image: evoapicloud/evolution-api:v2.3.7
-    restart: unless-stopped
-    environment:
-      - SERVER_URL=http://evolution-api:8080
-      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:-}
-      - DATABASE_PROVIDER=postgresql
-      - DATABASE_CONNECTION_URI=postgresql://lms:${POSTGRES_PASSWORD}@postgres:5432/lms?schema=evolution_api
-      - DATABASE_CONNECTION_CLIENT_NAME=lms_bot
-      - DATABASE_SAVE_DATA_INSTANCE=true
-      - DATABASE_SAVE_DATA_NEW_MESSAGE=false
-      - DATABASE_SAVE_MESSAGE_UPDATE=false
-      - DATABASE_SAVE_DATA_CONTACTS=false
-      - DATABASE_SAVE_DATA_CHATS=false
-      - DATABASE_SAVE_DATA_LABELS=false
-      - DATABASE_SAVE_DATA_HISTORIC=false
-      - CACHE_REDIS_ENABLED=true
-      - CACHE_REDIS_URI=redis://redis:6379/6
-      - CACHE_REDIS_PREFIX_KEY=evolution
-      - CACHE_LOCAL_ENABLED=false
-      - DEL_INSTANCE=false
-      - CONFIG_SESSION_PHONE_CLIENT=LMS Bot
-      - TELEMETRY_ENABLED=false
-      - LOG_LEVEL=ERROR,WARN,INFO
-      - LOG_BAILEYS=error
-      - LANGUAGE=en
-    volumes:
-      - evolution_instances:/evolution/instances
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - node -e "require('http').get('http://127.0.0.1:8080/',r=>process.exit(r.statusCode<300?0:1)).on('error',()=>process.exit(1))"
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 60s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: redis-server --appendonly yes
-    volumes:
-      - evolution_redis:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+    networks: [default, coolify]
 
   # Starts solver containers for the worker. Only container, image and network calls are allowed.
   docker-proxy:
@@ -176,16 +103,16 @@ services:
     networks: [default, sandbox]
 
 volumes:
-  pgdata:
   artifacts:
-  evolution_instances:
-  evolution_redis:
   # The claude.ai login: the setup page signs in here, solver containers mount it as their home.
   # Without a domain: docker compose exec worker env HOME=/claude-home claude auth login --claudeai
   claude-home:
     name: lms-claude-home
 
 networks:
+  # Coolify's shared network, where the shared PostgreSQL lives
+  coolify:
+    external: true
   # Solver containers: no route out except the egress proxy
   sandbox:
     name: lms-sandbox
