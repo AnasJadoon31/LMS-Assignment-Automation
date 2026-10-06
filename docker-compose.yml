@@ -7,8 +7,8 @@
 # menu and serves the setup page (/setup): give it a domain (port 8000; on Coolify, in the
 # api service's Domains), open it, sign Claude in and link WhatsApp there. Nothing else is
 # reachable from outside. Each assignment is solved in a throwaway container from the
-# solver image, started through the Docker socket proxy, on its own network: the internet,
-# but none of this stack's services.
+# solver image, started through the Docker socket proxy, on its own network, which the worker
+# makes: the internet, but none of this stack's services.
 
 services:
   worker:
@@ -92,14 +92,18 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
-  # Builds the lms-solver image on every deploy, then idles. Solver containers are started
-  # from that image; this service also keeps their network in existence.
+  # Builds the lms-solver image on every deploy, then idles, on no network. Solver containers
+  # are started from that image on their own network (SOLVER_NETWORK): the internet, but not
+  # the shared PostgreSQL, the Docker proxy or WhatsApp. The worker makes that network and it
+  # is deliberately not declared in this file: Coolify attaches its proxy to every network one
+  # of its containers is on, which put the proxy next to the solver, and then no deploy could
+  # change the network because the proxy was still on it.
   solver-image:
     build: ./sandbox
     image: lms-solver:latest
     restart: unless-stopped
     command: ["sleep", "infinity"]
-    networks: [sandbox]
+    network_mode: none
 
 volumes:
   artifacts:
@@ -112,6 +116,3 @@ networks:
   # Coolify's shared network, where the shared PostgreSQL lives
   coolify:
     external: true
-  # Solver containers: full internet, but not the shared PostgreSQL, the Docker proxy or WhatsApp
-  sandbox:
-    name: lms-sandbox

@@ -27,7 +27,7 @@ whose name is on it. Run it only for your own account.
 | `evolution-api` | WhatsApp gateway. The worker creates and links its instance | inside the stack only |
 | `redis` | Evolution API's cache | inside the stack only |
 | `docker-proxy` | Lets the worker start solver containers; only container and image calls | inside the stack only |
-| `solver-image` | Builds the `lms-solver` image on every deploy, then idles | nothing |
+| `solver-image` | Builds the `lms-solver` image on every deploy, then idles, on no network | nothing |
 | solver containers | One per assignment, from the `lms-solver` image: Claude Code, with every tool and the internet, solves it and builds the report from your theme artifact, then the container is removed | nothing; they reach the internet but not the stack's services |
 
 Only the api gets a domain. Claude runs under your claude.ai login, kept in the
