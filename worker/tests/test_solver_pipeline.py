@@ -135,7 +135,7 @@ def drive():
 @pytest.fixture
 def solver(sessions, channel, sandbox, drive, clock, tmp_path):
     return Solver(sessions, DbKV(sessions), Outbox({"whatsapp": channel}), sandbox, tmp_path / "data", drive=drive,
-                  now=clock, public_url="https://lms.example.com", env={"HTTPS_PROXY": "http://egress:3128"})
+                  now=clock, public_url="https://lms.example.com", env={"HTTPS_PROXY": "http://proxy.example:3128"})
 
 
 def add_job(sessions, tmp_path, *, mode="approve", title="Recurrence Relations", deadline=DUE, kind="assignment",
@@ -171,7 +171,7 @@ def test_a_solved_assignment_comes_to_you_for_approval(solver, sandbox, drive, c
 
     assert (r.status, state(sessions, job_id)) == ("solved", "AWAITING_APPROVAL")
     run = sandbox.runs[0]
-    assert run["files"] == ["DAA-Assignment-01.pdf"] and run["env"] == {"HTTPS_PROXY": "http://egress:3128"}
+    assert run["files"] == ["DAA-Assignment-01.pdf"] and run["env"] == {"HTTPS_PROXY": "http://proxy.example:3128"}
     assert "Assignment on the LMS: Recurrence Relations (number 1)" in run["job"]["prompt"]
     assert "resume" not in run["job"] and run["job"]["schema"]["required"][0] == "status"
     assert "The work folder is /work" in run["job"]["system"]
@@ -429,3 +429,17 @@ def test_a_submission_already_there_counts_as_ours_only_after_our_own_try(sessio
         job = s.get(Job, job_id)
         assert job.state == expected
         assert job.lms_submission_file == ("Assignment_01.pdf" if expected == "CONFIRMED" else None)
+
+
+def test_a_redo_after_a_blocked_run_starts_a_new_session(solver, sandbox, sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path)
+    sandbox.script = play(stream({**SUMMARY, "status": "blocked", "blocked_reason": "No Artifact tool."}), files=False)
+    assert solver.run_once().status == "blocked"
+    with sessions.begin() as s:
+        from lms_worker import actions
+        assert actions.redo(s, s.get(Job, job_id), "Try again", "the web page")[0]
+
+    sandbox.script = play(stream(SUMMARY, session="sess-2"))
+    assert solver.run_once().status == "solved"
+    job = sandbox.runs[-1]["job"]
+    assert "resume" not in job and "The student asked for a redo with this note: Try again" in job["prompt"]

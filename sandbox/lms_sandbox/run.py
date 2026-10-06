@@ -17,8 +17,6 @@ import tempfile
 from pathlib import Path
 
 WORK = Path(os.environ.get("LMS_WORK", "/work"))
-# Artifact reads the theme; ToolSearch loads it when the CLI defers it
-TOOLS = "Bash,Read,Write,Edit,Glob,Grep,Artifact,ToolSearch"
 OFFICE = {".doc", ".docx", ".ppt", ".pptx", ".odt", ".odp", ".rtf", ".xls", ".xlsx"}
 MAX_PAGES = 40
 
@@ -45,10 +43,10 @@ def render_pages(inbox: Path) -> list[Path]:
 
 
 def claude_args(job: dict) -> list[str]:
-    tools = job.get("tools", TOOLS)
+    """Every Claude Code tool, the account's claude.ai connectors and skills, and no permission
+    prompts (you chose full access): the container is the boundary."""
     args = ["claude", "-p", job["prompt"], "--output-format", "stream-json", "--verbose",
-            "--permission-mode", "dontAsk", "--tools", tools, "--allowedTools", tools,
-            "--strict-mcp-config", "--disable-slash-commands", "--max-turns", str(job.get("max_turns", 200))]
+            "--permission-mode", "bypassPermissions", "--max-turns", str(job.get("max_turns", 200))]
     if job.get("system"):
         args += ["--append-system-prompt", job["system"]]
     if job.get("schema"):
@@ -70,7 +68,10 @@ def main() -> int:
     if not shutil.which("claude"):
         print(json.dumps({"type": "result", "is_error": True, "result": "claude is not installed in the sandbox"}), flush=True)
         return 127
-    proc = subprocess.Popen(claude_args(job), cwd=WORK, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    # `claude -p` counts as an SDK run, where the Artifact tool is off unless asked for
+    env = {**os.environ, "CLAUDE_CODE_ARTIFACT": "1"}
+    proc = subprocess.Popen(claude_args(job), cwd=WORK, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, bufsize=1)
     with open(out / "stream.jsonl", "a") as log:
         for line in proc.stdout:
             sys.stdout.write(line)

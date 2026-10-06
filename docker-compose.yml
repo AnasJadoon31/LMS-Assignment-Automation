@@ -7,8 +7,8 @@
 # menu and serves the setup page (/setup): give it a domain (port 8000; on Coolify, in the
 # api service's Domains), open it, sign Claude in and link WhatsApp there. Nothing else is
 # reachable from outside. Each assignment is solved in a throwaway container from the
-# solver image, started through the Docker socket proxy, with the internet only through the
-# egress proxy's allowlist.
+# solver image, started through the Docker socket proxy, on its own network: the internet,
+# but none of this stack's services.
 
 services:
   worker:
@@ -34,7 +34,6 @@ services:
       - DOCKER_HOST=tcp://docker-proxy:2375
       - SOLVER_IMAGE=lms-solver:latest
       - SOLVER_NETWORK=lms-sandbox
-      - SOLVER_PROXY=http://egress:3128
       - SOLVER_DAILY_CAP=${SOLVER_DAILY_CAP:-6}
       - SOLVER_PAUSE_AT=${SOLVER_PAUSE_AT:-0.8}
       - SOLVER_MODEL=${SOLVER_MODEL:-}
@@ -46,7 +45,7 @@ services:
     depends_on:
       docker-proxy:
         condition: service_started
-      egress:
+      solver-image:
         condition: service_started
 
   # Answers WhatsApp messages through the numbered menu; same image as the worker
@@ -93,14 +92,14 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
-  # The solver image (built here, so every deploy builds it) runs the sandbox's only way out:
-  # an HTTPS proxy that lets through Claude, claude.ai (the theme artifact) and PyPI.
-  egress:
+  # Builds the lms-solver image on every deploy, then idles. Solver containers are started
+  # from that image; this service also keeps their network in existence.
+  solver-image:
     build: ./sandbox
     image: lms-solver:latest
     restart: unless-stopped
-    command: ["python3", "-m", "lms_sandbox.egress"]
-    networks: [default, sandbox]
+    command: ["sleep", "infinity"]
+    networks: [sandbox]
 
 volumes:
   artifacts:
@@ -113,7 +112,6 @@ networks:
   # Coolify's shared network, where the shared PostgreSQL lives
   coolify:
     external: true
-  # Solver containers: no route out except the egress proxy
+  # Solver containers: full internet, but not the shared PostgreSQL, the Docker proxy or WhatsApp
   sandbox:
     name: lms-sandbox
-    internal: true

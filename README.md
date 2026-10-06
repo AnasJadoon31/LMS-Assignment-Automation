@@ -38,7 +38,7 @@ Each student runs their own copy: see **[SELF_HOSTING.md](SELF_HOSTING.md)**. In
 
 ```sh
 scripts/init-env.sh                 # .env with random secrets; then fill in your CMS login and WhatsApp number
-docker compose up -d --build        # worker, api, PostgreSQL, Evolution API, Redis, egress; builds lms-solver
+docker compose up -d --build        # worker, api, PostgreSQL, Evolution API, Redis; builds lms-solver
 # then open https://<api domain>/setup: sign in to Claude, link WhatsApp, connect Google Drive
 ```
 

@@ -5,9 +5,9 @@ through the Docker socket proxy. The work folder goes in and comes back as tar a
 host paths are shared. Claude runs under your claude.ai login, kept in a
 Docker volume mounted as the solver's home: a full login, unlike a setup token, can read the
 theme artifact, and the volume keeps the refreshed login between runs. Log in once with
-the setup page (/setup). The container's only network is the sandbox
-network, whose way out is the egress proxy. Limits: 2 CPUs, 4 GB memory, 512 processes and
-the run's time limit.
+the setup page (/setup). The container's network is the sandbox network: the internet,
+but none of the stack's services. Claude has every tool and no permission prompts inside it.
+Limits: 2 CPUs, 4 GB memory, 512 processes and the run's time limit.
 
 LocalSandbox (development): the same entry script as a subprocess, with a clean environment
 and the home folder of a logged-in Claude Code.
@@ -193,7 +193,7 @@ class DockerSandbox:
 
 
 def _find_image(client, name: str) -> str:
-    """The image by its name, else the one the compose file built for the egress service."""
+    """The image by its name, else the one the compose file built for the solver-image service."""
     try:
         client.images.get(name)
         return name
@@ -202,13 +202,13 @@ def _find_image(client, name: str) -> str:
     base = name.split(":")[0]
     for img in client.images.list():
         for tag in img.tags:
-            if tag.split(":")[0].endswith((base, "-egress", "_egress")):
+            if tag.split(":")[0].endswith((base, "-solver-image", "_solver-image")):
                 return tag
     return name  # the run fails with Docker's own message
 
 
 def _find_network(client, name: str) -> str:
-    """The sandbox network by its name, else the internal network whose name ends in 'sandbox'."""
+    """The sandbox network by its name, else the one whose name ends in 'sandbox'; made if missing."""
     try:
         client.networks.get(name)
         return name
@@ -216,8 +216,9 @@ def _find_network(client, name: str) -> str:
         pass
     try:
         for net in client.networks.list():
-            if net.attrs.get("Internal") and net.name.endswith(("sandbox", name)):
+            if net.name.endswith(("_sandbox", "-sandbox", name)):
                 return net.name
+        client.networks.create(name, driver="bridge")
     except Exception:
         pass
     return name

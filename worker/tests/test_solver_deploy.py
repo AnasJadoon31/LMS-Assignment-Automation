@@ -14,7 +14,9 @@ class FakeDocker:
         self._images, self._networks, self._containers = images, networks, containers
         self.hostname_known = hostname_known
         self.images = SimpleNamespace(get=self._get_image, list=lambda: [SimpleNamespace(tags=[t]) for t in images])
-        self.networks = SimpleNamespace(get=self._get_net, list=lambda: [SimpleNamespace(name=n, attrs={"Internal": i}) for n, i in networks.items()])
+        self.created = []
+        self.networks = SimpleNamespace(get=self._get_net, create=lambda name, driver: self.created.append(name),
+                                        list=lambda: [SimpleNamespace(name=n, attrs={"Internal": i}) for n, i in networks.items()])
         self.containers = SimpleNamespace(get=self._get_container, list=self._list)
 
     def _get_image(self, name):
@@ -47,10 +49,16 @@ def test_names_as_compose_gives_them():
 
 
 def test_names_as_coolify_renames_them():
-    client = FakeDocker(["k8c4w0-egress:latest", "postgres:16-alpine"], {"k8c4w0_sandbox": True, "k8c4w0": False},
+    client = FakeDocker(["k8c4w0-solver-image:latest", "postgres:16-alpine"], {"k8c4w0_sandbox": False, "k8c4w0": False},
                         {"api": mounts("k8c4w0_claude-home")})
     box = DockerSandbox.deployed("lms-solver:latest", "lms-sandbox", None, "/claude-home", client=client)
-    assert (box.image, box.network, box.login_volume) == ("k8c4w0-egress:latest", "k8c4w0_sandbox", "k8c4w0_claude-home")
+    assert (box.image, box.network, box.login_volume) == ("k8c4w0-solver-image:latest", "k8c4w0_sandbox", "k8c4w0_claude-home")
+
+
+def test_a_missing_sandbox_network_is_made():
+    client = FakeDocker(["lms-solver:latest"], {"bridge": False}, {"worker": mounts("v")}, hostname_known=True)
+    box = DockerSandbox.deployed("lms-solver:latest", "lms-sandbox", None, "/claude-home", client=client)
+    assert box.network == "lms-sandbox" and client.created == ["lms-sandbox"]
 
 
 def test_an_explicit_login_volume_wins():
