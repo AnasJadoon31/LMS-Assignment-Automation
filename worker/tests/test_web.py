@@ -75,7 +75,7 @@ def client(tmp_path, claude_bin=None, password=PASSWORD, admin=None):
 
 def signed_in(c):
     r = c.post("/login", data={"password": PASSWORD}, follow_redirects=False)
-    assert r.status_code == 303 and r.headers["location"] == "/setup"
+    assert r.status_code == 303 and r.headers["location"] == "/courses"
     cookie = r.headers["set-cookie"]
     assert "HttpOnly" in cookie and "SameSite=strict" in cookie and "Secure" in cookie
     return c

@@ -21,6 +21,8 @@ from typing import Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
+from . import actions
+from .actions import JOB_WORDS
 from .db.models import TERMINAL_STATES, Artifact, Assignment, ChatSession, Course, CourseMode, Event, Job, JobState, utcnow
 from .kv import KeyValue
 from .lms.bahria_pages import LMS_TZ
@@ -65,21 +67,6 @@ CATEGORIES = {
 LABELS = {k: v for cats in CATEGORIES.values() for k, v in cats}
 LABELS["due_soon"] = "Due or starting in the next 48 hours"
 
-JOB_WORDS = {
-    JobState.DETECTED: "found; downloading the question file",
-    JobState.DOWNLOADED: "question file saved; waiting for the solver",
-    JobState.TRIAGED: "checked; waiting to be solved",
-    JobState.SOLVING: "being solved",
-    JobState.RENDERED: "solved; PDF built, being checked",
-    JobState.VERIFIED: "solved and checked",
-    JobState.AWAITING_APPROVAL: "solved; waiting for your approval",
-    JobState.SUBMITTING: "approved; uploading",
-    JobState.CONFIRMED: "uploaded by the service",
-    JobState.NEEDS_HUMAN: "stopped",
-    JobState.REJECTED: "rejected by you",
-    JobState.SUPERSEDED: "replaced by a newer revision",
-    JobState.HANDWRITTEN: "solved; handwritten, sent to you to copy",
-}
 
 
 @dataclass(frozen=True)
@@ -201,34 +188,17 @@ class Bot:
     def _execute(self, s: Session, c: dict) -> str:
         action = c["action"]
         if action == "mode":
-            course = s.get(Course, c["course"])
-            course.mode = c["mode"]
-            return f"{course.name} is now in {course.mode} mode."
+            return actions.set_mode(s.get(Course, c["course"]), c["mode"])[1]
         job = s.get(Job, c["job"])
         if job is None:
             return "That job no longer exists."
-        a = job.assignment
-        if action in ("approve", "reject") and job.state != JobState.AWAITING_APPROVAL:
-            return f"Nothing changed: {a.title} is {JOB_WORDS.get(job.state, job.state)} now."
         if action == "approve":
-            job.attempts = 0  # counts upload tries from here
-            self._move(s, job, JobState.SUBMITTING, "approved on WhatsApp")
-            self.kv.set(POLL_NOW_KEY, self.now().isoformat())  # the worker uploads within seconds
-            return f"Approved: {a.title}. Uploading now; the LMS receipt will follow."
+            return actions.approve(s, job, self.kv, self.now(), "WhatsApp")[1]
         if action == "reject":
-            self._move(s, job, JobState.REJECTED, "rejected on WhatsApp")
-            return f"Rejected: {a.title}. Nothing will be uploaded."
+            return actions.reject(s, job, "WhatsApp")[1]
         if action == "redo":
-            job.note = c.get("note")
-            job.attempts = 0
-            self._move(s, job, JobState.DOWNLOADED, f"redo requested on WhatsApp: {job.note}")
-            return f"Redo queued for {a.title}. The new PDF comes to you before anything is uploaded."
+            return actions.redo(s, job, c.get("note") or "", "WhatsApp")[1]
         raise ValueError(f"Unknown action {action}")
-
-    @staticmethod
-    def _move(s: Session, job: Job, to: JobState, detail: str) -> None:
-        s.add(Event(job_id=job.id, from_state=job.state, to_state=to, detail=detail))
-        job.state = to
 
     # --- rendering ---
 
@@ -335,7 +305,7 @@ class Bot:
             if job.state == JobState.AWAITING_APPROVAL:
                 options.append(("Approve and upload", {"do": "confirm", "action": "approve", "job": job.id}))
                 options.append(("Reject", {"do": "confirm", "action": "reject", "job": job.id}))
-            if job.state in (JobState.AWAITING_APPROVAL, JobState.NEEDS_HUMAN, JobState.CONFIRMED, JobState.HANDWRITTEN) and not a.deadline_passed:
+            if actions.can_redo(job):
                 options.append(("Redo with a note", {"do": "note", "job": job.id}))
             options.append(("History", {"do": "history", "job": job.id}))
         return "", lines, options

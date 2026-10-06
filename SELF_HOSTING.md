@@ -69,6 +69,11 @@ terminal (below). With one, use the setup page instead.
      pairing code (WhatsApp, **Linked devices**, **Link a device**, **Link with phone number
      instead**).
    - **Google Drive** (optional, see below): **Connect Google Drive**.
+   - **Discord** (optional): paste a channel webhook URL.
+
+   Then **Courses** lists this semester's courses. Pick each course's mode (**Approve**,
+   **Auto** or **Notify**); open a course to see its assignments and lab papers, download
+   question files and solved PDFs, and approve, reject or redo.
 
 The worker starts solver containers through Docker, so the stack mounts
 `/var/run/docker.sock` (read-only, behind `docker-proxy`). Coolify allows this.
@@ -131,9 +136,9 @@ at least every two weeks; WhatsApp logs out linked devices when the phone has be
 longer than that. `lms-worker whatsapp unlink` removes the link.
 
 Discord instead of, or as well as, WhatsApp: create a webhook (channel settings,
-**Integrations**, **Webhooks**, **New Webhook**, **Copy Webhook URL**), set
-`DISCORD_WEBHOOK_URL`, restart, and run `lms-worker notify-test`. Discord is one-way:
-alerts and files only.
+**Integrations**, **Webhooks**, **New Webhook**, **Copy Webhook URL**) and paste it into
+**Discord** on the setup page; it sends a test message and takes effect at once. Or set
+`DISCORD_WEBHOOK_URL` and restart. Discord is one-way: alerts and files only.
 
 ## Check it works
 

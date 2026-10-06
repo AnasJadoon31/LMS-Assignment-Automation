@@ -5,7 +5,11 @@ sends pending rows afterwards. Channels deliver independently: one being down ne
 holds the other back, and a retry never re-sends to a channel that already got it.
 
 Discord webhooks are one-way, so approvals and the reply menu stay on WhatsApp and
-the web UI; Discord gets the same alerts and files.
+the web UI; Discord gets the same alerts and files. The webhook can be set on the setup
+page (kept encrypted) or with DISCORD_WEBHOOK_URL; the page's choice wins, and it is read
+on every send, so a change needs no restart.
+
+A channel that is switched off (no Discord webhook) gets no rows; its pending rows wait.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ import base64
 import json
 import logging
 import mimetypes
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,12 +28,14 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from .config import EvolutionConfig
+from .config import DISCORD_WEBHOOK, EvolutionConfig
 from .db.models import Notification
+from .kv import KeyValue, SecretBox
 
 log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 20
+DISCORD_KEY = "discord_webhook"
 
 
 class NotifyError(Exception):
@@ -38,6 +45,12 @@ class NotifyError(Exception):
 class Notifier(Protocol):
     def text(self, message: str) -> None: ...
     def document(self, path: Path, caption: str) -> None: ...
+
+
+def active(notifier: Notifier) -> bool:
+    """Whether a channel is on now. Channels without an on/off switch are always on."""
+    check = getattr(notifier, "active", None)
+    return check() if check else True
 
 
 class EvolutionNotifier:
@@ -144,8 +157,94 @@ def _retry_after(r: httpx.Response) -> float | None:
         return float(header) if header else None
 
 
+class DiscordSetting:
+    """Where Discord messages go: a webhook saved on the setup page (encrypted), else
+    DISCORD_WEBHOOK_URL. Turning it off on the page overrides the variable too."""
+
+    def __init__(self, kv: KeyValue | None, box: SecretBox | None, env_url: str | None = None, *,
+                 transport: httpx.BaseTransport | None = None) -> None:
+        self.kv, self.box, self.env_url, self.transport = kv, box, env_url, transport
+
+    def _stored(self) -> dict | None:
+        raw = self.kv.get(DISCORD_KEY) if self.kv else None
+        return json.loads(raw) if raw else None
+
+    def url(self) -> str | None:
+        stored = self._stored()
+        if stored is None:
+            return self.env_url
+        if stored.get("off") or not self.box:
+            return None
+        try:
+            return self.box.decrypt(stored["url"])
+        except (ValueError, KeyError):
+            return None
+
+    def source(self) -> str | None:
+        """page, env, or None when off."""
+        stored = self._stored()
+        if stored is None:
+            return "env" if self.env_url else None
+        return None if stored.get("off") else "page"
+
+    @property
+    def editable(self) -> bool:
+        return self.kv is not None and self.box is not None
+
+    def save(self, url: str) -> None:
+        url = url.strip()
+        if not DISCORD_WEBHOOK.fullmatch(url):
+            raise ValueError("That is not a Discord webhook URL (https://discord.com/api/webhooks/<id>/<token>)")
+        if not self.editable:
+            raise ValueError("Saving needs DATABASE_URL and APP_SECRET_KEY; set DISCORD_WEBHOOK_URL instead")
+        self.kv.set(DISCORD_KEY, json.dumps({"url": self.box.encrypt(url)}))
+
+    def turn_off(self) -> None:
+        if not self.editable:
+            raise ValueError("Turning Discord off here needs DATABASE_URL; unset DISCORD_WEBHOOK_URL instead")
+        self.kv.set(DISCORD_KEY, json.dumps({"off": True}))
+
+    def notifier(self) -> DiscordNotifier:
+        url = self.url()
+        if not url:
+            raise NotifyError("Discord is off")
+        return DiscordNotifier(url, transport=self.transport)
+
+
+def masked(url: str | None) -> str | None:
+    """'discord.com/api/webhooks/1234…/••••Ab3x': enough to recognise, not enough to post."""
+    if not url:
+        return None
+    m = re.search(r"(discord(?:app)?\.com)/api/(?:v\d+/)?webhooks/(\d+)/([\w-]+)", url)
+    if not m:
+        return "set"
+    return f"{m.group(1)}/api/webhooks/{m.group(2)[:4]}…/••••{m.group(3)[-4:]}"
+
+
+class LiveDiscord:
+    """The Discord channel as set at this moment: the webhook is looked up on every send."""
+
+    def __init__(self, setting: DiscordSetting) -> None:
+        self.setting = setting
+
+    def active(self) -> bool:
+        return self.setting.url() is not None
+
+    def text(self, message: str) -> None:
+        self.setting.notifier().text(message)
+
+    def document(self, path: Path, caption: str) -> None:
+        self.setting.notifier().document(path, caption)
+
+
 class ConsoleNotifier:
-    """Used when no channel is configured: messages go to the log."""
+    """Messages go to the log: when no other channel is on, or always without a switch."""
+
+    def __init__(self, when: Callable[[], bool] | None = None) -> None:
+        self._when = when
+
+    def active(self) -> bool:
+        return self._when() if self._when else True
 
     def text(self, message: str) -> None:
         log.info("notification: %s", message)
@@ -160,6 +259,8 @@ def send_test(channels: dict[str, Notifier], message: str) -> dict[str, str | No
     """Send one text straight to each channel, skipping the outbox. Returns the error per channel, or None."""
     results: dict[str, str | None] = {}
     for name, notifier in channels.items():
+        if not active(notifier):
+            continue
         try:
             notifier.text(message)
             results[name] = None
@@ -175,7 +276,9 @@ class Outbox:
         self.channels = channels
 
     def queue(self, session: Session, kind: str, text: str, *, file: Path | None = None, job_id: int | None = None) -> None:
-        for channel in self.channels:
+        for channel, notifier in self.channels.items():
+            if not active(notifier):
+                continue
             session.add(
                 Notification(channel=channel, kind=kind, text=text, file_path=str(file) if file else None, job_id=job_id)
             )
@@ -184,6 +287,8 @@ class Outbox:
         """Send pending messages oldest first on each channel. Returns (sent, failed)."""
         sent = failed = 0
         for channel, notifier in self.channels.items():
+            if not active(notifier):  # switched off: its rows wait
+                continue
             s_, f_ = self._flush_channel(sessions, channel, notifier)
             sent += s_
             failed += f_

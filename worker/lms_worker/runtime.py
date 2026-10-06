@@ -13,7 +13,7 @@ from .kv import DbKV, FileKV, KeyValue, SecretBox
 from .lms.bahria import BahriaAdapter
 from .lms.login_guard import LoginGuard
 from .lms.session import SessionStore
-from .notify import ConsoleNotifier, DiscordNotifier, EvolutionNotifier, Notifier, Outbox
+from .notify import ConsoleNotifier, DiscordSetting, EvolutionNotifier, LiveDiscord, Notifier, Outbox, active
 from .watcher import Watcher
 
 
@@ -25,15 +25,21 @@ class Runtime:
     engine: Engine | None = None
     sessions: sessionmaker[Session] | None = None
 
+    def discord(self) -> DiscordSetting:
+        st = self.settings
+        box = SecretBox(st.app_secret_key) if st.app_secret_key and self.sessions is not None else None
+        return DiscordSetting(self.kv if box else None, box, st.discord_webhook_url)
+
     def outbox(self) -> Outbox:
-        """Every configured channel gets every message; with none, they go to the log."""
+        """Every channel that is on gets every message; with none on, they go to the log."""
         channels: dict[str, Notifier] = {}
         evo = self.settings.evolution
         if evo and evo.number:
             channels["whatsapp"] = EvolutionNotifier(evo)
-        if self.settings.discord_webhook_url:
-            channels["discord"] = DiscordNotifier(self.settings.discord_webhook_url)
-        return Outbox(channels or {"console": ConsoleNotifier()})
+        channels["discord"] = LiveDiscord(self.discord())
+        others = dict(channels)
+        channels["console"] = ConsoleNotifier(when=lambda: not any(active(n) for n in others.values()))
+        return Outbox(channels)
 
     def drive(self):
         """Google Drive saving, when an OAuth client is set; it still needs connecting on the setup page."""

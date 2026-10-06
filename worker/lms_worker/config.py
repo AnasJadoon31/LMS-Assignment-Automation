@@ -22,6 +22,7 @@ class ConfigError(Exception):
     pass
 
 
+DISCORD_WEBHOOK = re.compile(r"https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/(?:v\d+/)?webhooks/\d+/[\w-]+")
 EVOLUTION_VARS = ("EVOLUTION_API_URL", "EVOLUTION_API_KEY", "EVOLUTION_INSTANCE", "WHATSAPP_NUMBER")
 
 
@@ -114,7 +115,7 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
             number="".join(ch for ch in evo["WHATSAPP_NUMBER"] if ch.isdigit()) or None,
         )
     discord = os.environ.get("DISCORD_WEBHOOK_URL", "").strip() or None
-    if discord and not re.match(r"https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/(?:v\d+/)?webhooks/\d+/[\w-]+$", discord):
+    if discord and not DISCORD_WEBHOOK.fullmatch(discord):
         raise ConfigError("DISCORD_WEBHOOK_URL must be a Discord webhook URL (https://discord.com/api/webhooks/<id>/<token>)")
     solver = None
     if os.environ.get("SOLVER_IMAGE", "").strip():

@@ -10,7 +10,7 @@ The design is in the tech spec.
 | 2. Watcher: poller, fingerprints, database, notifier | Done: WhatsApp and Discord, lab papers, marks, reminders |
 | 3. Solver | Done: one Claude run per assignment in a sandbox container; usage limits; Google Drive |
 | 4. Submitter | Done: uploads the PDF through the LMS Submit form after approval; not yet tried on a live assignment |
-| 5. Setup page and auto mode | Done: `/setup` signs Claude in, links WhatsApp, connects Drive; auto mode per course |
+| 5. Web UI and auto mode | Done: **Courses** (modes, assignments, lab papers, files, approve, reject, redo) and **Setup** (Claude sign-in, WhatsApp, Google Drive, Discord) |
 
 ## How an assignment is solved
 

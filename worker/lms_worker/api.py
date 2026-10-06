@@ -31,9 +31,10 @@ from .gdrive import GoogleDrive
 from .config import Settings
 from .db.models import InboundMessage
 from .kv import KeyValue, SecretBox
-from .notify import EvolutionNotifier, Notifier, NotifyError
+from .notify import DiscordSetting, EvolutionNotifier, Notifier, NotifyError
 from .watcher import HEARTBEAT_KEY
-from .web import setup_router
+from .dashboard import dashboard_router
+from .web import Auth, setup_router
 from .whatsapp import EvolutionAdmin, WhatsAppError
 
 log = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ def create_app(
     register_webhook: bool = True,
     login: ClaudeLogin | None = None,
     drive: GoogleDrive | None = None,
+    discord: DiscordSetting | None = None,
 ) -> FastAPI:
     secret = webhook_secret(settings.app_secret_key or "")
     owner = settings.evolution.number if settings.evolution else None
@@ -70,6 +72,9 @@ def create_app(
         login = ClaudeLogin(settings.claude_home)
     if drive is None and settings.google_client_id and settings.google_client_secret and settings.app_secret_key:
         drive = GoogleDrive(settings.google_client_id, settings.google_client_secret, kv, SecretBox(settings.app_secret_key))
+    if discord is None:
+        box = SecretBox(settings.app_secret_key) if settings.app_secret_key else None
+        discord = DiscordSetting(kv if box else None, box, settings.discord_webhook_url)
     bot = Bot(sessions, kv, login=login, setup_url=f"{settings.public_url}/setup" if settings.public_url else None)
 
     @asynccontextmanager
@@ -82,8 +87,11 @@ def create_app(
         stop.set()
 
     app = FastAPI(title="LMS Assignment Automation", lifespan=lifespan, docs_url=None, redoc_url=None)
+    auth = Auth(settings.admin_password, settings.app_secret_key or "")
     app.include_router(setup_router(password=settings.admin_password, secret_key=settings.app_secret_key or "",
-                                    login=login, admin=admin, drive=drive, public_url=settings.public_url))
+                                    login=login, admin=admin, drive=drive, discord=discord,
+                                    public_url=settings.public_url, auth=auth))
+    app.include_router(dashboard_router(auth, sessions, kv))
 
     @app.get("/api/health")
     def health() -> dict:
