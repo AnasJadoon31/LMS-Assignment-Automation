@@ -83,7 +83,7 @@ services:
 
   # Starts solver containers for the worker. Only container, image and network calls are allowed.
   docker-proxy:
-    image: tecnativa/docker-socket-proxy:v0.3.0
+    image: tecnativa/docker-socket-proxy:0.3.0
     restart: unless-stopped
     environment:
       - CONTAINERS=1
