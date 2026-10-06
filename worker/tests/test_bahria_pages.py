@@ -8,10 +8,11 @@ from lms_worker.lms.bahria_pages import (
     decode_download_key,
     parse_assignments_page,
     parse_deadline,
+    parse_papers_page,
 )
 from lms_worker.lms.errors import ContractBroken
 
-from .conftest import ASSIGNMENTS_HTML, EMPTY_ASSIGNMENTS_HTML
+from .conftest import ASSIGNMENTS_HTML, EMPTY_ASSIGNMENTS_HTML, EMPTY_PAPERS_HTML, PAPERS_HTML
 
 
 def test_selects_give_semester_and_courses():
@@ -75,3 +76,22 @@ def test_changed_table_layout_breaks_the_contract():
         parse_assignments_page("<html><body>Maintenance</body></html>")
     with pytest.raises(ContractBroken, match="courseId"):
         parse_assignments_page(ASSIGNMENTS_HTML.replace('id="courseId"', 'id="course"'))
+
+
+def test_papers_rows_have_a_term_and_the_same_states():
+    mid, final = parse_papers_page(PAPERS_HTML).rows
+    assert (mid.number, mid.title, mid.term, mid.action) == ("1", "Mid Term paper", "Mid Term", "closed")
+    assert mid.remarks == "Attempt any four" and mid.marks == "18/30"
+    assert mid.question_file == "Mid-Paper-15102026.pdf"
+    assert mid.submission_file == "02-000000-001-mid.pdf"
+    assert (final.title, final.action, final.assignment_id) == ("Final Term paper", "submit", "88001")
+    assert final.remarks is None and final.submission_file is None and not final.deadline_passed
+    assert final.deadline == datetime(2026, 12, 20, 13, 0, tzinfo=LMS_TZ)
+    assert parse_papers_page(EMPTY_PAPERS_HTML).rows == []
+
+
+def test_layouts_do_not_mix():
+    with pytest.raises(ContractBroken, match="Papers table columns changed"):
+        parse_papers_page(ASSIGNMENTS_HTML)
+    with pytest.raises(ContractBroken, match="Assignments table columns changed"):
+        parse_assignments_page(PAPERS_HTML)

@@ -10,6 +10,7 @@ Evolution v2 endpoints used (all with the global `apikey` header from EVOLUTION_
   GET    /instance/connect/{instance}[?number=] -> {code, base64, pairingCode, count}
   DELETE /instance/logout/{instance}
   GET    /instance/fetchInstances?instanceName=
+  POST   /webhook/set/{instance}                {webhook: {enabled, url, headers, events: [MESSAGES_UPSERT]}}
 A pairing code is only issued when a connection starts with a number, so a pending QR
 session is logged out first.
 """
@@ -120,6 +121,23 @@ class EvolutionAdmin:
         """The latest QR or pairing code of a link in progress (QR codes rotate)."""
         r = self._request("GET", f"/instance/connect/{self.cfg.instance}")
         return _challenge(r.json(), want_pairing=False)
+
+    def set_webhook(self, url: str, headers: dict[str, str]) -> None:
+        """Have Evolution post incoming messages to the app, with a secret header."""
+        self._request(
+            "POST",
+            f"/webhook/set/{self.cfg.instance}",
+            json={
+                "webhook": {
+                    "enabled": True,
+                    "url": url,
+                    "headers": headers,
+                    "byEvents": False,
+                    "base64": False,
+                    "events": ["MESSAGES_UPSERT"],
+                }
+            },
+        )
 
     def unlink(self) -> None:
         if self.state().state in ("open", "connecting"):

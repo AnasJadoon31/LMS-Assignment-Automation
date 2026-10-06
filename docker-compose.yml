@@ -2,9 +2,10 @@
 # Works with `docker compose up -d` on any machine, or as a Docker Compose resource on Coolify.
 # Values come from .env (plain Docker) or the resource's environment variables (Coolify).
 #
-# Only the worker talks to the LMS and to Evolution API. Nothing here publishes a port:
-# Evolution API, PostgreSQL and Redis are reachable only inside this stack.
-# The api service (web UI) and the solver sandbox join in later build steps.
+# Only the worker talks to the LMS. The api answers your WhatsApp messages through the
+# menu. Nothing here publishes a port: Evolution API posts incoming messages to the api
+# inside the stack. The web UI (on the api, with a domain) and the solver sandbox join
+# in later build steps.
 
 services:
   worker:
@@ -26,6 +27,32 @@ services:
       - TZ=Asia/Karachi
     volumes:
       - artifacts:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Answers WhatsApp messages through the numbered menu; same image as the worker
+  api:
+    build: ./worker
+    restart: unless-stopped
+    command: ["sh", "-c", "lms-worker db-upgrade && exec lms-worker api"]
+    environment:
+      - DATABASE_URL=postgresql://lms:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/lms
+      - APP_SECRET_KEY=${APP_SECRET_KEY:?set APP_SECRET_KEY}
+      - EVOLUTION_API_URL=${EVOLUTION_API_URL:-http://evolution-api:8080}
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-}
+      - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-lms}
+      - WHATSAPP_NUMBER=${WHATSAPP_NUMBER:-}
+      - API_INTERNAL_URL=http://api:8000
+      - TZ=Asia/Karachi
+    volumes:
+      - artifacts:/data:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     depends_on:
       postgres:
         condition: service_healthy

@@ -16,7 +16,8 @@ from lms_worker.lms.errors import BadCredentials, ContractBroken, LMSError, Relo
 from lms_worker.lms.session import SessionStore
 from lms_worker.notify import Outbox
 from lms_worker.schedule import next_delay
-from lms_worker.watcher import HEARTBEAT_KEY, POLL_PAUSE_KEY, PollResult, Watcher
+from lms_worker.schedule import run_forever
+from lms_worker.watcher import HEARTBEAT_KEY, POLL_NOW_KEY, POLL_PAUSE_KEY, PollResult, Watcher
 
 from .test_notify import Flaky
 
@@ -28,7 +29,7 @@ DUE = datetime(2026, 10, 11, 23, 55, tzinfo=LMS_TZ)
 def meta(course, number, title, **kw):
     defaults = dict(
         course=course,
-        lms_ref=f"{course.code}:{number}",
+        lms_ref=f"{course.code}:{'P' if kw.get('kind') == 'paper' else ''}{number}",
         number=str(number),
         title=title,
         deadline=DUE,
@@ -40,6 +41,7 @@ def meta(course, number, title, **kw):
 class FakeLMS:
     def __init__(self):
         self.listing: dict[str, list[lms.AssignmentMeta]] = {}
+        self.papers: dict[str, list[lms.AssignmentMeta]] = {}
         self.courses: list[lms.Course] = []
         self.session_error: Exception | None = None
         self.download_error: dict[str, Exception] = {}
@@ -62,6 +64,10 @@ class FakeLMS:
     def list_assignments(self, course):
         self.calls.append(f"list:{course.code}")
         return list(self.listing[course.lms_ref])
+
+    def list_papers(self, course):
+        self.calls.append(f"papers:{course.code}")
+        return list(self.papers.get(course.lms_ref, []))
 
     def download(self, a, dest: Path):
         self.calls.append(f"download:{a.lms_ref}")
@@ -337,3 +343,130 @@ def test_file_store_is_owner_only(tmp_path):
     assert oct(kv.path("lms_session").stat().st_mode & 0o777) == "0o600"
     with pytest.raises(ValueError):
         kv.path("../escape")
+
+
+def paper(course, number, term, **kw):
+    return meta(course, number, f"{term} paper", kind="paper", term=term, **kw)
+
+
+class Clock:
+    def __init__(self, at):
+        self.at = at
+
+    def __call__(self):
+        return self.at
+
+
+def test_papers_are_announced_with_their_file_but_never_get_jobs(watcher, lmsfake, channel, sessions):
+    lmsfake.set(DAA)
+    lmsfake.papers[DAA.lms_ref] = [
+        paper(DAA, 1, "Mid Term", deadline=DUE, remarks="Attempt any four"),
+        paper(DAA, 2, "Final Term", deadline=DUE - timedelta(days=40), deadline_passed=True, submitted_file="f.pdf"),
+    ]
+    r = watcher.poll_once()
+
+    assert (r.papers, r.new_papers, r.skipped, r.new_jobs) == (2, 1, 1, 0)
+    assert jobs(sessions) == []
+    caption, filename = channel.sent[-1]
+    assert caption.splitlines()[:3] == ["New paper posted", "Design & Analysis of Algorithms", "Mid Term paper"]
+    assert "Note: Attempt any four" in caption and filename == "Mid-Term-paper.pdf"
+    with sessions() as s:
+        mid = s.scalar(select(Assignment).where(Assignment.lms_ref == "155150:P1"))
+        assert (mid.kind, mid.term) == ("paper", "Mid Term") and Path(mid.question_path).exists()
+
+    sent = len(channel.sent)
+    watcher.poll_once()
+    assert len(channel.sent) == sent  # announced once
+
+    lmsfake.papers[DAA.lms_ref][0] = paper(DAA, 1, "Mid Term", deadline=DUE + timedelta(hours=2), attachment_name="v2.pdf")
+    watcher.poll_once()
+    assert channel.sent[-1][0].startswith("Paper changed") and channel.sent[-1][1] == "v2.pdf"
+
+
+def test_marks_posted_is_sent_once_when_marks_appear(watcher, lmsfake, channel):
+    lmsfake.set(LAB, meta(LAB, 4, "Lab 4", deadline_passed=True, submitted_file="mine.pdf", marks=None))
+    watcher.poll_once()
+    lmsfake.set(LAB, meta(LAB, 4, "Lab 4", deadline_passed=True, submitted_file="mine.pdf", marks="9/10"))
+    r = watcher.poll_once()
+    watcher.poll_once()
+
+    assert r.marks_posted == 1
+    assert [m for m, _ in channel.sent if m.startswith("Marks posted")] == ["Marks posted\nComputer Architecture Lab\nLab 4: 9/10"]
+
+
+def test_reminders_24h_and_2h_before_a_deadline_with_nothing_submitted(lmsfake, sessions, channel, tmp_path):
+    now = datetime(2026, 10, 10, 9, 0, tzinfo=LMS_TZ)
+    clock = Clock(now)
+    w = Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path, now=clock)
+    lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations", deadline=now + timedelta(hours=40)))
+    lmsfake.papers[DAA.lms_ref] = [paper(DAA, 1, "Mid Term", deadline=now + timedelta(hours=30))]
+    w.poll_once()
+    assert not [m for m, _ in channel.sent if " due in " in m]
+
+    clock.at = now + timedelta(hours=17)  # 23 h and 13 h left
+    assert w.poll_once().reminders == 2
+    clock.at = now + timedelta(hours=17, minutes=10)
+    assert w.poll_once().reminders == 0
+    clock.at = now + timedelta(hours=38, minutes=30)  # assignment 1 h 30 min left; paper already closed below
+    lmsfake.papers[DAA.lms_ref] = [paper(DAA, 1, "Mid Term", deadline=now + timedelta(hours=30), deadline_passed=True)]
+    assert w.poll_once().reminders == 1
+
+    reminders = [m for m, _ in channel.sent if " due in " in m]
+    assert reminders[0].startswith("Assignment due in 23 h 0 min, nothing submitted")
+    assert reminders[1].startswith("Paper due in 13 h 0 min, nothing submitted")
+    assert reminders[2].startswith("Assignment due in 1 h 30 min, nothing submitted")
+
+
+def test_no_reminder_once_submitted(lmsfake, sessions, channel, tmp_path):
+    now = datetime(2026, 10, 10, 9, 0, tzinfo=LMS_TZ)
+    clock = Clock(now)
+    w = Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path, now=clock)
+    lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations", deadline=now + timedelta(hours=30)))
+    w.poll_once()
+    lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations", deadline=now + timedelta(hours=30), submitted_file="mine.pdf"))
+    clock.at = now + timedelta(hours=8)
+    assert w.poll_once().reminders == 0
+
+
+def test_status_snapshot_is_kept_for_every_item(watcher, lmsfake, sessions):
+    lmsfake.set(LAB, meta(LAB, 6, "Lab 6", submitted_file="mine.pdf", marks=None))
+    watcher.poll_once()
+    with sessions() as s:
+        a = s.scalar(select(Assignment))
+        assert (a.submitted_file, a.deadline_passed, a.marks, a.kind) == ("mine.pdf", False, None, "assignment")
+        assert a.status_seen_at is not None
+
+
+def test_a_requested_check_ends_the_wait_early(watcher, lmsfake, sessions):
+    import threading
+
+    lmsfake.set(DAA)
+    kv = DbKV(sessions)
+    stop = threading.Event()
+    polls = []
+
+    def on_result(result, delay):
+        polls.append(result.status)
+        if len(polls) == 1:
+            kv.set(POLL_NOW_KEY, "whatsapp")
+        else:
+            stop.set()
+
+    import lms_worker.schedule as schedule
+
+    old = schedule.WAKE_CHECK_SECONDS
+    schedule.WAKE_CHECK_SECONDS = 0.05
+    try:
+        t = threading.Thread(
+            target=run_forever,
+            args=(watcher, stop),
+            kwargs=dict(clock=lambda: datetime.now(timezone.utc), on_result=on_result,
+                        poll_requested=lambda: kv.get(POLL_NOW_KEY) is not None),
+        )
+        t.start()
+        t.join(timeout=10)
+    finally:
+        schedule.WAKE_CHECK_SECONDS = old
+        stop.set()
+    assert polls == ["ok", "ok"]  # the second poll came long before the 10-minute interval
+    assert kv.get(POLL_NOW_KEY) is None

@@ -1,6 +1,7 @@
 """LMS worker commands.
 
     lms-worker run              poll the LMS on schedule until stopped (the worker service)
+    lms-worker api              answer WhatsApp messages through the menu (the api service)
     lms-worker poll             run one poll cycle now
     lms-worker status           last poll, pauses, session and recent jobs
     lms-worker resume           clear a polling pause after the LMS layout changed
@@ -24,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import signal
 import sys
 import threading
@@ -42,7 +44,7 @@ from .config import ConfigError
 from .runtime import Runtime
 from .schedule import run_forever
 from .whatsapp import EvolutionAdmin, WhatsAppError
-from .watcher import HEARTBEAT_KEY, POLL_PAUSE_KEY, PollResult
+from .watcher import HEARTBEAT_KEY, POLL_NOW_KEY, POLL_PAUSE_KEY, PollResult
 
 
 def cmd_probe(rt: Runtime, args) -> int:
@@ -222,6 +224,22 @@ def _print_qr(text: str | None) -> None:
     segno.make(text, error="L").terminal(compact=True)
 
 
+def cmd_api(rt: Runtime, args) -> int:
+    from .api import DEFAULT_INTERNAL_URL, create_app, serve
+
+    if not rt.settings.evolution or not rt.settings.evolution.number:
+        print("WhatsApp is not configured (EVOLUTION_API_URL, EVOLUTION_API_KEY, WHATSAPP_NUMBER); "
+              "the api will run but cannot answer messages", flush=True)
+    app = create_app(
+        rt.settings,
+        rt.sessions,
+        rt.kv,
+        internal_url=os.environ.get("API_INTERNAL_URL", DEFAULT_INTERNAL_URL),
+    )
+    serve(app, host=args.host, port=args.port)
+    return 0
+
+
 def cmd_db_upgrade(rt: Runtime, args) -> int:
     db.upgrade(rt.engine)
     print("Database is up to date")
@@ -232,7 +250,9 @@ def _print_result(result: PollResult, delay: float | None = None) -> None:
     line = (
         f"{datetime.now().astimezone().isoformat(timespec='seconds')} poll {result.status}: {result.courses} courses, {result.seen} assignments, "
         f"{result.new_jobs} new, {result.revisions} changed, {result.skipped} skipped, "
-        f"{result.stopped} stopped, {result.downloaded} downloaded, {result.sent} messages sent"
+        f"{result.stopped} stopped, {result.downloaded} downloaded, {result.papers} papers "
+        f"({result.new_papers} new), {result.marks_posted} marks posted, {result.reminders} reminders, "
+        f"{result.sent} messages sent"
     )
     if delay is not None:
         line += f"; next in {delay / 60:.1f} min"
@@ -252,7 +272,13 @@ def cmd_run(rt: Runtime, args) -> int:
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
     print("Polling the LMS; stop with Ctrl-C", flush=True)
-    run_forever(rt.watcher(), stop, clock=lambda: datetime.now().astimezone(), on_result=_print_result)
+    run_forever(
+        rt.watcher(),
+        stop,
+        clock=lambda: datetime.now().astimezone(),
+        on_result=_print_result,
+        poll_requested=lambda: rt.kv.get(POLL_NOW_KEY) is not None,
+    )
     return 0
 
 
@@ -283,7 +309,7 @@ def cmd_status(rt: Runtime, args) -> int:
     return 0
 
 
-NEEDS_DB = {"db-upgrade", "poll", "run", "resume", "status"}
+NEEDS_DB = {"db-upgrade", "poll", "run", "resume", "status", "api"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -291,6 +317,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-file", help="path to a .env file (default: ./.env)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("run", help="poll the LMS on schedule until stopped")
+    p_api = sub.add_parser("api", help="answer WhatsApp messages through the menu")
+    p_api.add_argument("--host", default="0.0.0.0")
+    p_api.add_argument("--port", type=int, default=8000)
     sub.add_parser("poll", help="run one poll cycle now")
     sub.add_parser("status", help="last poll, pauses, session and recent jobs")
     sub.add_parser("resume", help="clear a polling pause after the LMS layout changed")
@@ -316,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger(noisy).setLevel(logging.WARNING)
     handler = {
         "run": cmd_run,
+        "api": cmd_api,
         "poll": cmd_poll,
         "status": cmd_status,
         "resume": cmd_resume,

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<!-- Papers.php fixture (2026-10-06). The selects and table header are copied from the real page;
+     no real paper row has been seen yet, so rows follow the assignments page's markup. -->
+<html>
+<head><meta charset="utf-8"><title>LMS | Student</title></head>
+<body>
+<div class="col-lg-6">
+  <div class="col-xs-2"> Semester : </div>
+  <form action="#" method="post">
+    <select name="semesterName" id="semesterId" class="form-control" onchange="SelectSemester()" >
+      <option value="MjAyNjM%3D"
+              selected >
+              Fall-2026                                                  </option>
+      <option value="MjAyNjI%3D"
+              >
+              Summer-2026                                                  </option>
+    </select>
+  </form>
+</div>
+<div class="col-lg-6">
+  <form action="#" method="post">
+    <select name="courseName" id="courseId" class="form-control" onchange="GetCourses()" >
+      <option value="">Select Course</option>
+      <option value="MTAwMDAy"
+              selected >
+              Computer Architecture Lab                                                  </option>
+      <option value="MTAwMDAz"
+              >
+              Design &amp; Analysis of Algorithms                                                  </option>
+    </select>
+  </form>
+</div>
+<table class="table table-hover">
+  <tbody><tr>
+    <th>Paper No.</th> <th>Term</th> <th>Paper</th> <th>Remarks</th> <th>Added Submission</th>
+    <th>Marks Obtained</th> <th>Returned Comments</th> <th>Returned Submission</th> <th>Action</th> <th>Deadline</th>
+  </tr>
+  <tr> <td colspan="8">Please select a course to display the respective papers.</td> </tr>
+  </tbody>
+</table>
+</body>
+</html>

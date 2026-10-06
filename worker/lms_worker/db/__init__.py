@@ -11,9 +11,11 @@ from .models import (
     Artifact,
     Assignment,
     Base,
+    ChatSession,
     Course,
     CourseMode,
     Event,
+    InboundMessage,
     Job,
     JobState,
     Notification,
@@ -43,6 +45,9 @@ def upgrade(engine: Engine) -> None:
     cfg = Config()
     cfg.set_main_option("script_location", str(MIGRATIONS))
     with engine.begin() as conn:
+        if conn.dialect.name == "postgresql":
+            # The worker and api start together; only one migrates at a time
+            conn.exec_driver_sql("SELECT pg_advisory_xact_lock(4825061)")
         cfg.attributes["connection"] = conn
         command.upgrade(cfg, "head")
 
@@ -52,9 +57,11 @@ __all__ = [
     "Artifact",
     "Assignment",
     "Base",
+    "ChatSession",
     "Course",
     "CourseMode",
     "Event",
+    "InboundMessage",
     "Job",
     "JobState",
     "Notification",

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import StrEnum
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, false, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -60,11 +60,15 @@ class Course(Base):
 
 
 class Assignment(Base):
+    """An assignment or an exam paper (kind). Papers are tracked and announced, never solved."""
+
     __tablename__ = "assignments"
     __table_args__ = (UniqueConstraint("course_id", "lms_ref"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"))
+    kind: Mapped[str] = mapped_column(String(16), default="assignment", server_default="assignment", index=True)
+    term: Mapped[str | None] = mapped_column(String(32))
     lms_ref: Mapped[str] = mapped_column(String(64))
     lms_assignment_id: Mapped[str | None] = mapped_column(String(64))
     number: Mapped[str] = mapped_column(String(16))
@@ -75,6 +79,16 @@ class Assignment(Base):
     fingerprint: Mapped[str] = mapped_column(String(64))
     # Why no job was made, e.g. closed or already submitted when first seen
     skipped_reason: Mapped[str | None] = mapped_column(Text)
+    # What the LMS showed at the last poll
+    submitted_file: Mapped[str | None] = mapped_column(String(512))
+    deadline_passed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    marks: Mapped[str | None] = mapped_column(String(64))
+    status_seen_at: Mapped[datetime | None]
+    # The latest downloaded question file or paper, and whether it was announced
+    question_path: Mapped[str | None] = mapped_column(String(1024))
+    announced_at: Mapped[datetime | None]
+    # Deadline reminders already sent for the current deadline, e.g. "24h,2h"
+    reminders: Mapped[str] = mapped_column(String(64), default="", server_default="")
     first_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
 
@@ -96,6 +110,8 @@ class Job(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
     # The file name the LMS shows after our upload; tells our submissions from yours
     lms_submission_file: Mapped[str | None] = mapped_column(String(512))
+    # Your instruction when you ask for a redo
+    note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
@@ -154,3 +170,22 @@ class Setting(Base):
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+
+class ChatSession(Base):
+    """Where each WhatsApp chat is in the bot's menus. Resets after 10 minutes idle."""
+
+    __tablename__ = "chat_sessions"
+
+    chat_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    state: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow)  # set by the bot on every message
+
+
+class InboundMessage(Base):
+    """Message ids already handled, so a webhook delivered twice is answered once."""
+
+    __tablename__ = "inbound_messages"
+
+    message_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    at: Mapped[datetime] = mapped_column(default=utcnow)

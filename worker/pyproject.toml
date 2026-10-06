@@ -11,6 +11,7 @@ dependencies = [
     "alembic>=1.13",
     "beautifulsoup4>=4.12",
     "cryptography>=42",
+    "fastapi>=0.115",
     "httpx>=0.27",
     "playwright==1.56.0",
     "psycopg[binary]>=3.1",
@@ -18,6 +19,7 @@ dependencies = [
     "segno>=1.6",
     "sqlalchemy>=2.0",
     "tzdata",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]

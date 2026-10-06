@@ -12,7 +12,7 @@ from playwright.sync_api import sync_playwright
 
 from ..config import Settings
 from ..kv import FileKV
-from .bahria_pages import AssignmentRow, b64_id, parse_assignments_page
+from .bahria_pages import AssignmentRow, b64_id, parse_assignments_page, parse_papers_page
 from .cms_login import login
 from .errors import (
     BadCredentials,
@@ -24,10 +24,12 @@ from .errors import (
     SessionExpired,
 )
 from .login_guard import LoginGuard
-from .models import AssignmentMeta, Course, Receipt, SubmissionStatus
+from .models import ASSIGNMENT, PAPER, AssignmentMeta, Course, Receipt, SubmissionStatus
 from .session import USER_AGENT, SessionStore, Throttle, lms_cookies, session_is_valid
 
 ASSIGNMENTS = "Assignments.php"
+PAPERS = "Papers.php"
+PAGES = {ASSIGNMENT: (ASSIGNMENTS, parse_assignments_page), PAPER: (PAPERS, parse_papers_page)}
 
 
 class BahriaAdapter:
@@ -110,7 +112,11 @@ class BahriaAdapter:
         ]
 
     def list_assignments(self, course: Course) -> list[AssignmentMeta]:
-        return [self._meta(course, row) for row in self._rows(course)]
+        return [self._meta(course, row, ASSIGNMENT) for row in self._rows(course, ASSIGNMENT)]
+
+    def list_papers(self, course: Course) -> list[AssignmentMeta]:
+        """Online exam papers (mid and final terms), from Papers.php."""
+        return [self._meta(course, row, PAPER) for row in self._rows(course, PAPER)]
 
     def download(self, a: AssignmentMeta, dest: Path) -> list[Path]:
         """Save the question file. Re-reads the list first: download keys expire daily."""
@@ -158,26 +164,30 @@ class BahriaAdapter:
         r.raise_for_status()
         return r
 
-    def _rows(self, course: Course) -> list[AssignmentRow]:
-        page = parse_assignments_page(self._get(ASSIGNMENTS, {"s": course.semester, "oc": course.lms_ref}).text)
+    def _rows(self, course: Course, kind: str = ASSIGNMENT) -> list[AssignmentRow]:
+        path, parse = PAGES[kind]
+        page = parse(self._get(path, {"s": course.semester, "oc": course.lms_ref}).text)
         selected = next((o for o in page.courses if o.selected), None)
         if selected is None or selected.value != course.lms_ref:
             raise ContractBroken(f"Asked for {course.name} but the LMS showed {selected.label if selected else 'no course'}")
         return page.rows
 
     def _row(self, a: AssignmentMeta) -> AssignmentRow:
-        for row in self._rows(a.course):
-            if self._meta(a.course, row).lms_ref == a.lms_ref:
+        for row in self._rows(a.course, a.kind):
+            if self._meta(a.course, row, a.kind).lms_ref == a.lms_ref:
                 if row.title != a.title:
                     raise LMSError(f"Row {a.lms_ref} was {a.title!r}, now {row.title!r}; re-list before acting")
                 return row
         raise LMSError(f"Assignment {a.title} ({a.lms_ref}) is no longer listed in {a.course.name}")
 
     @staticmethod
-    def _meta(course: Course, row: AssignmentRow) -> AssignmentMeta:
+    def _meta(course: Course, row: AssignmentRow, kind: str = ASSIGNMENT) -> AssignmentMeta:
         return AssignmentMeta(
             course=course,
-            lms_ref=f"{course.code}:{row.number}",
+            lms_ref=f"{course.code}:{'P' if kind == PAPER else ''}{row.number}",
+            kind=kind,
+            term=row.term,
+            marks=row.marks,
             number=row.number,
             title=row.title,
             deadline=row.deadline,

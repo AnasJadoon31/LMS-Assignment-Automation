@@ -150,3 +150,16 @@ def test_submit_is_not_built_yet(portal, urls, tmp_path):
         a = adapter.list_assignments(adapter.list_courses()[0])[2]
         with pytest.raises(NotImplementedError):
             adapter.submit(a, tmp_path / "x.pdf")
+
+
+def test_list_papers(portal, urls, tmp_path):
+    with logged_in(urls, tmp_path) as adapter:
+        lab, daa = adapter.list_courses()
+        papers = adapter.list_papers(lab)
+        assert [(p.lms_ref, p.kind, p.term, p.marks, p.deadline_passed) for p in papers] == [
+            ("100002:P1", "paper", "Mid Term", "18/30", True),
+            ("100002:P2", "paper", "Final Term", None, False),
+        ]
+        assert adapter.list_papers(daa) == []
+        status = adapter.submission_status(papers[0])
+        assert status.submitted and status.marks == "18/30"

@@ -22,6 +22,8 @@ FIXTURES = Path(__file__).parent / "fixtures"
 LOGIN_HTML = (FIXTURES / "cms_login.html").read_text()
 ASSIGNMENTS_HTML = (FIXTURES / "lms_assignments.html").read_text()
 EMPTY_ASSIGNMENTS_HTML = (FIXTURES / "lms_assignments_empty.html").read_text()
+PAPERS_HTML = (FIXTURES / "lms_papers.html").read_text()
+EMPTY_PAPERS_HTML = (FIXTURES / "lms_papers_empty.html").read_text()
 QUESTION_PDF = b"%PDF-1.7 fixture"
 CAPTCHA_HTML = (
     '<div id="BodyPH_divRecaptcha" class="form-group">'
@@ -55,6 +57,15 @@ class PortalState:
 def assignments_page(oc: str | None) -> str:
     """The fixture course (MTAwMDAy) has three assignments; any other course has none."""
     html = ASSIGNMENTS_HTML if oc == "MTAwMDAy" else EMPTY_ASSIGNMENTS_HTML
+    html = re.sub(r'(<option value="MTAw[^"]*")\s*selected', r"\1", html)
+    if oc:
+        html = html.replace(f'<option value="{oc}"', f'<option value="{oc}" selected')
+    return html
+
+
+def papers_page(oc: str | None) -> str:
+    """The fixture course (MTAwMDAy) has two papers; any other course has none."""
+    html = PAPERS_HTML if oc == "MTAwMDAy" else EMPTY_PAPERS_HTML
     html = re.sub(r'(<option value="MTAw[^"]*")\s*selected', r"\1", html)
     if oc:
         html = html.replace(f'<option value="{oc}"', f'<option value="{oc}" selected')
@@ -117,12 +128,14 @@ def _handler(portal: PortalState, site: str):
                 if self._cookies().get("PHPSESSID") != "good":
                     return self._send(302, headers={"Location": f"{portal.cms}/"})
                 return self._send(200, "<title>LMS | Student</title><h1>Dashboard</h1>")
-            if path in ("/Student/Assignments.php", "/Student/Download.php"):
+            if path in ("/Student/Assignments.php", "/Student/Papers.php", "/Student/Download.php"):
                 if self._cookies().get("PHPSESSID") != "good":
                     return self._send(302, headers={"Location": f"{portal.cms}/"})
                 query = parse_qs(urlsplit(self.path).query)
                 if path == "/Student/Download.php":
                     return self._send_file(QUESTION_PDF, "Lab-2-Q-25092026-105052pm.pdf")
+                if path == "/Student/Papers.php":
+                    return self._send(200, papers_page(query.get("oc", [None])[0]))
                 return self._send(200, assignments_page(query.get("oc", [None])[0]))
             if path == "/Student/Hop.php":
                 return self._send(302, headers={"Location": "/Student/Dashboard.php"})

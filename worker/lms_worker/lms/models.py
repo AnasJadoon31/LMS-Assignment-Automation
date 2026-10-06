@@ -17,10 +17,16 @@ class Course:
     semester_name: str = ""
 
 
+ASSIGNMENT = "assignment"
+PAPER = "paper"
+
+
 @dataclass(frozen=True)
 class AssignmentMeta:
+    """An assignment or an exam paper: both are listed the same way on the LMS."""
+
     course: Course
-    lms_ref: str  # "<course code>:<row number>"; closed rows show no other id
+    lms_ref: str  # "<course code>:<row number>", papers "<course code>:P<row number>"
     number: str
     title: str
     deadline: datetime | None
@@ -28,9 +34,12 @@ class AssignmentMeta:
     attachment_size: int | None = None
     remarks: str | None = None
     assignment_id: str | None = None  # LMS id, shown only while the assignment is open
+    kind: str = ASSIGNMENT
+    term: str | None = None  # papers: mid or final
     # Snapshot from the listing, not part of the fingerprint
     submitted_file: str | None = None
     deadline_passed: bool = False
+    marks: str | None = None
 
     def fingerprint(self) -> str:
         """Hash of course code, title, deadline and attachment name plus size.

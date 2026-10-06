@@ -20,7 +20,8 @@ whose name is on it. Run it only for your own account.
 
 | Service | What it is | Reachable from |
 | --- | --- | --- |
-| `worker` | Logs in to CMS, polls the LMS, downloads question files, sends notifications | inside the stack only |
+| `worker` | Logs in to CMS, polls the LMS, downloads question files and papers, sends notifications | inside the stack only |
+| `api` | Answers your WhatsApp messages through the numbered menu (the web UI joins it later) | inside the stack only |
 | `postgres` | Jobs, audit trail, encrypted LMS session; Evolution's tables in their own schema | inside the stack only |
 | `evolution-api` | WhatsApp gateway. The worker creates and links its instance | inside the stack only |
 | `redis` | Evolution API's cache | inside the stack only |
@@ -79,6 +80,9 @@ lms-worker whatsapp status    # Linked: <name> (+92...), and where messages go
 lms-worker notify-test        # sends a test message to each channel
 ```
 
+Now send `menu` to the bot's number from your own WhatsApp. It answers only `WHATSAPP_NUMBER`.
+If it stays silent, check `docker compose logs api` for "Evolution webhook points at".
+
 `WHATSAPP_NUMBER` is your own number: the bot sends to it. Open WhatsApp on the bot phone
 at least every two weeks; WhatsApp logs out linked devices when the phone has been away
 longer than that. `lms-worker whatsapp unlink` removes the link.
@@ -108,5 +112,5 @@ assignments are recorded and left alone.
 | Login paused (wrong password or CAPTCHA) | fix `CMS_PASSWORD` if needed, then `lms-worker retry` |
 | "The LMS page changed" alert | check the LMS still works in a browser, then `lms-worker resume` |
 | Change `APP_SECRET_KEY` | allowed; the worker just logs in to CMS again |
-| Use your own Evolution API elsewhere | set `EVOLUTION_API_URL` (and its key), and delete the `evolution-api` and `redis` services |
+| Use your own Evolution API elsewhere | set `EVOLUTION_API_URL` (and its key), delete the `evolution-api` and `redis` services, and set the api's `API_INTERNAL_URL` to an address that Evolution can reach |
 | Discord only | leave `WHATSAPP_NUMBER` empty; you can delete the `evolution-api` and `redis` services |

@@ -7,7 +7,7 @@ approval. The design is in the tech spec; this repo is being built in the spec's
 | Step | Status |
 | --- | --- |
 | 1. Spike: CMS login, LMS mapping, `list_assignments()` | Done, except upload (see below) |
-| 2. Watcher: poller, fingerprints, database, notifier | Done: WhatsApp and Discord |
+| 2. Watcher: poller, fingerprints, database, notifier | Done: WhatsApp and Discord, papers, marks, reminders |
 | 3. Solver and renderer | Next |
 | 4. Submitter | Not started; upload form mapped |
 | 5. Web UI and auto mode | Not started |
@@ -18,7 +18,7 @@ Each student runs their own copy: see **[SELF_HOSTING.md](SELF_HOSTING.md)**. In
 
 ```sh
 scripts/init-env.sh                 # .env with random secrets; then fill in your CMS login and WhatsApp number
-docker compose up -d --build        # worker, PostgreSQL, Evolution API (WhatsApp), Redis; no public ports
+docker compose up -d --build        # worker, api, PostgreSQL, Evolution API (WhatsApp), Redis; no public ports
 docker compose exec worker lms-worker whatsapp link --number <bot number>   # or without --number for a QR code
 docker compose exec worker lms-worker notify-test
 ```
@@ -32,8 +32,33 @@ Evolution API runs inside the stack and is reachable only by the worker, at
 environment. The worker owns the WhatsApp instance: it creates it on first use, links it by QR code
 or by phone-number pairing code, and sends through it to `WHATSAPP_NUMBER`. The web UI will offer
 the same QR and phone-number linking on its WhatsApp page, through the same code
-(`lms_worker/whatsapp.py`). Replies to the bot (the numbered menu and approvals) will reach the app
-through an Evolution webhook to the api service, also inside the stack.
+(`lms_worker/whatsapp.py`). Your replies reach the app through an Evolution webhook to the api
+service, also inside the stack: the api registers it at start, with a secret header derived from
+`APP_SECRET_KEY`, and answers only `WHATSAPP_NUMBER`.
+
+## The WhatsApp menu
+
+Send `menu` to the bot. Numbered screens, reply with a digit, `0` goes back:
+
+```
+LMS BOT
+1. Assignments: 2 remaining, 1 due soon
+2. Papers: 1 remaining, 1 due soon
+3. Waiting for your approval (1)
+4. Due in the next 48 hours (2)
+5. By course
+6. Course modes (auto, approve, notify)
+7. Check the LMS now
+8. System status
+```
+
+Assignments and Papers each list: remaining, due in 48 hours, submitted, missed (closed with no
+submission), marked and all; assignments add waiting for your approval, queued or being solved,
+and stopped. By course gives the same screens for one course, plus its mode. Picking an item shows
+its deadline, status, marks, teacher's note and service state, and offers what applies: the
+question file or paper, the solved PDF, DOCX, notebook and receipt, Approve, Reject, Redo with a
+note, and History. Approve, Reject and switching a course to auto ask 1. Yes / 2. No first.
+
 
 ## What the watcher does
 
@@ -43,6 +68,10 @@ through an Evolution webhook to the api service, also inside the stack.
 - **Leaves your work alone.** Anything already closed, or already showing a submission the service did not
   make, is recorded but gets no job. If you submit by hand while a job is open, the job stops.
 - **Tracks changes.** A changed title, deadline or question file creates a new revision and a "changed" message.
+- **Papers.** Online exam papers (`Papers.php`) are tracked and announced with their file, never solved.
+- **Status, marks, reminders.** Every poll records what the LMS shows for each assignment and paper
+  (submitted, open or closed, marks). "Marks posted" arrives when marks first appear, and a reminder
+  24 hours and 2 hours before any deadline with nothing submitted.
 - **Keeps going.** A changed LMS page pauses polling and alerts you (`lms-worker resume` after checking).
   A lost session logs in again through CMS; 2 rejected logins or a CAPTCHA pause that and alert you.
   An unreachable LMS backs off 5, 15, then 60 minutes and alerts after 3 failed polls.
@@ -69,6 +98,7 @@ the failed-login counter and any spike recordings. With it, they live in Postgre
 | Command | What it does |
 | --- | --- |
 | `lms-worker run` | Polls on schedule until stopped; the worker container's command |
+| `lms-worker api` | Answers WhatsApp messages through the menu; the api container's command |
 | `lms-worker poll` | Runs one poll now and prints what it found |
 | `lms-worker status` | Last poll, pauses, login state and recent jobs |
 | `lms-worker resume` | Clears the polling pause after a changed LMS page |

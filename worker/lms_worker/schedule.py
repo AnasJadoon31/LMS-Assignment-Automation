@@ -18,6 +18,7 @@ DAY_START, DAY_END = 8, 23
 DAY_MINUTES, NIGHT_MINUTES = 10, 30
 BACKOFF_MINUTES = (5, 15, 60)
 JITTER_SECONDS = 20
+WAKE_CHECK_SECONDS = 10
 
 
 def next_delay(now: datetime, result: PollResult, down_streak: int, rng: random.Random) -> float:
@@ -36,7 +37,9 @@ def run_forever(
     clock: Callable[[], datetime],
     rng: random.Random | None = None,
     on_result: Callable[[PollResult, float], None] | None = None,
+    poll_requested: Callable[[], bool] | None = None,
 ) -> None:
+    """Poll, wait, repeat. A requested check (from the WhatsApp menu) ends the wait early."""
     rng = rng or random.Random()
     down_streak = 0
     while not stop.is_set():
@@ -49,4 +52,11 @@ def run_forever(
         delay = next_delay(clock(), result, down_streak, rng)
         if on_result:
             on_result(result, delay)
-        stop.wait(delay)
+        waited = 0.0
+        while waited < delay and not stop.is_set():
+            step = min(WAKE_CHECK_SECONDS, delay - waited)
+            if stop.wait(step):
+                break
+            waited += step
+            if poll_requested and poll_requested():
+                break
