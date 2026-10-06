@@ -357,30 +357,100 @@ class Clock:
         return self.at
 
 
-def test_papers_are_announced_with_their_file_but_never_get_jobs(watcher, lmsfake, channel, sessions):
-    lmsfake.set(DAA)
-    lmsfake.papers[DAA.lms_ref] = [
-        paper(DAA, 1, "Mid Term", deadline=DUE, remarks="Attempt any four"),
-        paper(DAA, 2, "Final Term", deadline=DUE - timedelta(days=40), deadline_passed=True, submitted_file="f.pdf"),
-    ]
-    r = watcher.poll_once()
+OSLAB = lms.Course(code="151869", name="Operating Systems Lab", lms_ref="MTUxODY5", semester="MjAyNjM=", semester_name="Fall-2026")
 
-    assert (r.papers, r.new_papers, r.skipped, r.new_jobs) == (2, 1, 1, 0)
+
+def lab_paper(start, minutes=90, number=1, term="Mid Term", **kw):
+    return paper(OSLAB, number, term, starts_at=start, deadline=start + timedelta(minutes=minutes),
+                 submission_hidden=True, **kw)
+
+
+def test_papers_are_read_only_for_lab_courses(watcher, lmsfake):
+    lmsfake.set(DAA)
+    lmsfake.set(OSLAB)
+    watcher.poll_once()
+    assert "papers:151869" in lmsfake.calls and "papers:155150" not in lmsfake.calls
+
+
+def test_a_lab_paper_is_scheduled_reminded_and_sent_when_it_opens(lmsfake, sessions, channel, tmp_path):
+    now = datetime(2026, 10, 18, 10, 0, tzinfo=LMS_TZ)
+    clock = Clock(now)
+    w = Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path, now=clock)
+    start = datetime(2026, 10, 20, 14, 0, tzinfo=LMS_TZ)
+    lmsfake.set(OSLAB)
+    lmsfake.papers[OSLAB.lms_ref] = [lab_paper(start, remarks="Bring your own calculator")]
+
+    r = w.poll_once()
+    assert (r.papers, r.new_papers, r.new_jobs) == (1, 1, 0)
     assert jobs(sessions) == []
-    caption, filename = channel.sent[-1]
-    assert caption.splitlines()[:3] == ["New paper posted", "Design & Analysis of Algorithms", "Mid Term paper"]
-    assert "Note: Attempt any four" in caption and filename == "Mid-Term-paper.pdf"
-    with sessions() as s:
-        mid = s.scalar(select(Assignment).where(Assignment.lms_ref == "155150:P1"))
-        assert (mid.kind, mid.term) == ("paper", "Mid Term") and Path(mid.question_path).exists()
+    assert "download:151869:P1" not in lmsfake.calls  # never fetched before it opens
+    msg, f = channel.sent[-1]
+    assert msg.splitlines() == [
+        "Lab paper scheduled", "Operating Systems Lab", "Mid Term paper", "Tue 20 Oct, 2:00 PM to 3:30 PM",
+        "Note: Bring your own calculator", "The paper comes here as soon as it opens.",
+    ] and f is None
+    assert w.next_wake() == start + timedelta(seconds=15)
+
+    clock.at = start - timedelta(hours=23)
+    assert w.poll_once().reminders == 1
+    clock.at = start - timedelta(minutes=50)
+    assert w.poll_once().reminders == 1
+    reminders = [m for m, _ in channel.sent if m.startswith("Lab paper starts in")]
+    assert [m.splitlines()[0] for m in reminders] == ["Lab paper starts in 23 h 0 min", "Lab paper starts in 50 min"]
+
+    clock.at = start + timedelta(seconds=15)
+    w.poll_once()
+    msg, f = channel.sent[-1]
+    assert msg.splitlines()[:4] == ["Lab paper open now", "Operating Systems Lab", "Mid Term paper", "Ends 3:30 PM (1 h 29 min left)"]
+    assert f == "Mid-Term-paper.pdf"
+    assert w.next_wake() is None
 
     sent = len(channel.sent)
-    watcher.poll_once()
-    assert len(channel.sent) == sent  # announced once
+    clock.at = start + timedelta(minutes=5)
+    w.poll_once()
+    assert len(channel.sent) == sent  # sent once
 
-    lmsfake.papers[DAA.lms_ref][0] = paper(DAA, 1, "Mid Term", deadline=DUE + timedelta(hours=2), attachment_name="v2.pdf")
-    watcher.poll_once()
-    assert channel.sent[-1][0].startswith("Paper changed") and channel.sent[-1][1] == "v2.pdf"
+
+def test_an_open_paper_without_its_file_is_retried_every_minute(lmsfake, sessions, channel, tmp_path):
+    start = datetime(2026, 10, 20, 14, 0, tzinfo=LMS_TZ)
+    clock = Clock(start + timedelta(minutes=1))
+    w = Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path, now=clock)
+    lmsfake.set(OSLAB)
+    lmsfake.papers[OSLAB.lms_ref] = [lab_paper(start, attachment_name=None)]
+
+    w.poll_once()
+    assert channel.sent[-1][0].endswith("The paper file is not on the LMS yet; checking every minute.")
+    assert w.next_wake() == clock.at + timedelta(seconds=60)
+
+    lmsfake.papers[OSLAB.lms_ref] = [lab_paper(start, attachment_name="late.pdf")]
+    clock.at = start + timedelta(minutes=2)
+    w.poll_once()
+    assert channel.sent[-1][1] == "late.pdf"
+    assert len([m for m, _ in channel.sent if m.startswith("Lab paper open now")]) == 2
+
+
+def test_past_lab_papers_are_recorded_quietly(watcher, lmsfake, channel, sessions):
+    old = datetime(2026, 3, 17, 12, 55, tzinfo=LMS_TZ)
+    lmsfake.set(OSLAB)
+    lmsfake.papers[OSLAB.lms_ref] = [lab_paper(old, minutes=60, deadline_passed=True)]
+    r = watcher.poll_once()
+    assert r.skipped == 1
+    assert not [m for m, _ in channel.sent if "Lab paper" in m]
+    with sessions() as s:
+        a = s.scalar(select(Assignment))
+        assert (a.kind, a.submission_hidden, a.starts_at) == ("paper", True, old)
+
+
+def test_a_rescheduled_paper_is_announced_again(lmsfake, sessions, channel, tmp_path):
+    now = datetime(2026, 10, 18, 10, 0, tzinfo=LMS_TZ)
+    w = Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path, now=Clock(now))
+    start = datetime(2026, 10, 20, 14, 0, tzinfo=LMS_TZ)
+    lmsfake.set(OSLAB)
+    lmsfake.papers[OSLAB.lms_ref] = [lab_paper(start)]
+    w.poll_once()
+    lmsfake.papers[OSLAB.lms_ref] = [lab_paper(start + timedelta(days=1))]
+    w.poll_once()
+    assert channel.sent[-1][0].splitlines()[:4] == ["Lab paper changed", "Operating Systems Lab", "Mid Term paper", "Wed 21 Oct, 2:00 PM to 3:30 PM"]
 
 
 def test_marks_posted_is_sent_once_when_marks_appear(watcher, lmsfake, channel):
@@ -394,27 +464,24 @@ def test_marks_posted_is_sent_once_when_marks_appear(watcher, lmsfake, channel):
     assert [m for m, _ in channel.sent if m.startswith("Marks posted")] == ["Marks posted\nComputer Architecture Lab\nLab 4: 9/10"]
 
 
-def test_reminders_24h_and_2h_before_a_deadline_with_nothing_submitted(lmsfake, sessions, channel, tmp_path):
+def test_assignment_reminders_24h_and_2h_before_the_deadline(lmsfake, sessions, channel, tmp_path):
     now = datetime(2026, 10, 10, 9, 0, tzinfo=LMS_TZ)
     clock = Clock(now)
     w = Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path, now=clock)
     lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations", deadline=now + timedelta(hours=40)))
-    lmsfake.papers[DAA.lms_ref] = [paper(DAA, 1, "Mid Term", deadline=now + timedelta(hours=30))]
     w.poll_once()
     assert not [m for m, _ in channel.sent if " due in " in m]
 
-    clock.at = now + timedelta(hours=17)  # 23 h and 13 h left
-    assert w.poll_once().reminders == 2
+    clock.at = now + timedelta(hours=17)  # 23 h left
+    assert w.poll_once().reminders == 1
     clock.at = now + timedelta(hours=17, minutes=10)
     assert w.poll_once().reminders == 0
-    clock.at = now + timedelta(hours=38, minutes=30)  # assignment 1 h 30 min left; paper already closed below
-    lmsfake.papers[DAA.lms_ref] = [paper(DAA, 1, "Mid Term", deadline=now + timedelta(hours=30), deadline_passed=True)]
+    clock.at = now + timedelta(hours=38, minutes=30)  # 1 h 30 min left
     assert w.poll_once().reminders == 1
 
     reminders = [m for m, _ in channel.sent if " due in " in m]
     assert reminders[0].startswith("Assignment due in 23 h 0 min, nothing submitted")
-    assert reminders[1].startswith("Paper due in 13 h 0 min, nothing submitted")
-    assert reminders[2].startswith("Assignment due in 1 h 30 min, nothing submitted")
+    assert reminders[1].startswith("Assignment due in 1 h 30 min, nothing submitted")
 
 
 def test_no_reminder_once_submitted(lmsfake, sessions, channel, tmp_path):

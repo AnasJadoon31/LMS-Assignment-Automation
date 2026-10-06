@@ -78,15 +78,21 @@ def test_changed_table_layout_breaks_the_contract():
         parse_assignments_page(ASSIGNMENTS_HTML.replace('id="courseId"', 'id="course"'))
 
 
-def test_papers_rows_have_a_term_and_the_same_states():
-    mid, final = parse_papers_page(PAPERS_HTML).rows
-    assert (mid.number, mid.title, mid.term, mid.action) == ("1", "Mid Term paper", "Mid Term", "closed")
-    assert mid.remarks == "Attempt any four" and mid.marks == "18/30"
-    assert mid.question_file == "Mid-Paper-15102026.pdf"
-    assert mid.submission_file == "02-000000-001-mid.pdf"
-    assert (final.title, final.action, final.assignment_id) == ("Final Term paper", "submit", "88001")
-    assert final.remarks is None and final.submission_file is None and not final.deadline_passed
-    assert final.deadline == datetime(2026, 12, 20, 13, 0, tzinfo=LMS_TZ)
+def test_lab_paper_rows_have_an_exam_window():
+    mid, final, upcoming = parse_papers_page(PAPERS_HTML).rows
+    # Real past papers of a lab course (Spring 2026)
+    assert (mid.number, mid.title, mid.term, mid.action) == ("1", "Mid Term paper (60 Minutes)", "Mid Term", "closed")
+    assert mid.starts_at == datetime(2026, 3, 17, 12, 55, tzinfo=LMS_TZ)
+    assert mid.deadline == datetime(2026, 3, 17, 13, 55, tzinfo=LMS_TZ)
+    assert mid.question_file == "DBMS-lab----2-17032026-123230pm.pdf"
+    assert mid.remarks is None and mid.marks is None
+    assert mid.submission_file is None and mid.submission_hidden  # Download.php?k=NA
+    assert final.title == "Final Term paper (Objective-2hours)" and final.remarks == "For BUMDC Only"
+    assert (final.starts_at.hour, final.deadline.hour) == (12, 14)
+    # An open paper (markup assumed from the assignments page)
+    assert (upcoming.action, upcoming.assignment_id, upcoming.remarks) == ("submit", "88001", "Bring your own calculator")
+    assert upcoming.starts_at == datetime(2026, 10, 20, 14, 0, tzinfo=LMS_TZ)
+    assert not upcoming.deadline_passed
     assert parse_papers_page(EMPTY_PAPERS_HTML).rows == []
 
 

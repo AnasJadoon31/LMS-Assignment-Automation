@@ -9,10 +9,12 @@ Rules (from the spec):
   the job stops (NEEDS_HUMAN). So does a job whose deadline passes.
 - A changed LMS layout pauses polling until `lms-worker resume`. A session that
   cannot be renewed, or a login that fails, alerts once and retries next poll.
-- Exam papers (Papers.php) are tracked and announced with their file, never solved.
+- Lab exam papers (Papers.php, lab courses only) are tracked, never solved: one
+  message when a paper is scheduled, reminders 24 h and 1 h before it starts, and the
+  paper file the moment its window opens (the scheduler polls at the start time).
 - Every poll records what the LMS shows for each item (submitted file, open or
   closed, marks), sends "marks posted" when marks appear, and reminds you 24 hours
-  and 2 hours before a deadline that has nothing submitted.
+  and 2 hours before an assignment deadline that has nothing submitted.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from . import notify
@@ -59,7 +61,10 @@ DOWNLOAD_ALERT_AFTER = 3
 LMS_DOWN_ALERT_AFTER = 3
 # Stopping a job the service has not worked on yet is not worth a message
 QUIET_STATES = {JobState.DETECTED, JobState.DOWNLOADED}
-REMINDER_HOURS = (24, 2)
+REMINDER_HOURS = (24, 2)  # before an assignment's deadline
+PAPER_REMINDER_HOURS = (24, 1)  # before a paper's start
+OPEN_RETRY = timedelta(seconds=60)  # while an open paper's file is not delivered yet
+LAB = re.compile(r"\blab\b", re.IGNORECASE)
 
 
 @dataclass
@@ -144,7 +149,6 @@ class Watcher:
         return result
 
     def _poll(self, result: PollResult) -> None:
-        self.poll_started = self.now()
         self.adapter.ensure_session()
         self._clear_alert("session")
         courses = self.adapter.list_courses()
@@ -152,7 +156,7 @@ class Watcher:
         new_courses: list[str] = []
         for c in courses:
             listed = self._list(c, self.adapter.list_assignments, "assignments", result)
-            papers = self._list(c, self.adapter.list_papers, "papers", result)
+            papers = self._list(c, self.adapter.list_papers, "papers", result) if is_lab(c.name) else []
             if listed is None and papers is None:
                 continue
             with self.sessions.begin() as s:
@@ -200,6 +204,8 @@ class Watcher:
                 semester=c.semester,
                 semester_name=c.semester_name,
                 mode=CourseMode.APPROVE,
+                first_seen_at=self.now(),
+                last_seen_at=self.now(),
             )
             s.add(row)
             s.flush()
@@ -221,10 +227,13 @@ class Watcher:
         row = s.scalar(select(Assignment).where(Assignment.course_id == course.id, Assignment.lms_ref == meta.lms_ref))
 
         if row is None:
-            row = Assignment(course=course, kind=meta.kind, lms_ref=meta.lms_ref, fingerprint=fp)
+            row = Assignment(
+                course=course, kind=meta.kind, lms_ref=meta.lms_ref, fingerprint=fp,
+                first_seen_at=self.now(), last_seen_at=self.now(),
+            )
             self._copy(row, meta)
             self._snapshot(row, meta)
-            row.reminders = ",".join(f"{h}h" for h in self._crossed(row))  # the first message covers these
+            row.reminders = ",".join(self._crossed(row))  # the first message covers these
             s.add(row)
             s.flush()
             reason = _skip_reason(meta, own=set())
@@ -240,7 +249,7 @@ class Watcher:
         if meta.marks and meta.marks != row.marks:
             self.outbox.queue(s, "marks", f"Marks posted\n{course.name}\n{row.title}: {meta.marks}")
             result.marks_posted += 1
-        if "deadline" in changes:
+        if "deadline" in changes or "exam time" in changes:
             row.reminders = ""
         self._copy(row, meta)
         self._snapshot(row, meta)
@@ -251,8 +260,12 @@ class Watcher:
                 return None
             row.fingerprint = fp
             row.skipped_reason = _skip_reason(meta, own=set())
+            if row.announced_at is not None:
+                row.reminders = ",".join(filter(None, [row.reminders, "changed"]))
             row.announced_at = None  # announce the change
-            row.question_path = None
+            if not row.opened_at or "question file" in changes:
+                row.opened_at = None
+                row.question_path = None
             return None
 
         latest = row.jobs[-1] if row.jobs else None
@@ -288,17 +301,26 @@ class Watcher:
 
     def _snapshot(self, row: Assignment, meta: lms.AssignmentMeta) -> None:
         row.submitted_file = meta.submitted_file
+        row.submission_hidden = meta.submission_hidden
         row.deadline_passed = meta.deadline_passed
         row.marks = meta.marks
         row.term = meta.term
         row.status_seen_at = self.now()
 
-    def _crossed(self, row: Assignment) -> list[int]:
-        """Reminder thresholds (hours) the deadline is already within."""
-        if row.deadline is None or row.deadline_passed or row.submitted_file:
+    def _crossed(self, row: Assignment) -> list[str]:
+        """Reminder keys already due: assignments count down to the deadline ("24h", "2h"),
+        papers to the start of the exam ("s24h", "s1h")."""
+        if row.deadline_passed or row.submitted_file:
+            return []
+        if row.kind == PAPER:
+            if row.starts_at is None or row.starts_at <= self.now():
+                return []
+            left = (row.starts_at - self.now()).total_seconds() / 3600
+            return [f"s{h}h" for h in PAPER_REMINDER_HOURS if left <= h]
+        if row.deadline is None:
             return []
         left = (row.deadline - self.now()).total_seconds() / 3600
-        return [h for h in REMINDER_HOURS if left <= h]
+        return [f"{h}h" for h in REMINDER_HOURS if left <= h]
 
     @staticmethod
     def _copy(row: Assignment, meta: lms.AssignmentMeta) -> None:
@@ -307,6 +329,7 @@ class Watcher:
         row.deadline = meta.deadline
         row.attachment_name = meta.attachment_name
         row.remarks = meta.remarks
+        row.starts_at = meta.starts_at
         row.lms_assignment_id = meta.assignment_id or row.lms_assignment_id
 
     def _new_job(self, s: Session, a: Assignment, revision: int, fp: str, detail: str) -> Job:
@@ -367,55 +390,94 @@ class Watcher:
         return done
 
     def _announce_papers(self, result: PollResult) -> None:
-        """Download each new or changed open paper and send it."""
+        """A scheduled paper gets one message; when its window opens, the paper file follows."""
+        now = self.now()
         with self.sessions() as s:
             papers = s.scalars(
                 select(Assignment).where(
                     Assignment.kind == PAPER,
-                    Assignment.announced_at.is_(None),
                     Assignment.skipped_reason.is_(None),
                     Assignment.deadline_passed.is_(False),
                 )
             ).all()
             for a in papers:
-                path = None
-                if a.attachment_name:
-                    dest = self.data_dir / _safe(a.course.code) / "papers" / str(a.id)
-                    try:
-                        paths = self.adapter.download(_meta(a), dest)
-                    except (ContractBroken, SessionExpired, httpx.HTTPError):
-                        s.commit()
-                        raise
-                    except LMSError as e:
-                        result.errors.append(f"{a.title}: {e}")
-                        continue
-                    path = paths[0] if paths else None
-                changed = a.first_seen_at < self.poll_started
-                a.question_path = str(path) if path else None
-                a.announced_at = self.now()
-                self.outbox.queue(s, "paper", _announce_paper(a, changed), file=path)
+                is_open = a.starts_at is None or a.starts_at <= now
+                if a.announced_at is None and not is_open:
+                    a.announced_at = now
+                    keys = a.reminders.split(",")
+                    changed = "changed" in keys
+                    a.reminders = ",".join(k for k in keys if k and k != "changed")
+                    self.outbox.queue(s, "paper", _paper_scheduled(a, changed))
+                if is_open and a.opened_at is None and (a.deadline is None or now < a.deadline):
+                    self._open_paper(s, a, result)
                 s.commit()
 
+    def _open_paper(self, s: Session, a: Assignment, result: PollResult) -> None:
+        path = None
+        if a.attachment_name:
+            dest = self.data_dir / _safe(a.course.code) / "papers" / str(a.id)
+            try:
+                paths = self.adapter.download(_meta(a), dest)
+            except (ContractBroken, SessionExpired, httpx.HTTPError):
+                s.commit()
+                raise
+            except LMSError as e:
+                result.errors.append(f"{a.title}: {e}")
+                return  # retried at the next poll, a minute later while the window is open
+            path = paths[0] if paths else None
+        if path is None:
+            if "open-nofile" not in a.reminders:
+                a.reminders = ",".join(filter(None, [a.reminders, "open-nofile"]))
+                self.outbox.queue(s, "paper", _paper_open(a, self.now(), has_file=False))
+            return
+        a.question_path = str(path)
+        a.opened_at = self.now()
+        a.announced_at = a.announced_at or self.now()
+        self.outbox.queue(s, "paper", _paper_open(a, self.now(), has_file=True), file=path)
+
+    def next_wake(self) -> datetime | None:
+        """When to poll sooner than the schedule: just after a lab paper opens, and every
+        minute while an open paper's file has not been delivered."""
+        now = self.now()
+        with self.sessions() as s:
+            papers = s.scalars(
+                select(Assignment).where(
+                    Assignment.kind == PAPER,
+                    Assignment.skipped_reason.is_(None),
+                    Assignment.deadline_passed.is_(False),
+                    Assignment.opened_at.is_(None),
+                    Assignment.starts_at.is_not(None),
+                )
+            ).all()
+        times = []
+        for a in papers:
+            if a.starts_at > now:
+                times.append(a.starts_at + timedelta(seconds=15))
+            elif a.deadline is None or now < a.deadline:
+                times.append(now + OPEN_RETRY)
+        return min(times) if times else None
+
     def _remind(self, result: PollResult) -> None:
-        """24 h and 2 h before a deadline with nothing submitted: one message each."""
-        horizon = self.now() + timedelta(hours=max(REMINDER_HOURS))
+        """Assignments: 24 h and 2 h before the deadline. Lab papers: 24 h and 1 h before the start."""
+        horizon = self.now() + timedelta(hours=max(REMINDER_HOURS + PAPER_REMINDER_HOURS))
         with self.sessions() as s:
             due = s.scalars(
                 select(Assignment).where(
-                    Assignment.deadline.is_not(None),
-                    Assignment.deadline <= horizon,
                     Assignment.deadline_passed.is_(False),
                     Assignment.submitted_file.is_(None),
                     Assignment.skipped_reason.is_(None),
+                    or_(
+                        and_(Assignment.kind != PAPER, Assignment.deadline.is_not(None), Assignment.deadline <= horizon),
+                        and_(Assignment.kind == PAPER, Assignment.starts_at.is_not(None), Assignment.starts_at <= horizon),
+                    ),
                 )
             ).all()
             for a in due:
                 sent = set(filter(None, a.reminders.split(",")))
                 crossed = self._crossed(a)
-                fresh = [h for h in crossed if f"{h}h" not in sent]
-                if not fresh:
+                if not [k for k in crossed if k not in sent]:
                     continue
-                a.reminders = ",".join(sorted(sent | {f"{h}h" for h in crossed}))
+                a.reminders = ",".join(sorted(sent | set(crossed)))
                 self.outbox.queue(s, "reminder", _reminder(a, self.now()))
                 result.reminders += 1
             s.commit()
@@ -466,6 +528,8 @@ def _changes(row: Assignment, meta: lms.AssignmentMeta) -> list[str]:
         changes.append("deadline")
     if row.attachment_name != meta.attachment_name:
         changes.append("question file")
+    if row.starts_at != meta.starts_at:
+        changes.append("exam time")
     return changes or ["details"]
 
 
@@ -482,6 +546,7 @@ def _meta(a: Assignment) -> lms.AssignmentMeta:
         assignment_id=a.lms_assignment_id,
         kind=a.kind,
         term=a.term,
+        starts_at=a.starts_at,
     )
 
 
@@ -499,13 +564,35 @@ def _announce(a: Assignment, job: Job, detail: str) -> str:
     return "\n".join(lines)
 
 
-def _announce_paper(a: Assignment, changed: bool) -> str:
-    lines = ["Paper changed" if changed else "New paper posted", a.course.name, a.title]
-    lines.append(f"Due {_pkt(a.deadline)}" if a.deadline else "No deadline shown")
+def is_lab(course_name: str) -> bool:
+    """Only lab courses get papers."""
+    return bool(LAB.search(course_name))
+
+
+def _window(a: Assignment) -> str:
+    if a.starts_at and a.deadline:
+        end = a.deadline.astimezone(LMS_TZ).strftime("%I:%M %p").lstrip("0")
+        return f"{_pkt(a.starts_at)} to {end}"
+    return f"Due {_pkt(a.deadline)}" if a.deadline else "No time shown"
+
+
+def _paper_scheduled(a: Assignment, changed: bool) -> str:
+    lines = ["Lab paper changed" if changed else "Lab paper scheduled", a.course.name, a.title, _window(a)]
     if a.remarks:
         lines.append(f"Note: {a.remarks}")
-    if not a.attachment_name:
-        lines.append("No paper file yet; it appears on the LMS at the time on your date sheet.")
+    lines.append("The paper comes here as soon as it opens.")
+    return "\n".join(lines)
+
+
+def _paper_open(a: Assignment, now: datetime, *, has_file: bool) -> str:
+    lines = ["Lab paper open now", a.course.name, a.title]
+    if a.deadline:
+        end = a.deadline.astimezone(LMS_TZ).strftime("%I:%M %p").lstrip("0")
+        lines.append(f"Ends {end} ({_left(a.deadline - now)} left)")
+    if a.remarks:
+        lines.append(f"Note: {a.remarks}")
+    if not has_file:
+        lines.append("The paper file is not on the LMS yet; checking every minute.")
     return "\n".join(lines)
 
 
@@ -516,8 +603,10 @@ def _left(delta: timedelta) -> str:
 
 
 def _reminder(a: Assignment, now: datetime) -> str:
-    what = "Paper" if a.kind == PAPER else "Assignment"
-    lines = [f"{what} due in {_left(a.deadline - now)}, nothing submitted", a.course.name, a.title, f"Due {_pkt(a.deadline)}"]
+    if a.kind == PAPER:
+        lines = [f"Lab paper starts in {_left(a.starts_at - now)}", a.course.name, a.title, _window(a)]
+        return "\n".join(lines)
+    lines = [f"Assignment due in {_left(a.deadline - now)}, nothing submitted", a.course.name, a.title, f"Due {_pkt(a.deadline)}"]
     latest = a.jobs[-1] if a.jobs else None
     if latest and latest.state == JobState.AWAITING_APPROVAL:
         lines.append("The solved PDF is waiting for your approval.")

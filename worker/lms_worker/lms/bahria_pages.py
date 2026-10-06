@@ -19,10 +19,12 @@ with assignmentID, offeredCourseID, ocID, studentID and assignmentSubmissionFile
 (.pdf .doc .docx .xls .xlsx .zip, no special symbols in the name). Delete is a
 plain GET link. Nothing in the poller follows either.
 
-Papers.php is the same page for online exam papers, with ten columns: number, term
-(mid or final), paper file, remarks, your submission, marks, returned comments,
-returned submission, action, deadline. No paper has been posted in recent semesters,
-so its rows are parsed by the assignments' conventions and checked against the header.
+Papers.php lists lab exam papers (only lab courses get them), with ten columns: number,
+term (with its duration, e.g. "Mid Term (60 Minutes)"), paper file, remarks, your
+submission, marks, returned comments, returned submission, action, and the exam window:
+"Date: 17 March 2026", "Start Time: 12:55 pm", "End Time: 01:55 pm". The submission link
+reads Download.php?k=NA on past papers, so the LMS does not show whether one was made.
+No open paper has been seen yet; its Submit button is assumed to match the assignments'.
 
 Download links are Download.php?k=<base64 of
 "<student id>,<today's date>,<kind>,0,<filename>,<return url>">. The key
@@ -35,7 +37,7 @@ import base64
 import binascii
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -99,7 +101,9 @@ class AssignmentRow:
     action: str  # "submit", "delete", "closed", or the cell text if unrecognised
     deadline: datetime | None
     assignment_id: str | None = None  # only on open rows
-    term: str | None = None  # papers: mid or final
+    term: str | None = None  # papers: "Mid Term", "Final Term"
+    starts_at: datetime | None = None  # papers: when the exam window opens (deadline is when it closes)
+    submission_hidden: bool = False  # papers: a submission link with no file (k=NA)
 
     @property
     def deadline_passed(self) -> bool:
@@ -194,6 +198,39 @@ def _assignment_id(soup: BeautifulSoup, action_cell: Tag) -> str | None:
     return None
 
 
+TERM = re.compile(r"^(?P<main>[^({]+?)\s*(?P<extra>\([^)]*\))?\s*(?P<note>\{[^}]*\})?\s*$")
+
+
+def _term(cell: Tag) -> tuple[str | None, str | None, str | None]:
+    """'Mid Term (60 Minutes)' -> ('Mid Term', '(60 Minutes)', None);
+    'Final Term (Objective-2hours) { For BUMDC Only }' -> (..., 'For BUMDC Only')."""
+    text = _text(cell)
+    m = TERM.match(text)
+    if not m:
+        return text or None, None, None
+    note = m["note"].strip("{} ") if m["note"] else None
+    return m["main"].strip(), m["extra"], note
+
+
+def _window(cell: Tag) -> tuple[datetime | None, datetime | None]:
+    """Date, Start Time and End Time labels -> (start, end) in PKT."""
+    labels = {(small.get("title") or "").lower(): _text(small).split(":", 1)[-1].strip() for small in cell.find_all("small")}
+    day, start, end = labels.get("date"), labels.get("start time"), labels.get("end time")
+    if not (day and start and end):
+        return None, None
+    try:
+        date = datetime.strptime(" ".join(day.split()), "%d %B %Y")
+        t0 = datetime.strptime(start.lower(), "%I:%M %p").time()
+        t1 = datetime.strptime(end.lower(), "%I:%M %p").time()
+    except ValueError:
+        return None, None
+    begins = datetime.combine(date, t0, tzinfo=LMS_TZ)
+    ends = datetime.combine(date, t1, tzinfo=LMS_TZ)
+    if ends <= begins:  # an exam that runs past midnight
+        ends += timedelta(days=1)
+    return begins, ends
+
+
 def _remarks(cell: Tag, layout: Layout) -> str | None:
     span = cell.find("span", title=True)
     text = span["title"] if span else (_text(cell) if layout.remarks != layout.question else None)
@@ -208,27 +245,37 @@ def _parse_row(soup: BeautifulSoup, cells: list[Tag], layout: Layout) -> Assignm
     q_key = decode_download_key(q_link["href"]) if q_link else None
     s_link = submission.find("a", href=re.compile(r"Download\.php"))
     s_key = decode_download_key(s_link["href"]) if s_link else None
-    labels = deadline.find_all(["small", "span"]) or [deadline]
     marks_text = _text(cells[layout.marks])
     number = _text(cells[layout.number])
-    term = _text(cells[layout.term]) if layout.term is not None else None
-    if layout.title is not None:
-        title = _text(cells[layout.title])
+    remarks = _remarks(cells[layout.remarks], layout)
+    term = starts_at = None
+    if layout.term is not None:
+        term, extra, note = _term(cells[layout.term])
+        title = " ".join(filter(None, [f"{term} paper" if term else f"Paper {number}", extra]))
+        if note:
+            remarks = f"{remarks}; {note}" if remarks else note
+        starts_at, ends_at = _window(deadline)
     else:
-        title = f"{term} paper" if term else f"Paper {number}"
+        title = _text(cells[layout.title])
+    if starts_at is None:
+        labels = deadline.find_all(["small", "span"]) or [deadline]
+        ends_at = parse_deadline(_text(labels[-1]))
+    hidden = bool(s_link) and s_key is None and "k=NA" in (s_link.get("href") or "")
 
     return AssignmentRow(
         number=number,
         title=title,
         question_file=q_key.filename if q_key else None,
         question_href=q_link["href"] if q_link else None,
-        remarks=_remarks(cells[layout.remarks], layout),
+        remarks=remarks,
         submission_file=s_key.filename if s_key else None,
         marks=None if marks_text.lower() in ("", "not marked yet", "---") else marks_text,
         action=_action(status),
-        deadline=parse_deadline(_text(labels[-1])),
+        deadline=ends_at,
         assignment_id=_assignment_id(soup, status),
         term=term or None,
+        starts_at=starts_at,
+        submission_hidden=hidden,
     )
 
 

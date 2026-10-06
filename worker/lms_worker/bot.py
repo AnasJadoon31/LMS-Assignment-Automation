@@ -6,7 +6,8 @@ between two messages never shifts your choice. A chat idle for 10 minutes starts
 again at the main menu. Approve and Reject ask 1. Yes / 2. No first.
 
 Everything reads the database the poller keeps current; "Check the LMS now" asks the
-worker for an immediate poll. Papers are listed like assignments but are never solved.
+worker for an immediate poll. Lab papers are listed by their exam window and never solved;
+the LMS does not show paper submissions afterwards, so a past paper is "finished", not "missed".
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from .db.models import TERMINAL_STATES, Artifact, Assignment, ChatSession, Course, CourseMode, Event, Job, JobState, utcnow
 from .kv import KeyValue
 from .lms.bahria_pages import LMS_TZ
-from .watcher import HEARTBEAT_KEY, POLL_NOW_KEY, POLL_PAUSE_KEY
+from .watcher import HEARTBEAT_KEY, POLL_NOW_KEY, POLL_PAUSE_KEY, is_lab
 
 IDLE = timedelta(minutes=10)
 PAGE = 10
@@ -48,15 +49,17 @@ CATEGORIES = {
         ("all", "All"),
     ],
     PAPER: [
-        ("remaining", "Remaining (open, not submitted)"),
-        ("due_soon", "Due in the next 48 hours"),
+        ("upcoming", "Upcoming"),
+        ("open_now", "Open now"),
+        ("due_soon", "Starting in the next 48 hours"),
+        ("finished", "Finished"),
         ("submitted", "Submitted"),
-        ("missed", "Missed (closed, no submission)"),
         ("marked", "Marked"),
         ("all", "All"),
     ],
 }
 LABELS = {k: v for cats in CATEGORIES.values() for k, v in cats}
+LABELS["due_soon"] = "Due or starting in the next 48 hours"
 
 JOB_WORDS = {
     JobState.DETECTED: "found; downloading the question file",
@@ -240,10 +243,10 @@ class Bot:
         now = self.now()
         options = [
             (f"Assignments: {_summary(a, now)}", _open({"name": "section", "kind": ASSIGNMENT})),
-            (f"Papers: {_summary(p, now)}", _open({"name": "section", "kind": PAPER})),
+            (f"Lab papers: {_paper_summary(p, now)}", _open({"name": "section", "kind": PAPER})),
             (f"Waiting for your approval ({sum(_in(i, 'approval', now) for i in a)})",
              _open({"name": "list", "kind": ASSIGNMENT, "category": "approval"})),
-            (f"Due in the next 48 hours ({sum(_in(i, 'due_soon', now) for i in items)})",
+            (f"Due or starting in the next 48 hours ({sum(_in(i, 'due_soon', now) for i in items)})",
              _open({"name": "list", "kind": None, "category": "due_soon"})),
             ("By course", _open({"name": "courses"})),
             ("Course modes (auto, approve, notify)", _open({"name": "modes"})),
@@ -261,8 +264,8 @@ class Bot:
              _open({"name": "list", "kind": kind, "course": course_id, "category": key}))
             for key, label in CATEGORIES[kind]
         ]
-        where = s.get(Course, course_id).name if course_id else "all courses"
-        return f"{'Assignments' if kind == ASSIGNMENT else 'Papers'} · {where}", [], options
+        where = s.get(Course, course_id).name if course_id else ("all courses" if kind == ASSIGNMENT else "all labs")
+        return f"{'Assignments' if kind == ASSIGNMENT else 'Lab papers'} · {where}", [], options
 
     def _screen_list(self, s: Session, screen: dict):
         kind, course_id, category = screen.get("kind"), screen.get("course"), screen["category"]
@@ -278,7 +281,7 @@ class Bot:
         options = [(_line(rows[i], now, with_course=course_id is None), _open({"name": "item", "id": i})) for i in shown if i in rows]
         if len(ids) > (page + 1) * PAGE:
             options.append((f"More ({len(ids) - (page + 1) * PAGE} left)", _open({**_bare(screen), "page": page + 1, "items": ids})))
-        what = {ASSIGNMENT: "Assignments", PAPER: "Papers", None: "Assignments and papers"}[kind]
+        what = {ASSIGNMENT: "Assignments", PAPER: "Lab papers", None: "Assignments and lab papers"}[kind]
         where = f" · {s.get(Course, course_id).name}" if course_id else ""
         lines = [] if ids else ["Nothing here."]
         return f"{what}: {LABELS[category].split(' (')[0].lower()}{where}", lines, options
@@ -289,9 +292,14 @@ class Bot:
             return "Gone", ["This item is no longer listed."], []
         now = self.now()
         job = a.jobs[-1] if a.jobs else None
-        what = f"{a.term} paper {a.number}" if a.kind == PAPER else f"Assignment {a.number}"
+        what = f"Paper {a.number}" if a.kind == PAPER else f"Assignment {a.number}"
         lines = [a.title, f"{a.course.name} · {what}"]
-        lines.append(f"Due {_when(a.deadline)}" + (f" ({_relative(a.deadline, now)})" if a.deadline and not a.deadline_passed else "") if a.deadline else "No deadline shown")
+        if a.kind == PAPER and a.starts_at:
+            lines.append(f"{_window(a)} ({_paper_phase(a, now)})")
+        elif a.deadline:
+            lines.append(f"Due {_when(a.deadline)}" + (f" ({_relative(a.deadline, now)})" if not a.deadline_passed else ""))
+        else:
+            lines.append("No deadline shown")
         lines.append(f"Status: {_status(a, now)}")
         lines.append(f"Marks: {a.marks or 'not marked yet'}")
         if a.remarks:
@@ -303,7 +311,7 @@ class Bot:
             elif a.skipped_reason:
                 lines.append(f"Service: not handled; {a.skipped_reason.lower()}")
         else:
-            lines.append("Papers are tracked only; the service never solves them.")
+            lines.append("Lab papers are tracked only; the service never solves them.")
 
         options = []
         if _question_file(a):
@@ -327,9 +335,9 @@ class Bot:
         for c in self._courses(s):
             items = self._items(s, course_id=c.id)
             a = sum(_in(i, "remaining", now) for i in items if i.kind == ASSIGNMENT)
-            p = sum(_in(i, "remaining", now) for i in items if i.kind == PAPER)
-            parts = [f"{a} assignment{'s' * (a != 1)}"] * bool(a) + [f"{p} paper{'s' * (p != 1)}"] * bool(p)
-            label = f"{c.name} ({' + '.join(parts)} remaining)" if parts else c.name
+            p = sum(_in(i, "upcoming", now) or _in(i, "open_now", now) for i in items if i.kind == PAPER)
+            parts = [f"{a} assignment{'s' * (a != 1)} remaining"] * bool(a) + [f"{p} paper{'s' * (p != 1)} coming"] * bool(p)
+            label = f"{c.name} ({', '.join(parts)})" if parts else c.name
             options.append((label, _open({"name": "course", "id": c.id})))
         return "Courses", [] if options else ["No courses yet: the first poll has not run."], options
 
@@ -339,11 +347,10 @@ class Bot:
         items = self._items(s, course_id=c.id)
         a = [i for i in items if i.kind == ASSIGNMENT]
         p = [i for i in items if i.kind == PAPER]
-        options = [
-            (f"Assignments: {_summary(a, now)}", _open({"name": "section", "kind": ASSIGNMENT, "course": c.id})),
-            (f"Papers: {_summary(p, now)}", _open({"name": "section", "kind": PAPER, "course": c.id})),
-            (f"Mode: {c.mode} (change)", _open({"name": "mode_pick", "course": c.id})),
-        ]
+        options = [(f"Assignments: {_summary(a, now)}", _open({"name": "section", "kind": ASSIGNMENT, "course": c.id}))]
+        if is_lab(c.name):
+            options.append((f"Lab papers: {_paper_summary(p, now)}", _open({"name": "section", "kind": PAPER, "course": c.id})))
+        options.append((f"Mode: {c.mode} (change)", _open({"name": "mode_pick", "course": c.id})))
         return c.name, [], options
 
     def _screen_modes(self, s: Session, screen: dict):
@@ -448,6 +455,8 @@ def _job(a: Assignment) -> Job | None:
 
 
 def _in(a: Assignment, category: str, now: datetime) -> bool:
+    if a.kind == PAPER:
+        return _paper_in(a, category, now)
     is_open = not a.deadline_passed
     job = _job(a)
     state = job.state if job else None
@@ -472,10 +481,57 @@ def _in(a: Assignment, category: str, now: datetime) -> bool:
     raise ValueError(category)
 
 
+def _paper_in(a: Assignment, category: str, now: datetime) -> bool:
+    finished = a.deadline_passed or (a.deadline is not None and a.deadline <= now)
+    started = a.starts_at is None or a.starts_at <= now
+    if category == "all":
+        return True
+    if category in ("upcoming",):
+        return not finished and not started
+    if category == "open_now":
+        return not finished and started
+    if category == "remaining":
+        return not finished and not a.submitted_file
+    if category == "due_soon":
+        return not finished and not a.submitted_file and a.starts_at is not None and a.starts_at - now <= DUE_SOON
+    if category == "finished":
+        return finished
+    if category == "submitted":
+        return bool(a.submitted_file)
+    if category == "missed":
+        return finished and not a.submitted_file and not a.submission_hidden
+    if category == "marked":
+        return bool(a.marks)
+    return False
+
+
+def _paper_summary(items: list[Assignment], now: datetime) -> str:
+    open_now = [i for i in items if _paper_in(i, "open_now", now)]
+    upcoming = sorted((i for i in items if _paper_in(i, "upcoming", now)), key=lambda i: i.starts_at)
+    if open_now:
+        return f"{len(open_now)} open now"
+    if upcoming:
+        return f"{len(upcoming)} upcoming, next {_when(upcoming[0].starts_at)}"
+    return "none scheduled" if not items else "none upcoming"
+
+
+def _window(a: Assignment) -> str:
+    end = a.deadline.astimezone(LMS_TZ).strftime("%I:%M %p").lstrip("0") if a.deadline else "?"
+    return f"{_when(a.starts_at)} to {end}"
+
+
+def _paper_phase(a: Assignment, now: datetime) -> str:
+    if a.deadline_passed or (a.deadline and a.deadline <= now):
+        return "finished"
+    if a.starts_at and a.starts_at > now:
+        return f"starts {_relative(a.starts_at, now)}"
+    return f"open now, {_relative(a.deadline, now).removeprefix('in ')} left" if a.deadline else "open now"
+
+
 def _order(category: str):
     far = datetime.max.replace(tzinfo=LMS_TZ)
-    if category in ("remaining", "due_soon", "approval", "pipeline", "needs_you"):
-        return lambda a: (a.deadline or far, a.id)
+    if category in ("remaining", "due_soon", "approval", "pipeline", "needs_you", "upcoming", "open_now"):
+        return lambda a: (a.starts_at or a.deadline or far, a.id)
     return lambda a: (-(a.deadline or far).timestamp(), -a.id)
 
 
@@ -490,6 +546,10 @@ def _summary(items: list[Assignment], now: datetime) -> str:
 
 
 def _status(a: Assignment, now: datetime) -> str:
+    if a.kind == PAPER and not a.submitted_file:
+        if _paper_in(a, "finished", now):
+            return "the LMS does not show paper submissions" if a.submission_hidden else "no submission"
+        return "not started" if _paper_in(a, "upcoming", now) else "open; nothing submitted yet"
     if a.submitted_file:
         return "submitted" + ("; still open, you can delete and resubmit on the LMS" if not a.deadline_passed else "")
     if a.deadline_passed:
@@ -501,6 +561,10 @@ def _line(a: Assignment, now: datetime, *, with_course: bool) -> str:
     bits = [a.title]
     if with_course:
         bits.append(a.course.name)
+    if a.kind == PAPER and a.starts_at:
+        bits.append(_window(a))
+        bits.append(a.marks or _paper_phase(a, now))
+        return " · ".join(bits)
     if a.deadline:
         bits.append(f"due {_when(a.deadline)}")
     if a.marks:

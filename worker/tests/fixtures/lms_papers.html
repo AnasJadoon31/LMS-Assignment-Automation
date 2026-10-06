@@ -1,6 +1,7 @@
 <!DOCTYPE html>
-<!-- Papers.php fixture (2026-10-06). The selects and table header are copied from the real page;
-     no real paper row has been seen yet, so rows follow the assignments page's markup. -->
+<!-- Papers.php fixture (2026-10-06). The table rows are a real lab course's past mid and final papers
+     (Spring 2026), with the student id re-keyed; the third row is an open paper, written in the
+     assignments page's Submit-modal markup because no open paper has been seen yet. -->
 <html>
 <head><meta charset="utf-8"><title>LMS | Student</title></head>
 <body>
@@ -31,39 +32,67 @@
   </form>
 </div>
 <table class="table table-hover">
-  <tbody><tr>
-    <th>Paper No.</th> <th>Term</th> <th>Paper</th> <th>Remarks</th> <th>Added Submission</th>
-    <th>Marks Obtained</th> <th>Returned Comments</th> <th>Returned Submission</th> <th>Action</th> <th>Deadline</th>
-  </tr>
-  <tr >
-    <td>1 </td>
-    <td>Mid Term </td>
-    <td><a href="Download.php?k=MTAwMDAxLDIwMjYtMTAtMDYsUGFwZXIsMCxNaWQtUGFwZXItMTUxMDIwMjYucGRmLGxtcy5leGFtcGxlL1N0dWRlbnQvUGFwZXJzLnBocD9zPU1qQXlOak0lM0Qmb2M9TVRBd01EQXk%3D" target="_blank" class="label label-info"><span class="fa fa-download"></span> Paper </a></td>
-    <td><span class="label label-default" title="Attempt any four" style="cursor:pointer">Hover To View</span></td>
-    <td><a href="Download.php?k=MTAwMDAxLDIwMjYtMTAtMDYsUGFwZXJTdWJtaXNzaW9ucywwLDAyLTAwMDAwMC0wMDEtbWlkLnBkZixsbXMuZXhhbXBsZS9TdHVkZW50L1BhcGVycy5waHA/cz1NakF5TmpNJTNEJm9jPU1UQXdNREF5" target="_blank" class="label label-info"><span class="fa fa-download"></span> Submission </a></td>
-    <td> 18/30 </td>
-    <td>---</td>
-    <td>---</td>
-    <td><div style='background:red; color:#fff;'>Deadline Exceeded</div> </td>
-    <td><small class='label label-info' title='Actual'>15 October 2026-10:30 am</small> </td>
-  </tr>
-  <tr >
-    <td>2 </td>
-    <td>Final Term </td>
-    <td><a href="Download.php?k=MTAwMDAxLDIwMjYtMTAtMDYsUGFwZXIsMCxGaW5hbC1QYXBlci0yMDEyMjAyNi5wZGYsbG1zLmV4YW1wbGUvU3R1ZGVudC9QYXBlcnMucGhwP3M9TWpBeU5qTSUzRCZvYz1NVEF3TURBeQ%3D%3D" target="_blank" class="label label-info"><span class="fa fa-download"></span> Paper </a></td>
-    <td>---</td>
-    <td>No Submission </td>
-    <td> Not marked yet </td>
-    <td>---</td>
-    <td>---</td>
-    <td> <a href="#" data-toggle="modal" data-target="#modal-paper-solution-2" class="text-red"> <div style="background:green;"><i class="fa fa-plus-square"></i>Submit</div> </a> </td>
-    <td><small class='label label-info' title='Actual'>20 December 2026-01:00 pm</small> </td>
-  </tr>
-  </tbody>
-</table>
-<div class="modal fade" id="modal-paper-solution-2">
+                              <tbody><tr>
+                                  <th>Paper No.</th>
+                                  <th>Term</th>
+                                  <th>Paper</th>
+                                  <th>Remarks</th>
+                                  <th>Added Submission</th>
+                                  <th>Marks Obtained</th>
+                                  <th>Returned Comments</th>
+                                  <th>Returned Submission</th>
+                                  <th>Action</th>
+                                  <th>Deadline</th>
+                              </tr>
+                                                                    <tr style="background: #90EE90" >
+                                          <td>1 </td>
+                                          <td>Mid Term<br/><small>(60 Minutes)</small>                                          </td>
+                                          <td>                                              <a href="Download.php?k=MTAwMDAxLDIwMjYtMTAtMDYsUGFwZXIsMCxEQk1TLWxhYi0tLS0yLTE3MDMyMDI2LTEyMzIzMHBtLnBkZixsbXMuZXhhbXBsZS9TdHVkZW50L1BhcGVycy5waHA/cz1NakF5TmpFJTNEJm9jPU1UQXdNREF5" target="_blank" class="label label-info">
+                                                  <span class="fa fa-download"></span> Download Paper File
+                                              </a>
+                                                                                        </td>
+
+                                          <td>No Remarks</td>
+                                          <td>                                              <a href="Download.php?k=NA" target="_blank" class="label label-info">
+                                                  <span class="fa fa-download"></span> Download Submission File
+                                              </a>
+                                                                                        </td>
+                                          <td>
+                                          Not marked yet                                          </td>
+                                          <td>No comments yet</td>
+                                          <td>---                                          </td>
+                                          <td><span style='color:red'>Deadline Exceeded</span>                                          </td>
+
+                                          <td><small class='label label-info' title='Date'>Date:  17 March 2026</small><br/><small class='label label-success' title='Start Time'>Start Time:  12:55 pm</small><br/> <small class='label label-danger' title='End Time'>End Time: 01:55 pm</small>                                          </td>
+                                      </tr>
+                                                                            <tr style="background: #90EE90" >
+                                          <td>2 </td>
+                                          <td>Final Term (Objective-2hours)<br/>{ For BUMDC Only }                                          </td>
+                                          <td>                                              <a href="Download.php?k=MTAwMDAxLDIwMjYtMTAtMDYsUGFwZXIsMCxGaW5hbC1MYWItLS0tLTIwMDUyMDI2LTEyMDUxN3BtLnBkZixsbXMuZXhhbXBsZS9TdHVkZW50L1BhcGVycy5waHA/cz1NakF5TmpFJTNEJm9jPU1UQXdNREF5" target="_blank" class="label label-info">
+                                                  <span class="fa fa-download"></span> Download Paper File
+                                              </a>
+                                                                                        </td>
+
+                                          <td>No Remarks</td>
+                                          <td>                                              <a href="Download.php?k=NA" target="_blank" class="label label-info">
+                                                  <span class="fa fa-download"></span> Download Submission File
+                                              </a>
+                                                                                        </td>
+                                          <td>
+                                          Not marked yet                                          </td>
+                                          <td>No comments yet</td>
+                                          <td>---                                          </td>
+                                          <td><span style='color:red'>Deadline Exceeded</span>                                          </td>
+
+                                          <td><small class='label label-info' title='Date'>Date:  20 May 2026</small><br/><small class='label label-success' title='Start Time'>Start Time:  12:55 pm</small><br/> <small class='label label-danger' title='End Time'>End Time: 02:55 pm</small>                                          </td>
+                                      </tr>
+                                                                    
+<tr style="background: #FFFFFF"> <td>3 </td> <td>Mid Term<br/><small>(90 Minutes)</small> </td> <td> <a class="label label-info" href="Download.php?k=MTAwMDAxLDIwMjYtMTAtMDYsUGFwZXIsMCxPUy1MYWItTWlkLTIwMTAyMDI2LnBkZixsbXMuZXhhbXBsZS9TdHVkZW50L1BhcGVycy5waHA%3D" target="_blank"> <span class="fa fa-download"></span> Download Paper File </a> </td> <td>Bring your own calculator</td> <td> <a class="label label-info" href="Download.php?k=NA" target="_blank"> <span class="fa fa-download"></span> Download Submission File </a> </td> <td> Not marked yet </td> <td>No comments yet</td> <td>--- </td> <td> <a href="#" data-toggle="modal" data-target="#modal-paper-solution-3" class="text-red"> <div style="background:green;"><i class="fa fa-plus-square"></i>Submit</div> </a> </td> <td><small class="label label-info" title="Date">Date: 20 October 2026</small><br/><small class="label label-success" title="Start Time">Start Time: 02:00 pm</small><br/> <small class="label label-danger" title="End Time">End Time: 03:30 pm</small> </td> </tr>
+</tbody>
+                          </table>
+<div class="modal fade" id="modal-paper-solution-3">
   <form action="includes/studentprocess.php?s=paperSubmissionAdd" method="post" enctype="multipart/form-data">
-    <input type="hidden" name="paperID" value="ODgwMDE%3D">
+    <input type="hidden" name="paperID" value="ODgwMDE=">
     <input type="file" name="paperSubmissionFile">
   </form>
 </div>

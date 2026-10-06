@@ -79,8 +79,12 @@ class Assignment(Base):
     fingerprint: Mapped[str] = mapped_column(String(64))
     # Why no job was made, e.g. closed or already submitted when first seen
     skipped_reason: Mapped[str | None] = mapped_column(Text)
+    # Papers: the exam window opens at starts_at and closes at deadline
+    starts_at: Mapped[datetime | None]
+    opened_at: Mapped[datetime | None]  # when "the paper is open" was sent
     # What the LMS showed at the last poll
     submitted_file: Mapped[str | None] = mapped_column(String(512))
+    submission_hidden: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     deadline_passed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     marks: Mapped[str | None] = mapped_column(String(64))
     status_seen_at: Mapped[datetime | None]

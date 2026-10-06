@@ -156,10 +156,11 @@ def test_list_papers(portal, urls, tmp_path):
     with logged_in(urls, tmp_path) as adapter:
         lab, daa = adapter.list_courses()
         papers = adapter.list_papers(lab)
-        assert [(p.lms_ref, p.kind, p.term, p.marks, p.deadline_passed) for p in papers] == [
-            ("100002:P1", "paper", "Mid Term", "18/30", True),
-            ("100002:P2", "paper", "Final Term", None, False),
+        assert [(p.lms_ref, p.term, p.deadline_passed, p.submission_hidden) for p in papers] == [
+            ("100002:P1", "Mid Term", True, True),
+            ("100002:P2", "Final Term", True, True),
+            ("100002:P3", "Mid Term", False, True),
         ]
+        assert papers[2].starts_at.isoformat() == "2026-10-20T14:00:00+05:00"
         assert adapter.list_papers(daa) == []
-        status = adapter.submission_status(papers[0])
-        assert status.submitted and status.marks == "18/30"
+        assert not adapter.submission_status(papers[0]).submitted

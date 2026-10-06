@@ -7,7 +7,7 @@ approval. The design is in the tech spec; this repo is being built in the spec's
 | Step | Status |
 | --- | --- |
 | 1. Spike: CMS login, LMS mapping, `list_assignments()` | Done, except upload (see below) |
-| 2. Watcher: poller, fingerprints, database, notifier | Done: WhatsApp and Discord, papers, marks, reminders |
+| 2. Watcher: poller, fingerprints, database, notifier | Done: WhatsApp and Discord, lab papers, marks, reminders |
 | 3. Solver and renderer | Next |
 | 4. Submitter | Not started; upload form mapped |
 | 5. Web UI and auto mode | Not started |
@@ -43,18 +43,19 @@ Send `menu` to the bot. Numbered screens, reply with a digit, `0` goes back:
 ```
 LMS BOT
 1. Assignments: 2 remaining, 1 due soon
-2. Papers: 1 remaining, 1 due soon
+2. Lab papers: 1 upcoming, next Tue 20 Oct, 2:00 PM
 3. Waiting for your approval (1)
-4. Due in the next 48 hours (2)
+4. Due or starting in the next 48 hours (2)
 5. By course
 6. Course modes (auto, approve, notify)
 7. Check the LMS now
 8. System status
 ```
 
-Assignments and Papers each list: remaining, due in 48 hours, submitted, missed (closed with no
-submission), marked and all; assignments add waiting for your approval, queued or being solved,
-and stopped. By course gives the same screens for one course, plus its mode. Picking an item shows
+Assignments list: remaining, due in 48 hours, waiting for your approval, queued or being solved,
+stopped, submitted, missed (closed with no submission), marked and all. Lab papers list by exam
+window: upcoming, open now, starting in 48 hours, finished, submitted, marked and all. By course
+gives the same screens for one course (papers only for labs), plus its mode. Picking an item shows
 its deadline, status, marks, teacher's note and service state, and offers what applies: the
 question file or paper, the solved PDF, DOCX, notebook and receipt, Approve, Reject, Redo with a
 note, and History. Approve, Reject and switching a course to auto ask 1. Yes / 2. No first.
@@ -68,10 +69,14 @@ note, and History. Approve, Reject and switching a course to auto ask 1. Yes / 2
 - **Leaves your work alone.** Anything already closed, or already showing a submission the service did not
   make, is recorded but gets no job. If you submit by hand while a job is open, the job stops.
 - **Tracks changes.** A changed title, deadline or question file creates a new revision and a "changed" message.
-- **Papers.** Online exam papers (`Papers.php`) are tracked and announced with their file, never solved.
+- **Lab papers.** Only lab courses get papers (`Papers.php`), each with a date, start and end time.
+  You get one message when a paper is scheduled, reminders 24 hours and 1 hour before it starts, and
+  the paper file the moment it opens: the worker polls at the start time, then every minute until
+  the file appears. The LMS does not show paper submissions afterwards (`k=NA`), so a past paper is
+  "finished", not "missed". Papers are never solved.
 - **Status, marks, reminders.** Every poll records what the LMS shows for each assignment and paper
   (submitted, open or closed, marks). "Marks posted" arrives when marks first appear, and a reminder
-  24 hours and 2 hours before any deadline with nothing submitted.
+  24 hours and 2 hours before any assignment deadline with nothing submitted.
 - **Keeps going.** A changed LMS page pauses polling and alerts you (`lms-worker resume` after checking).
   A lost session logs in again through CMS; 2 rejected logins or a CAPTCHA pause that and alert you.
   An unreachable LMS backs off 5, 15, then 60 minutes and alerts after 3 failed polls.

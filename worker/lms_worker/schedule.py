@@ -1,5 +1,6 @@
 """When to poll: every 10 minutes from 08:00 to 23:00 PKT, every 30 overnight, a few
-seconds of jitter, and 5, 15, 60 minutes of back-off while the LMS is down."""
+seconds of jitter, and 5, 15, 60 minutes of back-off while the LMS is down. A lab
+paper's start time pulls the next poll forward so the paper arrives as it opens."""
 
 from __future__ import annotations
 
@@ -19,6 +20,15 @@ DAY_MINUTES, NIGHT_MINUTES = 10, 30
 BACKOFF_MINUTES = (5, 15, 60)
 JITTER_SECONDS = 20
 WAKE_CHECK_SECONDS = 10
+MIN_DELAY_SECONDS = 5
+
+
+def _next_wake(watcher: Watcher) -> datetime | None:
+    try:
+        return watcher.next_wake()
+    except Exception:
+        log.exception("Could not work out the next paper time")
+        return None
 
 
 def next_delay(now: datetime, result: PollResult, down_streak: int, rng: random.Random) -> float:
@@ -50,6 +60,10 @@ def run_forever(
             result = PollResult(status="error")
         down_streak = down_streak + 1 if result.status == "lms_down" else 0
         delay = next_delay(clock(), result, down_streak, rng)
+        if result.status == "ok":
+            wake = _next_wake(watcher)
+            if wake is not None:
+                delay = min(delay, max(MIN_DELAY_SECONDS, (wake - clock()).total_seconds()))
         if on_result:
             on_result(result, delay)
         waited = 0.0

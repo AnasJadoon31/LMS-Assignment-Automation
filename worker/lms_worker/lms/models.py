@@ -35,11 +35,13 @@ class AssignmentMeta:
     remarks: str | None = None
     assignment_id: str | None = None  # LMS id, shown only while the assignment is open
     kind: str = ASSIGNMENT
-    term: str | None = None  # papers: mid or final
+    term: str | None = None  # papers: "Mid Term", "Final Term"
+    starts_at: datetime | None = None  # papers: when the exam window opens; deadline is when it closes
     # Snapshot from the listing, not part of the fingerprint
     submitted_file: str | None = None
     deadline_passed: bool = False
     marks: str | None = None
+    submission_hidden: bool = False  # papers: the LMS shows a submission link with no file
 
     def fingerprint(self) -> str:
         """Hash of course code, title, deadline and attachment name plus size.
@@ -53,6 +55,8 @@ class AssignmentMeta:
             self.attachment_name or "",
             str(self.attachment_size or ""),
         ]
+        if self.starts_at is not None:  # papers only, so assignment fingerprints stay as they were
+            parts.append(self.starts_at.isoformat())
         return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()
 
 

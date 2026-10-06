@@ -46,9 +46,11 @@ def semester(sessions, tmp_path):
         item(lab, "151704:5", "Lab 5", NOW - timedelta(days=5), deadline_passed=True, submitted_file="l5.pdf", marks="9/10")
         item(lab, "151704:6", "Lab 6", NOW + timedelta(days=2), submitted_file="l6.pdf")
         item(lab, "151704:4", "Lab 4", NOW - timedelta(days=9), deadline_passed=True)
-        item(daa, "155150:P1", "Mid Term paper", NOW + timedelta(hours=20), kind="paper", term="Mid Term", question_path=str(q))
-        item(lab, "151704:P1", "Mid Term paper", NOW - timedelta(days=1), kind="paper", term="Mid Term",
-             deadline_passed=True, submitted_file="mid.pdf", marks="20/30")
+        item(lab, "151704:P2", "Mid Term paper (60 Minutes)", NOW + timedelta(hours=21), kind="paper", term="Mid Term",
+             starts_at=NOW + timedelta(hours=20), submission_hidden=True)
+        item(lab, "151704:P1", "Quiz paper", NOW - timedelta(days=3), kind="paper", term="Quiz",
+             starts_at=NOW - timedelta(days=3, hours=1), deadline_passed=True, submission_hidden=True, marks="8/10",
+             question_path=str(q))
         s.flush()
         job = Job(assignment=rec, revision=1, fingerprint="x", state=JobState.AWAITING_APPROVAL)
         s.add(job)
@@ -77,9 +79,9 @@ def test_main_menu_counts_everything(bot, semester):
     out = text(say(bot, "hi"))
     assert out.splitlines()[0] == "*LMS BOT*"
     assert "1. Assignments: 2 remaining, 1 due soon" in out
-    assert "2. Papers: 1 remaining, 1 due soon" in out
+    assert "2. Lab papers: 1 upcoming, next Sun 11 Oct, 8:00 AM" in out
     assert "3. Waiting for your approval (1)" in out
-    assert "4. Due in the next 48 hours (2)" in out
+    assert "4. Due or starting in the next 48 hours (2)" in out
     assert "7. Check the LMS now" in out and "8. System status" in out
 
 
@@ -99,12 +101,21 @@ def test_assignment_categories(bot, semester):
         assert line in out
 
 
-def test_paper_categories_and_lists(bot, semester):
+def test_lab_paper_categories_lists_and_item(bot, semester):
     out = text(say(bot, "menu", "2"))
-    assert "1. Remaining (open, not submitted) (1)" in out and "5. Marked (1)" in out
+    assert out.startswith("*Lab papers · all labs*")
+    for line in ["1. Upcoming (1)", "2. Open now (0)", "3. Starting in the next 48 hours (1)", "4. Finished (1)",
+                 "5. Submitted (0)", "6. Marked (1)", "7. All (2)"]:
+        assert line in out
     assert "approval" not in out.lower()
-    marked = text(say(bot, "5"))
-    assert "1. Mid Term paper · CA Lab · due" in marked and "20/30" in marked
+    upcoming = text(say(bot, "1"))
+    assert "1. Mid Term paper (60 Minutes) · CA Lab · Sun 11 Oct, 8:00 AM to 9:00 AM · starts in 20 h 0 min" in upcoming
+    item = text(say(bot, "1"))
+    assert "Sun 11 Oct, 8:00 AM to 9:00 AM (starts in 20 h 0 min)" in item
+    assert "Status: not started" in item and "Lab papers are tracked only" in item
+    finished = text(say(bot, "0", "0", "4", "1"))
+    assert "Status: the LMS does not show paper submissions" in finished and "Marks: 8/10" in finished
+    assert "1. Send the paper" in finished
 
 
 def test_remaining_list_is_sorted_by_deadline_and_opens_an_item(bot, semester):
@@ -174,11 +185,13 @@ def test_reject(bot, semester, sessions):
 
 def test_by_course_has_assignments_papers_and_mode(bot, semester):
     out = text(say(bot, "menu", "5"))
-    assert "1. DAA (2 assignments + 1 paper remaining)" in out and "2. CA Lab" in out
-    course = text(say(bot, "2"))
+    assert "1. DAA (2 assignments remaining)" in out and "2. CA Lab (1 paper coming)" in out
+    daa = text(say(bot, "1"))
+    assert "Lab papers" not in daa and "2. Mode: approve (change)" in daa  # papers are for labs only
+    course = text(say(bot, "0", "2"))
     assert "*CA Lab*" in course
     assert "1. Assignments: nothing remaining" in course
-    assert "2. Papers: nothing remaining" in course
+    assert "2. Lab papers: 1 upcoming, next Sun 11 Oct, 8:00 AM" in course
     assert "3. Mode: approve (change)" in course
     missed = text(say(bot, "1", "7"))
     assert "Lab 4 · due" in missed and "CA Lab ·" not in missed  # course name left out inside a course
