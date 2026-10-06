@@ -102,7 +102,8 @@ class ClaudeLogin:
             self._stop()
         status = self.status()
         if not status.logged_in:
-            raise LoginError("Sign-in did not complete: " + (text.strip()[-300:] or "no answer"))
+            said = " ".join(text.replace(code, "").split())  # the terminal echoes the code back
+            raise LoginError("Sign-in did not complete: " + (said[-300:] or "no answer"))
         return status
 
     def stamp(self) -> str | None:

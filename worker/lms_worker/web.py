@@ -247,7 +247,7 @@ STYLE = """
 :root { --navy:#2d398c; --sky:#c4e4f5; --soft:#eef7fc; --gold:#ffca0b; --ink:#1b1c1f; --muted:#565b6b; --rule:#d3d9e6;
         --ok:#1e7a46; --bad:#b3261e; --bg:#f6f8fb; --card:#ffffff; }
 @media (prefers-color-scheme: dark) { :root { --ink:#eef1f7; --muted:#a8afc0; --rule:#323a52; --bg:#121521;
-        --card:#1b2030; --soft:#222a3e; --sky:#2c3a5c; } }
+        --card:#1b2030; --soft:#222a3e; --sky:#2c3a5c; --ok:#5fd394; --bad:#ff8a80; } }
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
 header { background:var(--navy); color:#fff; padding:14px 16px; border-bottom:4px solid var(--gold); display:flex; align-items:center; }

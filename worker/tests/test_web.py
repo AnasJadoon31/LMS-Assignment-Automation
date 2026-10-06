@@ -130,8 +130,9 @@ def test_a_wrong_code_or_no_sign_in_is_refused(tmp_path, claude_bin):
     with pytest.raises(LoginError, match="No sign-in is waiting"):
         login.finish(GOOD_CODE)
     login.start()
-    with pytest.raises(LoginError, match="did not complete"):
+    with pytest.raises(LoginError, match="did not complete") as e:
         login.finish("wrongcode-0000")
+    assert "wrongcode-0000" not in str(e.value) and "Invalid code" in str(e.value)
     with pytest.raises(LoginError, match="does not look like"):
         login.finish("x; rm -rf /")
     assert not login.status().logged_in
