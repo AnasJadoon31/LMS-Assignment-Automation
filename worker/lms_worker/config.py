@@ -61,6 +61,20 @@ class EvolutionConfig:
 
 
 @dataclass(frozen=True)
+class SolverConfig:
+    """Solving in throwaway sandbox containers. On when SOLVER_IMAGE is set."""
+
+    image: str
+    network: str | None = "lms-sandbox"
+    proxy: str | None = "http://egress:3128"  # the sandbox's only way out
+    docker_host: str | None = None  # the socket proxy; the local Docker socket without it
+    login_volume: str | None = None  # found from the worker's own mounts when not set
+    model: str | None = None  # the CLI's default (your plan's) when not set
+    daily_cap: int = 6
+    pause_at: float = 0.8
+
+
+@dataclass(frozen=True)
 class Settings:
     urls: PortalUrls
     state_dir: Path
@@ -73,6 +87,7 @@ class Settings:
     admin_password: str | None = field(default=None, repr=False)  # the setup page's password
     claude_home: Path = Path("/claude-home")  # the claude.ai login the solver runs under
     public_url: str | None = None  # where the setup page is reachable, for links in alerts
+    solver: SolverConfig | None = None
 
 
 def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
@@ -99,6 +114,25 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
     discord = os.environ.get("DISCORD_WEBHOOK_URL", "").strip() or None
     if discord and not re.match(r"https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/(?:v\d+/)?webhooks/\d+/[\w-]+$", discord):
         raise ConfigError("DISCORD_WEBHOOK_URL must be a Discord webhook URL (https://discord.com/api/webhooks/<id>/<token>)")
+    solver = None
+    if os.environ.get("SOLVER_IMAGE", "").strip():
+        try:
+            daily_cap = int(os.environ.get("SOLVER_DAILY_CAP") or 6)
+            pause_at = float(os.environ.get("SOLVER_PAUSE_AT") or 0.8)
+        except ValueError as e:
+            raise ConfigError(f"SOLVER_DAILY_CAP and SOLVER_PAUSE_AT must be numbers: {e}") from e
+        if not 0 < pause_at <= 1:
+            raise ConfigError("SOLVER_PAUSE_AT is a fraction of the plan's limit, e.g. 0.8")
+        solver = SolverConfig(
+            image=os.environ["SOLVER_IMAGE"].strip(),
+            network=os.environ.get("SOLVER_NETWORK", "lms-sandbox").strip() or None,
+            proxy=os.environ.get("SOLVER_PROXY", "http://egress:3128").strip() or None,
+            docker_host=os.environ.get("DOCKER_HOST", "").strip() or None,
+            login_volume=os.environ.get("SOLVER_LOGIN_VOLUME", "").strip() or None,
+            model=os.environ.get("SOLVER_MODEL", "").strip() or None,
+            daily_cap=daily_cap,
+            pause_at=pause_at,
+        )
     return Settings(
         urls=PortalUrls(
             cms_login=os.environ.get("CMS_LOGIN_URL", CMS_LOGIN_URL),
@@ -114,4 +148,5 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         admin_password=os.environ.get("ADMIN_PASSWORD") or None,
         claude_home=Path(os.environ.get("CLAUDE_HOME", "/claude-home")),
         public_url=(os.environ.get("PUBLIC_URL") or "").rstrip("/") or None,
+        solver=solver,
     )

@@ -11,6 +11,7 @@ dependencies = [
     "alembic>=1.13",
     "beautifulsoup4>=4.12",
     "cryptography>=42",
+    "docker>=7",
     "fastapi>=0.115",
     "python-multipart>=0.0.9",
     "httpx>=0.27",

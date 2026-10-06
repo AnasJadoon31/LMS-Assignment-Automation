@@ -1,6 +1,7 @@
 """LMS worker commands.
 
-    lms-worker run              poll the LMS on schedule until stopped (the worker service)
+    lms-worker run              poll the LMS on schedule and solve until stopped (the worker service)
+    lms-worker solve            solve the next waiting assignment now
     lms-worker api              answer WhatsApp messages through the menu (the api service)
     lms-worker poll             run one poll cycle now
     lms-worker status           last poll, pauses, session and recent jobs
@@ -272,6 +273,12 @@ def cmd_run(rt: Runtime, args) -> int:
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
+    solver = rt.solver()
+    if solver is not None:
+        threading.Thread(target=solver.run_forever, args=(stop,), name="solver", daemon=True).start()
+        print(f"Solving in {solver.sandbox.image} containers", flush=True)
+    else:
+        print("Solving is off: set SOLVER_IMAGE to turn it on", flush=True)
     print("Polling the LMS; stop with Ctrl-C", flush=True)
     run_forever(
         rt.watcher(),
@@ -281,6 +288,16 @@ def cmd_run(rt: Runtime, args) -> int:
         poll_requested=lambda: rt.kv.get(POLL_NOW_KEY) is not None,
     )
     return 0
+
+
+def cmd_solve(rt: Runtime, args) -> int:
+    solver = rt.solver()
+    if solver is None:
+        raise ConfigError("Solving is off: set SOLVER_IMAGE")
+    solver.recover()
+    result = solver.run_once()
+    print(f"{result.status}" + (f" (job {result.job_id})" if result.job_id else "") + (f": {result.detail}" if result.detail else ""))
+    return 0 if result.status in ("solved", "handwritten", "idle", "paused") else 1
 
 
 def cmd_resume(rt: Runtime, args) -> int:
@@ -310,7 +327,7 @@ def cmd_status(rt: Runtime, args) -> int:
     return 0
 
 
-NEEDS_DB = {"db-upgrade", "poll", "run", "resume", "status", "api"}
+NEEDS_DB = {"db-upgrade", "poll", "run", "solve", "resume", "status", "api"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -322,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
     p_api.add_argument("--host", default="0.0.0.0")
     p_api.add_argument("--port", type=int, default=8000)
     sub.add_parser("poll", help="run one poll cycle now")
+    sub.add_parser("solve", help="solve the next waiting assignment now")
     sub.add_parser("status", help="last poll, pauses, session and recent jobs")
     sub.add_parser("resume", help="clear a polling pause after the LMS layout changed")
     sub.add_parser("db-upgrade", help="create or migrate the database tables")
@@ -348,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         "run": cmd_run,
         "api": cmd_api,
         "poll": cmd_poll,
+        "solve": cmd_solve,
         "status": cmd_status,
         "resume": cmd_resume,
         "db-upgrade": cmd_db_upgrade,

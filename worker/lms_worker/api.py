@@ -60,13 +60,13 @@ def create_app(
 ) -> FastAPI:
     secret = webhook_secret(settings.app_secret_key or "")
     owner = settings.evolution.number if settings.evolution else None
-    bot = Bot(sessions, kv)
     if sender is None and settings.evolution and owner:
         sender = EvolutionNotifier(settings.evolution)
     if admin is None and settings.evolution:
         admin = EvolutionAdmin(settings.evolution)
     if login is None and shutil.which("claude"):
         login = ClaudeLogin(settings.claude_home)
+    bot = Bot(sessions, kv, login=login, setup_url=f"{settings.public_url}/setup" if settings.public_url else None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

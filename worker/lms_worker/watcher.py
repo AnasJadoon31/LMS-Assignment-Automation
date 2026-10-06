@@ -81,6 +81,7 @@ class PollResult:
     skipped: int = 0
     stopped: int = 0
     downloaded: int = 0
+    uploaded: int = 0
     papers: int = 0
     new_papers: int = 0
     marks_posted: int = 0
@@ -183,6 +184,7 @@ class Watcher:
                     + "\nEach starts in approve mode.",
                 )
         result.downloaded = self._download_pending(result)
+        self._submit_pending(result)
         self._announce_papers(result)
         self._remind(result)
 
@@ -395,6 +397,56 @@ class Watcher:
                 s.commit()
                 done += 1
         return done
+
+    # --- uploads ---
+
+    def _submit_pending(self, result: PollResult) -> None:
+        """Approved and auto-mode reports go up as their PDF. Until the LMS upload form is mapped,
+        the PDF comes back to you to upload yourself."""
+        with self.sessions() as s:
+            jobs = s.scalars(
+                select(Job).where(Job.state == JobState.SUBMITTING).order_by(Job.id).with_for_update(skip_locked=True)
+            ).all()
+            for job in jobs:
+                a = job.assignment
+                pdfs = [Path(x.path) for x in sorted(job.artifacts, key=lambda x: -x.id) if x.kind == "pdf"]
+                pdf = next((p for p in pdfs if p.is_file()), None)
+                if pdf is None:
+                    self._stop(s, job, "The solved PDF is missing")
+                elif a.deadline_passed or (a.deadline is not None and a.deadline <= self.now()):
+                    self._stop(s, job, "The deadline passed before the upload")
+                else:
+                    try:
+                        receipt = self.adapter.submit(_meta(a), pdf)
+                    except NotImplementedError:
+                        job.last_error = "Automatic upload is not set up yet"
+                        self._transition(s, job, JobState.NEEDS_HUMAN, "upload form not mapped; PDF sent to upload by hand")
+                        self.outbox.queue(
+                            s, "upload",
+                            f"Upload this yourself: {a.course.name} · {a.title}\n"
+                            + (f"Due {_pkt(a.deadline)}\n" if a.deadline else "")
+                            + "Automatic upload is not set up yet: the LMS upload form is not mapped.",
+                            file=pdf, job_id=job.id,
+                        )
+                    except (ContractBroken, SessionExpired, httpx.HTTPError):
+                        s.commit()
+                        raise
+                    except LMSError as e:
+                        job.attempts += 1
+                        job.last_error = str(e)
+                        result.errors.append(f"{a.title}: upload failed: {e}")
+                        if job.attempts >= DOWNLOAD_ALERT_AFTER:
+                            self._stop(s, job, f"The upload failed {job.attempts} times: {e}")
+                    else:
+                        job.lms_submission_file = receipt.filename
+                        data = receipt.screenshot.read_bytes()
+                        s.add(Artifact(job=job, kind="receipt", path=str(receipt.screenshot),
+                                       sha256=hashlib.sha256(data).hexdigest(), size=len(data)))
+                        self._transition(s, job, JobState.CONFIRMED, f"uploaded as {receipt.filename}")
+                        self.outbox.queue(s, "receipt", f"Uploaded: {a.course.name} · {a.title}\nThe LMS shows {receipt.filename}.",
+                                          file=receipt.screenshot, job_id=job.id)
+                        result.uploaded += 1
+                s.commit()
 
     def _announce_papers(self, result: PollResult) -> None:
         """A scheduled paper gets one message; when its window opens, the paper file follows."""

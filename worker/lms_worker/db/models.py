@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import StrEnum
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, false, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, false, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -36,9 +36,10 @@ class JobState(StrEnum):
     NEEDS_HUMAN = "NEEDS_HUMAN"
     REJECTED = "REJECTED"
     SUPERSEDED = "SUPERSEDED"  # the teacher changed the assignment; a newer revision took over
+    HANDWRITTEN = "HANDWRITTEN"  # solved and sent to you to copy by hand; never uploaded
 
 
-TERMINAL_STATES = {JobState.CONFIRMED, JobState.NEEDS_HUMAN, JobState.REJECTED, JobState.SUPERSEDED}
+TERMINAL_STATES = {JobState.CONFIRMED, JobState.NEEDS_HUMAN, JobState.REJECTED, JobState.SUPERSEDED, JobState.HANDWRITTEN}
 
 
 class Course(Base):
@@ -117,6 +118,12 @@ class Job(Base):
     lms_submission_file: Mapped[str | None] = mapped_column(String(512))
     # Your instruction when you ask for a redo
     note: Mapped[str | None] = mapped_column(Text)
+    # Solving: not before this time (a usage pause or a retry), the Claude session to resume,
+    # the plan cost the CLI reported, and Claude's summary of the finished report
+    not_before: Mapped[datetime | None]
+    claude_session: Mapped[str | None] = mapped_column(String(64))
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    summary: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 

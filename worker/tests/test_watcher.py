@@ -211,14 +211,14 @@ def test_a_service_upload_is_not_mistaken_for_yours(watcher, lmsfake, sessions):
     watcher.poll_once()
     with sessions.begin() as s:
         job = s.scalar(select(Job))
-        job.state = JobState.SUBMITTING
+        job.state = JobState.AWAITING_APPROVAL  # e.g. a redo after the service's upload
         job.lms_submission_file = "ours.pdf"
 
     lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations", submitted_file="ours.pdf"))
     r = watcher.poll_once()
 
     assert r.stopped == 0
-    assert jobs(sessions) == [("Recurrence Relations", 1, "SUBMITTING")]
+    assert jobs(sessions) == [("Recurrence Relations", 1, "AWAITING_APPROVAL")]
 
 
 def test_downloads_retry_and_alert_on_the_third_failure(watcher, lmsfake, channel, sessions):

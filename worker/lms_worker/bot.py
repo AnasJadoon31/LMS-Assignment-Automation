@@ -25,6 +25,8 @@ from .db.models import TERMINAL_STATES, Artifact, Assignment, ChatSession, Cours
 from .kv import KeyValue
 from .lms.bahria_pages import LMS_TZ
 from .lms.models import PAPER_MISSED, PAPER_NOT_SUBMITTED, PAPER_SUBMITTED
+from .solver.pipeline import SIGNED_OUT_KEY
+from .solver.usage import UsageGuard
 from .watcher import HEARTBEAT_KEY, POLL_NOW_KEY, POLL_PAUSE_KEY, is_lab
 
 IDLE = timedelta(minutes=10)
@@ -76,6 +78,7 @@ JOB_WORDS = {
     JobState.NEEDS_HUMAN: "stopped",
     JobState.REJECTED: "rejected by you",
     JobState.SUPERSEDED: "replaced by a newer revision",
+    JobState.HANDWRITTEN: "solved; handwritten, sent to you to copy",
 }
 
 
@@ -92,10 +95,14 @@ class Bot:
         kv: KeyValue,
         *,
         now: Callable[[], datetime] = utcnow,
+        login=None,  # ClaudeLogin: System status says whether Claude is signed in
+        setup_url: str | None = None,
     ) -> None:
         self.sessions = sessions
         self.kv = kv
         self.now = now
+        self.login = login
+        self.setup_url = setup_url
 
     # --- entry point ---
 
@@ -205,6 +212,7 @@ class Bot:
             return f"Nothing changed: {a.title} is {JOB_WORDS.get(job.state, job.state)} now."
         if action == "approve":
             self._move(s, job, JobState.SUBMITTING, "approved on WhatsApp")
+            self.kv.set(POLL_NOW_KEY, self.now().isoformat())  # the worker uploads within seconds
             return f"Approved: {a.title}. Uploading now; the LMS receipt will follow."
         if action == "reject":
             self._move(s, job, JobState.REJECTED, "rejected on WhatsApp")
@@ -326,7 +334,7 @@ class Bot:
             if job.state == JobState.AWAITING_APPROVAL:
                 options.append(("Approve and upload", {"do": "confirm", "action": "approve", "job": job.id}))
                 options.append(("Reject", {"do": "confirm", "action": "reject", "job": job.id}))
-            if job.state in (JobState.AWAITING_APPROVAL, JobState.NEEDS_HUMAN, JobState.CONFIRMED) and not a.deadline_passed:
+            if job.state in (JobState.AWAITING_APPROVAL, JobState.NEEDS_HUMAN, JobState.CONFIRMED, JobState.HANDWRITTEN) and not a.deadline_passed:
                 options.append(("Redo with a note", {"do": "note", "job": job.id}))
             options.append(("History", {"do": "history", "job": job.id}))
         return "", lines, options
@@ -420,12 +428,25 @@ class Bot:
             lines.append(f"LMS login: paused ({json.loads(guard)['paused_reason']})")
         else:
             lines.append("LMS login: ok")
+        lines.append(self._claude_line())
+        lines.append(UsageGuard(self.kv).status_line(self.now()))
         jobs = s.scalars(select(Job)).all()
         active = [j for j in jobs if j.state not in TERMINAL_STATES]
         lines.append(f"Jobs: {len(active)} active, {sum(j.state == JobState.AWAITING_APPROVAL for j in jobs)} waiting for you")
         month = (self.now().year, self.now().month)
         lines.append(f"Tokens used this month: {sum(j.cost_tokens for j in jobs if (j.created_at.year, j.created_at.month) == month):,}")
         return "\n".join(lines)
+
+    def _claude_line(self) -> str:
+        where = self.setup_url or "the setup page"
+        if self.login is not None:
+            st = self.login.status()
+            if st.logged_in:
+                return "Claude: signed in" + (f" as {st.email}" if st.email else "")
+            return f"Claude: not signed in; sign in at {where}"
+        if self.kv.get(SIGNED_OUT_KEY):
+            return f"Claude: signed out; sign in again at {where}"
+        return "Claude: no sign-in problem seen"
 
     def _history(self, s: Session, job_id: int) -> str:
         events = s.scalars(select(Event).where(Event.job_id == job_id).order_by(Event.id.desc()).limit(8)).all()

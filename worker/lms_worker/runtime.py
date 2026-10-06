@@ -35,6 +35,28 @@ class Runtime:
             channels["discord"] = DiscordNotifier(self.settings.discord_webhook_url)
         return Outbox(channels or {"console": ConsoleNotifier()})
 
+    def solver(self):
+        """The solver, when SOLVER_IMAGE is set; None otherwise."""
+        cfg = self.settings.solver
+        if cfg is None:
+            return None
+        if self.sessions is None:
+            raise ConfigError("Solving needs DATABASE_URL")
+        from .claude_login import ClaudeLogin
+        from .solver.pipeline import Solver
+        from .solver.sandbox import DockerSandbox
+        from .solver.usage import UsageGuard
+
+        home = str(self.settings.claude_home)
+        sandbox = DockerSandbox.deployed(cfg.image, cfg.network, cfg.login_volume, home, docker_host=cfg.docker_host)
+        env = {"HTTPS_PROXY": cfg.proxy, "https_proxy": cfg.proxy} if cfg.proxy else {}
+        return Solver(
+            self.sessions, self.kv, self.outbox(), sandbox, self.settings.data_dir,
+            guard=UsageGuard(self.kv, pause_at=cfg.pause_at, daily_cap=cfg.daily_cap),
+            login=ClaudeLogin(self.settings.claude_home),
+            public_url=self.settings.public_url, model=cfg.model, env=env,
+        )
+
     def watcher(self) -> Watcher:
         if self.sessions is None:
             raise ConfigError("Polling needs DATABASE_URL")

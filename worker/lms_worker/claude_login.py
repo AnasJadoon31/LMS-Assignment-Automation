@@ -105,6 +105,14 @@ class ClaudeLogin:
             raise LoginError("Sign-in did not complete: " + (text.strip()[-300:] or "no answer"))
         return status
 
+    def stamp(self) -> str | None:
+        """Changes whenever the stored login does, e.g. after a sign-in on the setup page."""
+        try:
+            st = (self.home / ".claude" / ".credentials.json").stat()
+        except OSError:
+            return None
+        return f"{st.st_mtime_ns}:{st.st_size}"
+
     @property
     def waiting(self) -> bool:
         return self._pid is not None

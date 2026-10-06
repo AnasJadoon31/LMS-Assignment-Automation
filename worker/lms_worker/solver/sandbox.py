@@ -1,8 +1,8 @@
 """Where a solver run happens.
 
 DockerSandbox (production): a throwaway container from the sandbox image per run, reached
-through the Docker socket proxy. The work folder goes in and /work/out comes back as tar
-archives, so no host paths are shared. Claude runs under your claude.ai login, kept in a
+through the Docker socket proxy. The work folder goes in and comes back as tar archives, so no
+host paths are shared. Claude runs under your claude.ai login, kept in a
 Docker volume mounted as the solver's home: a full login, unlike a setup token, can read the
 theme artifact, and the volume keeps the refreshed login between runs. Log in once with
 `docker compose run --rm -it solver-login`. The container's only network is the sandbox
@@ -40,6 +40,7 @@ class SandboxRun:
 
 class Sandbox(Protocol):
     def run(self, work: Path, env: dict[str, str], on_line: Callable[[str], bool], timeout: float) -> SandboxRun: ...
+    def work_path(self, work: Path) -> str: ...  # the work folder as the run sees it
 
 
 class LocalSandbox:
@@ -52,6 +53,9 @@ class LocalSandbox:
         self.path = path or os.environ.get("PATH", "/usr/bin:/bin")
         self.passthrough = passthrough  # e.g. proxy settings of a development machine
         self.home = home  # where Claude Code is logged in; a fresh empty home without one
+
+    def work_path(self, work: Path) -> str:
+        return str(work)
 
     def run(self, work: Path, env: dict[str, str], on_line: Callable[[str], bool], timeout: float) -> SandboxRun:
         home = self.home or Path(tempfile.mkdtemp(prefix="solver-home-"))
@@ -115,12 +119,27 @@ def _safe_extract(stream, dest: Path, strip: str) -> None:
 
 class DockerSandbox:
     def __init__(self, image: str, network: str | None, login_volume: str, *, docker_host: str | None = None,
-                 cpus: float = 2.0, memory: str = "4g", pids: int = 512):
-        import docker  # only the worker in production needs it
+                 cpus: float = 2.0, memory: str = "4g", pids: int = 512, client=None):
+        if client is None:
+            import docker  # only the worker in production needs it
 
-        self.client = docker.DockerClient(base_url=docker_host) if docker_host else docker.from_env()
+            client = docker.DockerClient(base_url=docker_host) if docker_host else docker.from_env()
+        self.client = client
         self.image, self.network, self.login_volume = image, network, login_volume
         self.cpus, self.memory, self.pids = cpus, memory, pids
+
+    @classmethod
+    def deployed(cls, image: str, network: str | None, login_volume: str | None, login_path: str,
+                 *, docker_host: str | None = None, client=None) -> DockerSandbox:
+        """Coolify renames a compose file's images, volumes and networks; find them as deployed."""
+        box = cls(image, network, login_volume or "", docker_host=docker_host, client=client)
+        box.image = _find_image(box.client, image)
+        box.network = _find_network(box.client, network) if network else None
+        box.login_volume = login_volume or _own_volume(box.client, login_path) or "lms-claude-home"
+        return box
+
+    def work_path(self, work: Path) -> str:
+        return "/work"
 
     def run(self, work: Path, env: dict[str, str], on_line: Callable[[str], bool], timeout: float) -> SandboxRun:
         container = self.client.containers.create(
@@ -160,8 +179,9 @@ class DockerSandbox:
             finally:
                 timer.cancel()
             result = container.wait(timeout=60)
-            stream, _ = container.get_archive("/work/out")
-            _safe_extract(stream, work / "out", "out")
+            # The whole folder comes back (code, theme, out), so a later run can resume the session
+            stream, _ = container.get_archive("/work")
+            _safe_extract(stream, work, "work")
             return SandboxRun(exit_code=result.get("StatusCode"), timed_out=timed_out.is_set(), stopped=stopped)
         except Exception as e:  # docker errors: the job retries later
             return SandboxRun(exit_code=None, error=f"{type(e).__name__}: {e}")
@@ -170,3 +190,48 @@ class DockerSandbox:
                 container.remove(force=True)
             except Exception:
                 pass
+
+
+def _find_image(client, name: str) -> str:
+    """The image by its name, else the one the compose file built for the egress service."""
+    try:
+        client.images.get(name)
+        return name
+    except Exception:
+        pass
+    base = name.split(":")[0]
+    for img in client.images.list():
+        for tag in img.tags:
+            if tag.split(":")[0].endswith((base, "-egress", "_egress")):
+                return tag
+    return name  # the run fails with Docker's own message
+
+
+def _find_network(client, name: str) -> str:
+    """The sandbox network by its name, else the internal network whose name ends in 'sandbox'."""
+    try:
+        client.networks.get(name)
+        return name
+    except Exception:
+        pass
+    try:
+        for net in client.networks.list():
+            if net.attrs.get("Internal") and net.name.endswith(("sandbox", name)):
+                return net.name
+    except Exception:
+        pass
+    return name
+
+
+def _own_volume(client, destination: str) -> str | None:
+    """The volume mounted at destination in this container (the worker's own login volume)."""
+    import socket
+
+    try:
+        me = client.containers.get(socket.gethostname())
+    except Exception:
+        return None
+    for m in me.attrs.get("Mounts") or []:
+        if m.get("Type") == "volume" and m.get("Destination") == destination:
+            return m.get("Name")
+    return None

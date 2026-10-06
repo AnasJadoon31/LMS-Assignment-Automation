@@ -32,6 +32,9 @@ services:
       - SOLVER_IMAGE=lms-solver:latest
       - SOLVER_NETWORK=lms-sandbox
       - SOLVER_PROXY=http://egress:3128
+      - SOLVER_DAILY_CAP=${SOLVER_DAILY_CAP:-6}
+      - SOLVER_PAUSE_AT=${SOLVER_PAUSE_AT:-0.8}
+      - SOLVER_MODEL=${SOLVER_MODEL:-}
       - TZ=Asia/Karachi
     volumes:
       - artifacts:/data
@@ -146,13 +149,14 @@ services:
       timeout: 3s
       retries: 20
 
-  # Starts solver containers for the worker. Only container and image calls are allowed.
+  # Starts solver containers for the worker. Only container, image and network calls are allowed.
   docker-proxy:
     image: tecnativa/docker-socket-proxy:v0.3.0
     restart: unless-stopped
     environment:
       - CONTAINERS=1
       - IMAGES=1
+      - NETWORKS=1
       - POST=1
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
