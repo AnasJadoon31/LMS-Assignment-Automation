@@ -14,8 +14,6 @@ from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
-from .theme import Student
-
 CMS_LOGIN_URL = "https://cms.bahria.edu.pk/Logins/Student/Login.aspx"
 LMS_DASHBOARD_URL = "https://lms.bahria.edu.pk/Student/Dashboard.php"
 
@@ -72,7 +70,6 @@ class Settings:
     data_dir: Path = Path("./data")
     evolution: EvolutionConfig | None = None
     discord_webhook_url: str | None = field(default=None, repr=False)
-    student: Student | None = None  # for the report theme: name, enrollment, class
 
 
 def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
@@ -99,8 +96,6 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
     discord = os.environ.get("DISCORD_WEBHOOK_URL", "").strip() or None
     if discord and not re.match(r"https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/(?:v\d+/)?webhooks/\d+/[\w-]+$", discord):
         raise ConfigError("DISCORD_WEBHOOK_URL must be a Discord webhook URL (https://discord.com/api/webhooks/<id>/<token>)")
-    name, klass = os.environ.get("STUDENT_NAME", "").strip(), os.environ.get("STUDENT_CLASS", "").strip()
-    student = Student(name=name, enrollment=enrollment, klass=klass) if name and enrollment and klass else None
     return Settings(
         urls=PortalUrls(
             cms_login=os.environ.get("CMS_LOGIN_URL", CMS_LOGIN_URL),
@@ -113,5 +108,4 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         data_dir=Path(os.environ.get("DATA_DIR", "./data")),
         evolution=evolution,
         discord_webhook_url=discord,
-        student=student,
     )

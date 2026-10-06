@@ -310,17 +310,6 @@ def cmd_status(rt: Runtime, args) -> int:
     return 0
 
 
-def cmd_theme_import(rt: Runtime, args) -> int:
-    """Mirror the theme artifact from a downloaded copy of its files."""
-    from .theme import import_artifact
-
-    if rt.settings.student is None:
-        raise ConfigError("Set STUDENT_NAME, CMS_ENROLLMENT and STUDENT_CLASS first; they become placeholders in the mirror")
-    written = import_artifact(Path(args.folder), rt.settings.student, version=args.version, logo_blob=args.logo_blob)
-    print(f"Mirrored {len(written)} files from the theme artifact into lms_worker/theme/")
-    return 0
-
-
 NEEDS_DB = {"db-upgrade", "poll", "run", "resume", "status", "api"}
 
 
@@ -350,10 +339,6 @@ def main(argv: list[str] | None = None) -> int:
     p_paste.add_argument("phpsessid")
     sub.add_parser("retry", help="clear the failed-login pause")
     sub.add_parser("record", help="record LMS pages for mapping (needs a display)")
-    p_theme = sub.add_parser("theme-import", help="mirror the theme artifact from a downloaded copy of its files")
-    p_theme.add_argument("folder", help="the artifact's project/ folder, logo at assets/Logos/bahria-university.png")
-    p_theme.add_argument("--version", default="", help="the artifact version the files came from")
-    p_theme.add_argument("--logo-blob", default="", help="the logo's blob id, to point the previews at the mirrored logo")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -375,7 +360,6 @@ def main(argv: list[str] | None = None) -> int:
         "paste-session": cmd_paste_session,
         "retry": cmd_retry,
         "record": cmd_record,
-        "theme-import": cmd_theme_import,
     }[args.command]
     try:
         settings = load_settings(args.env_file)

@@ -33,7 +33,6 @@ include = ["lms_worker*"]
 
 [tool.setuptools.package-data]
 "lms_worker.db.migrations" = ["script.py.mako"]
-"lms_worker" = ["theme/*.json", "theme/*.md", "theme/assets/Logos/*", "theme/components/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

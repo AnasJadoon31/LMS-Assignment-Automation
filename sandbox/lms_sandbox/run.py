@@ -17,7 +17,8 @@ import tempfile
 from pathlib import Path
 
 WORK = Path(os.environ.get("LMS_WORK", "/work"))
-TOOLS = "Bash,Read,Write,Edit,Glob,Grep"
+# Artifact reads the theme; ToolSearch loads it when the CLI defers it
+TOOLS = "Bash,Read,Write,Edit,Glob,Grep,Artifact,ToolSearch"
 OFFICE = {".doc", ".docx", ".ppt", ".pptx", ".odt", ".odp", ".rtf", ".xls", ".xlsx"}
 MAX_PAGES = 40
 

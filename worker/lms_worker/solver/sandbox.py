@@ -2,11 +2,15 @@
 
 DockerSandbox (production): a throwaway container from the sandbox image per run, reached
 through the Docker socket proxy. The work folder goes in and /work/out comes back as tar
-archives, so no host paths are shared. The container gets the Claude token for that run and
-nothing else; its only network is the sandbox network, whose way out is the egress proxy.
-Limits: 2 CPUs, 4 GB memory, 512 processes and the run's time limit.
+archives, so no host paths are shared. Claude runs under your claude.ai login, kept in a
+Docker volume mounted as the solver's home: a full login, unlike a setup token, can read the
+theme artifact, and the volume keeps the refreshed login between runs. Log in once with
+`docker compose run --rm -it solver-login`. The container's only network is the sandbox
+network, whose way out is the egress proxy. Limits: 2 CPUs, 4 GB memory, 512 processes and
+the run's time limit.
 
-LocalSandbox (development): the same entry script as a subprocess, with a clean environment.
+LocalSandbox (development): the same entry script as a subprocess, with a clean environment
+and the home folder of a logged-in Claude Code.
 
 Both stream Claude's output line by line to `on_line`; returning False from it stops the run.
 """
@@ -41,14 +45,16 @@ class Sandbox(Protocol):
 class LocalSandbox:
     """Runs sandbox/lms_sandbox/run.py with `python` (which needs the sandbox's packages) and `claude` on PATH."""
 
-    def __init__(self, python: str, sandbox_src: Path, path: str | None = None, passthrough: tuple[str, ...] = ()):
+    def __init__(self, python: str, sandbox_src: Path, path: str | None = None, passthrough: tuple[str, ...] = (),
+                 home: Path | None = None):
         self.python = python
         self.src = sandbox_src
         self.path = path or os.environ.get("PATH", "/usr/bin:/bin")
         self.passthrough = passthrough  # e.g. proxy settings of a development machine
+        self.home = home  # where Claude Code is logged in; a fresh empty home without one
 
     def run(self, work: Path, env: dict[str, str], on_line: Callable[[str], bool], timeout: float) -> SandboxRun:
-        home = Path(tempfile.mkdtemp(prefix="solver-home-"))
+        home = self.home or Path(tempfile.mkdtemp(prefix="solver-home-"))
         clean = {"PATH": self.path, "HOME": str(home), "LMS_WORK": str(work), "PYTHONPATH": str(self.src),
                  "LMS_THEME_DIR": str(work / "theme"), "LMS_FIGURES_DIR": str(work / "out" / "figures"), "MPLBACKEND": "Agg",
                  **{k: os.environ[k] for k in self.passthrough if k in os.environ}, **env}
@@ -108,18 +114,19 @@ def _safe_extract(stream, dest: Path, strip: str) -> None:
 
 
 class DockerSandbox:
-    def __init__(self, image: str, network: str | None, *, docker_host: str | None = None,
+    def __init__(self, image: str, network: str | None, login_volume: str, *, docker_host: str | None = None,
                  cpus: float = 2.0, memory: str = "4g", pids: int = 512):
         import docker  # only the worker in production needs it
 
         self.client = docker.DockerClient(base_url=docker_host) if docker_host else docker.from_env()
-        self.image, self.network = image, network
+        self.image, self.network, self.login_volume = image, network, login_volume
         self.cpus, self.memory, self.pids = cpus, memory, pids
 
     def run(self, work: Path, env: dict[str, str], on_line: Callable[[str], bool], timeout: float) -> SandboxRun:
         container = self.client.containers.create(
             self.image, command=["python3", "-m", "lms_sandbox.run"], environment=env, working_dir="/work",
             network=self.network, network_disabled=self.network is None, user=str(SANDBOX_UID),
+            volumes={self.login_volume: {"bind": "/home/solver", "mode": "rw"}},
             nano_cpus=int(self.cpus * 1e9), mem_limit=self.memory, pids_limit=self.pids,
             cap_drop=["ALL"], security_opt=["no-new-privileges"], detach=True,
         )

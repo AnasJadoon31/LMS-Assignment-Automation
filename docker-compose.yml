@@ -129,8 +129,25 @@ services:
       timeout: 3s
       retries: 20
 
+  # One-time login for the solver: Claude Code signs in to your claude.ai account (it prints a
+  # link to open in any browser) and keeps the login in the claude-home volume. A full login,
+  # unlike a setup token, can read the theme artifact.
+  #   docker compose run --rm solver-login
+  #   docker compose run --rm solver-login claude auth status --text
+  solver-login:
+    build: ./sandbox
+    image: lms-solver
+    profiles: ["tools"]
+    command: ["claude", "auth", "login", "--claudeai"]
+    volumes:
+      - claude-home:/home/solver
+    stdin_open: true
+    tty: true
+
 volumes:
   pgdata:
   artifacts:
   evolution_instances:
   evolution_redis:
+  claude-home:
+    name: lms-claude-home

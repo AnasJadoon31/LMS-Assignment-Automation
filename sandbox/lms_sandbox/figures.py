@@ -1,5 +1,6 @@
-"""Graphs in the theme's colours (read from the theme artifact's tokens.json), for Claude to call from its
-own scripts. Other diagrams it draws itself, following the theme's Figures section.
+"""Graphs in the theme's colours, for Claude to call from its own scripts. The colours come from the
+theme artifact's tokens.json once Claude has saved it to /work/theme. Other diagrams it draws itself,
+following the theme's Figures section.
 
     from lms_figures import draw_graph
     draw_graph(
