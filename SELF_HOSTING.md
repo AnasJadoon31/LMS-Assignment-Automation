@@ -20,8 +20,8 @@ whose name is on it. Run it only for your own account.
 
 | Service | What it is | Reachable from |
 | --- | --- | --- |
-| `worker` | Logs in to CMS, polls the LMS, downloads question files and papers, sends notifications | inside the stack only |
-| `api` | Answers your WhatsApp messages through the numbered menu, and serves the setup page (`/setup`): sign Claude in, link WhatsApp | its domain (port 8000) |
+| `worker` | Logs in to CMS, polls the LMS, downloads question files and papers, solves assignments in solver containers, saves the reports to Google Drive, uploads what you approve, sends notifications | inside the stack only |
+| `api` | Answers your WhatsApp messages through the numbered menu, and serves the setup page (`/setup`): sign Claude in, link WhatsApp, connect Google Drive | its domain (port 8000) |
 | `postgres` | Jobs, audit trail, encrypted LMS session; Evolution's tables in their own schema | inside the stack only |
 | `evolution-api` | WhatsApp gateway. The worker creates and links its instance | inside the stack only |
 | `redis` | Evolution API's cache | inside the stack only |
@@ -68,6 +68,7 @@ terminal (below). With one, use the setup page instead.
    - **WhatsApp**: link the bot phone with the QR code, or type the bot phone's number for a
      pairing code (WhatsApp, **Linked devices**, **Link a device**, **Link with phone number
      instead**).
+   - **Google Drive** (optional, see below): **Connect Google Drive**.
 
 The worker starts solver containers through Docker, so the stack mounts
 `/var/run/docker.sock` (read-only, behind `docker-proxy`). Coolify allows this.
@@ -75,6 +76,25 @@ The worker starts solver containers through Docker, so the stack mounts
 The commands below run in the worker's terminal: `docker compose exec worker <command>`,
 or the **Terminal** tab of the worker container in Coolify. You need them only without the
 setup page.
+
+## Save reports to Google Drive
+
+Every solved report (the .docx, the .pdf and the question file) is saved to
+**University Assignments / <semester> / <course> / <report name>** in your Drive. The app
+asks only for Drive's `drive.file` permission: it sees only the folders and files it makes.
+
+1. In [Google Cloud Console](https://console.cloud.google.com), create a project, then
+   **APIs & Services**: enable the **Google Drive API**.
+2. **OAuth consent screen** (Google Auth Platform): user type **External**, add your Gmail as
+   a test user, then **Publish app** (otherwise Google ends the connection after 7 days).
+   With only `drive.file` it needs no review.
+3. **Credentials**, **Create credentials**, **OAuth client ID**, type **Web application**.
+   Add the redirect URI the setup page shows under Google Drive,
+   `https://<your domain>/setup/google/callback`.
+4. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, redeploy, and press **Connect Google
+   Drive** on the setup page.
+
+If saving ever fails, the report still comes to you, and its message says why.
 
 ## Link the bot's WhatsApp
 

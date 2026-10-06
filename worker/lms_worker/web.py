@@ -8,9 +8,14 @@ POST /api/setup/claude/code         {code}: the code the sign-in page shows
 POST /api/setup/whatsapp/link       {number?}: a QR code, or a pairing code for that number
 GET  /api/setup/whatsapp/qr         the current QR code (they rotate)
 POST /api/setup/whatsapp/unlink
+GET  /setup/google/start            go to Google to connect Drive (drive.file only)
+GET  /setup/google/callback         Google comes back here
+POST /api/setup/google/disconnect
 
 The JSON calls need the cookie and an X-LMS header, which a form on another site cannot
-send. Five wrong passwords from one address lock it out for 15 minutes.
+send. Five wrong passwords from one address lock it out for 15 minutes. Google's callback
+carries no cookie (it comes from another site), so it is checked against a one-time state
+made by the signed-in start.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import html
+import secrets
 import time
 from collections import defaultdict
 
@@ -26,11 +32,13 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from .claude_login import ClaudeLogin, LoginError
+from .gdrive import CALLBACK, DriveError, GoogleDrive
 from .whatsapp import EvolutionAdmin, WhatsAppError
 
 COOKIE = "lms_session"
 SESSION_SECONDS = 7 * 24 * 3600
 MAX_FAILURES, LOCKOUT_SECONDS = 5, 15 * 60
+STATE_SECONDS = 10 * 60
 
 
 def _sign(key: str, value: str) -> str:
@@ -58,9 +66,17 @@ class Number(BaseModel):
 
 
 def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | None, admin: EvolutionAdmin | None,
-                 clock=time.time) -> APIRouter:
+                 drive: GoogleDrive | None = None, public_url: str | None = None, clock=time.time) -> APIRouter:
     router = APIRouter()
     failures: dict[str, list[float]] = defaultdict(list)
+    states: dict[str, float] = {}  # Google sign-ins started here, by state, until they expire
+
+    def redirect_uri(request: Request) -> str:
+        if public_url:
+            return public_url.rstrip("/") + CALLBACK
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+        return f"{proto}://{host}{CALLBACK}"
 
     def signed_in(request: Request) -> bool:
         return bool(password) and session_valid(secret_key, request.cookies.get(COOKIE), clock())
@@ -127,7 +143,47 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
                                    "name": st.name}
             except WhatsAppError as e:
                 out["whatsapp"] = {"available": True, "state": "unreachable", "linked": False, "detail": str(e)}
+        if drive is None:
+            out["drive"] = {"available": False, "detail": "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET"}
+        else:
+            d = drive.status()
+            out["drive"] = {"available": True, "connected": d.connected, "email": d.email}
+        out["drive"]["redirect_uri"] = redirect_uri(request)
         return out
+
+    @router.get("/setup/google/start")
+    def google_start(request: Request):
+        if not signed_in(request):
+            return RedirectResponse("/login", status_code=303)
+        if drive is None:
+            raise HTTPException(status_code=503, detail="Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET")
+        now = clock()
+        for k in [k for k, t in states.items() if t < now]:
+            states.pop(k)
+        state = secrets.token_urlsafe(24)
+        states[state] = now + STATE_SECONDS
+        return RedirectResponse(drive.auth_url(redirect_uri(request), state), status_code=303)
+
+    @router.get("/setup/google/callback", response_class=HTMLResponse)
+    def google_callback(request: Request, state: str = "", code: str = "", error: str = ""):
+        expires = states.pop(state, None) if state else None
+        if expires is None or expires < clock():
+            return HTMLResponse(_back_html("This Google sign-in was not started here, or it is too old. Start again."), 400)
+        if error or not code or drive is None:
+            return HTMLResponse(_back_html(f"Google Drive was not connected: {error or 'no code'}."), 400)
+        try:
+            d = drive.connect(code, redirect_uri(request))
+        except DriveError as e:
+            return HTMLResponse(_back_html(str(e)), 502)
+        return HTMLResponse(_back_html(f"Google Drive connected{' as ' + d.email if d.email else ''}.", ok=True))
+
+    @router.post("/api/setup/google/disconnect")
+    def google_disconnect(request: Request) -> dict:
+        guard(request)
+        if drive is None:
+            raise HTTPException(status_code=503, detail="Google Drive is not configured")
+        drive.disconnect()
+        return {"ok": True}
 
     @router.post("/api/setup/claude/start")
     def claude_start(request: Request) -> dict:
@@ -212,6 +268,7 @@ a { color:var(--navy); word-break:break-all; } @media (prefers-color-scheme: dar
 .code { font:600 26px/1 ui-monospace, monospace; letter-spacing:.12em; margin:10px 0; }
 img.qr { width:240px; max-width:100%; background:#fff; padding:8px; border-radius:8px; }
 .err { color:var(--bad); font-size:14px; margin-top:8px; }
+code { word-break:break-all; }
 """
 
 
@@ -224,6 +281,16 @@ def _login_html(error: str, configured: bool) -> str:
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>LMS setup</title><style>{STYLE}</style></head><body><header><h1>LMS Assignment Automation</h1></header>'
             f'<main><div class="card"><h2>Sign in</h2>{body}{err}</div></main></body></html>')
+
+
+def _back_html(message: str, ok: bool = False) -> str:
+    """Google's callback page. It sends you back with a fresh navigation from this site, so the
+    session cookie (SameSite=strict) comes along."""
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<meta http-equiv="refresh" content="{2 if ok else 8};url=/setup"><title>LMS setup</title><style>{STYLE}</style></head>'
+            f'<body><header><h1>LMS Assignment Automation</h1></header><main><div class="card"><h2>Google Drive</h2>'
+            f'<p class="{"state ok" if ok else "err"}">{html.escape(message)}</p><p><a href="/setup">Back to setup</a></p>'
+            f'</div></main></body></html>')
 
 
 SETUP_HTML = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -257,6 +324,14 @@ SETUP_HTML = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   <div class="row"><button class="secondary" id="w-unlink" hidden>Unlink</button></div>
   <div class="err" id="w-err"></div>
 </div>
+<div class="card" id="drive">
+  <h2>Google Drive</h2>
+  <div>Drive: <span class="state" id="g-state">checking…</span></div>
+  <div class="muted" id="g-detail"></div>
+  <div class="row"><button id="g-connect" hidden>Connect Google Drive</button><button class="secondary" id="g-off" hidden>Disconnect</button></div>
+  <p class="muted">Every report is saved to <b>University Assignments</b> in your Drive. Redirect URI for your Google OAuth client: <code id="g-uri"></code></p>
+  <div class="err" id="g-err"></div>
+</div>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -286,7 +361,16 @@ async function refresh() {{
   $("w-detail").textContent = w.linked ? [w.name, w.number].filter(Boolean).join(" · ") : (w.detail || "");
   $("w-unlink").hidden = !w.linked;
   if (w.linked) {{ $("w-step").hidden = true; clearInterval(qrTimer); }}
+  const g = s.drive || {{}};
+  $("g-state").textContent = !g.available ? "not configured" : g.connected ? "connected" : "not connected";
+  $("g-state").className = "state " + (g.connected ? "ok" : "bad");
+  $("g-detail").textContent = g.connected ? (g.email || "") : (g.detail || "Reports are kept on the server only.");
+  $("g-connect").hidden = !g.available || g.connected; $("g-off").hidden = !g.connected;
+  $("g-uri").textContent = g.redirect_uri || "";
 }}
+$("g-connect").onclick = () => {{ location.href = "/setup/google/start"; }};
+$("g-off").onclick = async () => {{ if (!confirm("Stop saving reports to Google Drive?")) return;
+  try {{ await call("/api/setup/google/disconnect", {{}}); await refresh(); }} catch (e) {{ $("g-err").textContent = e.message; }} }};
 $("c-start").onclick = async () => {{
   $("c-err").textContent = ""; busy($("c-start"), true);
   try {{ const r = await call("/api/setup/claude/start", {{}}); $("c-link").href = r.link; $("c-link").textContent = r.link; $("c-step").hidden = false; }}

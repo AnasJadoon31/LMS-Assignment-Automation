@@ -27,9 +27,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .bot import Bot, Reply
 from .claude_login import ClaudeLogin
+from .gdrive import GoogleDrive
 from .config import Settings
 from .db.models import InboundMessage
-from .kv import KeyValue
+from .kv import KeyValue, SecretBox
 from .notify import EvolutionNotifier, Notifier, NotifyError
 from .watcher import HEARTBEAT_KEY
 from .web import setup_router
@@ -57,6 +58,7 @@ def create_app(
     internal_url: str = DEFAULT_INTERNAL_URL,
     register_webhook: bool = True,
     login: ClaudeLogin | None = None,
+    drive: GoogleDrive | None = None,
 ) -> FastAPI:
     secret = webhook_secret(settings.app_secret_key or "")
     owner = settings.evolution.number if settings.evolution else None
@@ -66,6 +68,8 @@ def create_app(
         admin = EvolutionAdmin(settings.evolution)
     if login is None and shutil.which("claude"):
         login = ClaudeLogin(settings.claude_home)
+    if drive is None and settings.google_client_id and settings.google_client_secret and settings.app_secret_key:
+        drive = GoogleDrive(settings.google_client_id, settings.google_client_secret, kv, SecretBox(settings.app_secret_key))
     bot = Bot(sessions, kv, login=login, setup_url=f"{settings.public_url}/setup" if settings.public_url else None)
 
     @asynccontextmanager
@@ -79,7 +83,7 @@ def create_app(
 
     app = FastAPI(title="LMS Assignment Automation", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.include_router(setup_router(password=settings.admin_password, secret_key=settings.app_secret_key or "",
-                                    login=login, admin=admin))
+                                    login=login, admin=admin, drive=drive, public_url=settings.public_url))
 
     @app.get("/api/health")
     def health() -> dict:

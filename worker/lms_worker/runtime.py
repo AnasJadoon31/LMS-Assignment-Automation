@@ -35,6 +35,15 @@ class Runtime:
             channels["discord"] = DiscordNotifier(self.settings.discord_webhook_url)
         return Outbox(channels or {"console": ConsoleNotifier()})
 
+    def drive(self):
+        """Google Drive saving, when an OAuth client is set; it still needs connecting on the setup page."""
+        st = self.settings
+        if not (st.google_client_id and st.google_client_secret and st.app_secret_key):
+            return None
+        from .gdrive import GoogleDrive
+
+        return GoogleDrive(st.google_client_id, st.google_client_secret, self.kv, SecretBox(st.app_secret_key))
+
     def solver(self):
         """The solver, when SOLVER_IMAGE is set; None otherwise."""
         cfg = self.settings.solver
@@ -53,7 +62,7 @@ class Runtime:
         return Solver(
             self.sessions, self.kv, self.outbox(), sandbox, self.settings.data_dir,
             guard=UsageGuard(self.kv, pause_at=cfg.pause_at, daily_cap=cfg.daily_cap),
-            login=ClaudeLogin(self.settings.claude_home),
+            login=ClaudeLogin(self.settings.claude_home), drive=self.drive(),
             public_url=self.settings.public_url, model=cfg.model, env=env,
         )
 

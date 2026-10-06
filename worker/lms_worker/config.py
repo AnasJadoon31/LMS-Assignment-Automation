@@ -88,6 +88,8 @@ class Settings:
     claude_home: Path = Path("/claude-home")  # the claude.ai login the solver runs under
     public_url: str | None = None  # where the setup page is reachable, for links in alerts
     solver: SolverConfig | None = None
+    google_client_id: str | None = None  # Google Drive saving: an OAuth client of type Web application
+    google_client_secret: str | None = field(default=None, repr=False)
 
 
 def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
@@ -149,4 +151,6 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         claude_home=Path(os.environ.get("CLAUDE_HOME", "/claude-home")),
         public_url=(os.environ.get("PUBLIC_URL") or "").rstrip("/") or None,
         solver=solver,
+        google_client_id=os.environ.get("GOOGLE_CLIENT_ID", "").strip() or None,
+        google_client_secret=os.environ.get("GOOGLE_CLIENT_SECRET", "").strip() or None,
     )

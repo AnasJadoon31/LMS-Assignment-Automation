@@ -27,6 +27,8 @@ services:
       - WHATSAPP_NUMBER=${WHATSAPP_NUMBER:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - PUBLIC_URL=${PUBLIC_URL:-}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
       # Solving: sandbox containers through the socket proxy, under the claude.ai login
       - DOCKER_HOST=tcp://docker-proxy:2375
       - SOLVER_IMAGE=lms-solver:latest
@@ -63,6 +65,8 @@ services:
       # The setup page's password; the page is closed without one
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
       - PUBLIC_URL=${PUBLIC_URL:-}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
       - TZ=Asia/Karachi
     volumes:
       - artifacts:/data:ro
