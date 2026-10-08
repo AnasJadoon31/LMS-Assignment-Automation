@@ -272,6 +272,21 @@ def test_a_course_prompt_is_added_to_or_replaces_the_built_in_one(solver, sandbo
         assert "Execute every example in the lab sheet as well" in system  # the built-in OS Lab rule
 
 
+def test_a_course_with_its_own_theme_is_solved_in_it_and_the_rest_use_the_default(solver, sandbox, sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    assert "design system artifact https://claude.ai/artifact/F2Je3LZvKN92ysXVL7jM2R." in sandbox.runs[0]["job"]["system"]
+
+    with sessions.begin() as s:
+        job = s.get(Job, job_id)
+        job.assignment.course.theme = "https://claude.ai/artifact/OtherTheme42"
+        actions.move(s, job, JobState.DOWNLOADED, "again")
+    solver.run_once()
+    system = sandbox.runs[1]["job"]["system"]
+    assert "design system artifact https://claude.ai/artifact/OtherTheme42." in system and "F2Je3LZvKN92ysXVL7jM2R" not in system
+
+
 def test_the_model_picked_in_the_chat_is_the_one_the_run_uses(solver, sandbox, sessions, tmp_path):
     add_job(sessions, tmp_path)
     DbKV(sessions).set("solver_model", "sonnet")

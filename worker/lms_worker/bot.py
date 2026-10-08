@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from . import actions
-from .solver.prompt import system_prompt
+from .solver.prompt import THEME_ARTIFACT, system_prompt
 from .db.models import TERMINAL_STATES, Artifact, Assignment, ChatSession, Course, CourseMode, Event, Job, JobState, utcnow
 from .kv import KeyValue
 from .lms.bahria_pages import LMS_TZ
@@ -76,6 +76,7 @@ class Reply:
     text: str
     file: Path | None = None
 
+THEME_LINK = re.compile(r"https://claude\.ai/(?:code/)?artifact/[A-Za-z0-9_-]{6,80}")
 
 class Bot:
     def __init__(
@@ -128,6 +129,17 @@ class Bot:
             stack.pop()
             how = "It replaces the built-in prompt" if course.prompt_replaces else "It is added to the built-in prompt"
             return [Reply(f"Saved for {course.name}. {how}, from the next solve or redo."), self._render(s, stack)]
+
+        if screen["name"] == "theme_text":  # free text: the course's theme artifact link
+            stack.pop()
+            if text in ("", "0"):
+                return [self._render(s, stack)]
+            link = text.strip().split("?")[0].rstrip("/")
+            if not THEME_LINK.fullmatch(link):
+                return [Reply("That is not a Claude artifact link (https://claude.ai/artifact/…). Nothing changed."), self._render(s, stack)]
+            course = s.get(Course, screen["course"])
+            course.theme = link
+            return [Reply(f"Saved. {course.name} reports use that theme, from the next solve or redo."), self._render(s, stack)]
 
         if screen["name"] == "model_text":  # free text: a model name
             stack.pop()
@@ -211,6 +223,13 @@ class Bot:
             return [Reply(said), self._render(s, stack)]
         if kind == "prompt_builtin":
             return [Reply(system_prompt())]
+        if kind == "theme_text":
+            stack.append({"name": "theme_text", "course": option["course"]})
+            return [Reply("Paste the theme's artifact link (https://claude.ai/artifact/…), in one message. 0 cancels.")]
+        if kind == "theme_clear":
+            course = s.get(Course, option["course"])
+            course.theme = None
+            return [Reply(f"{course.name} uses the default theme again."), self._render(s, stack)]
         if kind == "model":
             return [Reply(self._set_model(option["model"])), self._render(s, stack)]
         if kind == "model_text":
@@ -436,7 +455,17 @@ class Bot:
             options.append((f"Lab papers: {_paper_summary(p, now)}", _open({"name": "section", "kind": PAPER, "course": c.id})))
         options.append((f"Mode: {c.mode} (change)", _open({"name": "mode_pick", "course": c.id})))
         options.append((f"System prompt: {_prompt_words(c)} (change)", _open({"name": "prompt", "course": c.id})))
+        options.append((f"Report theme: {'its own' if c.theme else 'default'} (change)", _open({"name": "theme", "course": c.id})))
         return c.name, [], options
+
+    def _screen_theme(self, s: Session, screen: dict):
+        c = s.get(Course, screen["course"])
+        lines = [f"Now: {c.theme or 'the default theme, ' + THEME_ARTIFACT}",
+                 "The design system artifact this course's reports are built from. Courses without their own use the default."]
+        options = [("Set this course's theme link", {"do": "theme_text", "course": c.id})]
+        if c.theme:
+            options.append(("Use the default theme", {"do": "theme_clear", "course": c.id}))
+        return f"{c.name} · report theme", lines, options
 
     def _screen_prompt(self, s: Session, screen: dict):
         c = s.get(Course, screen["course"])

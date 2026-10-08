@@ -57,6 +57,8 @@ class Course(Base):
     # Your own system prompt for this course's solver runs, set in the chat: added to the
     # built-in one, or used instead of it
     prompt: Mapped[str | None] = mapped_column(Text)
+    # This course's own report theme: a design system artifact link, set in the chat. The default one without it
+    theme: Mapped[str | None] = mapped_column(String(255))
     prompt_replaces: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     first_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(default=utcnow)

@@ -43,7 +43,7 @@ from ..lms.bahria_pages import LMS_TZ
 from ..lms.models import PAPER
 from ..notify import Outbox
 from .claude import Outcome, StreamReader
-from .prompt import SUMMARY_SCHEMA, Brief, system_prompt, task_prompt, course_prompt
+from .prompt import SUMMARY_SCHEMA, THEME_ARTIFACT, Brief, system_prompt, task_prompt, course_prompt
 from .sandbox import Sandbox, SandboxRun
 from .usage import Pause, UsageGuard
 
@@ -158,8 +158,8 @@ class Solver:
         job_id, work, prompt, resume = claimed
         with self.sessions() as s:
             course = s.get(Job, job_id).assignment.course
-            own = (course.prompt, course.prompt_replaces)
-        self._write_job(work, prompt, resume, own)
+            own, theme = (course.prompt, course.prompt_replaces), course.theme
+        self._write_job(work, prompt, resume, own, theme)
         self.guard.count_run(now)
 
         reader = StreamReader()
@@ -240,9 +240,10 @@ class Solver:
     def job_dir(self, a: Assignment, job: Job) -> Path:
         return self.data_dir / _safe(a.course.code) / str(a.id) / str(job.revision)
 
-    def _write_job(self, work: Path, prompt: str, resume: str | None, own: tuple[str | None, bool] = (None, False)) -> None:
+    def _write_job(self, work: Path, prompt: str, resume: str | None, own: tuple[str | None, bool] = (None, False),
+                   theme: str | None = None) -> None:
         (work / "out").mkdir(parents=True, exist_ok=True)
-        system = course_prompt(system_prompt(self.sandbox.work_path(work)), *own)
+        system = course_prompt(system_prompt(self.sandbox.work_path(work), theme or THEME_ARTIFACT), *own)
         spec = {"prompt": prompt, "system": system, "schema": SUMMARY_SCHEMA,
                 "max_turns": self.max_turns}
         model = (self.kv.get(MODEL_KEY) or "").strip() or self.model  # the chat's choice, else SOLVER_MODEL

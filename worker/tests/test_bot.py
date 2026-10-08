@@ -279,6 +279,28 @@ def test_the_web_page_password_is_reset_from_the_chat(bot, semester, sessions):
     assert new not in kv.get("admin_password")  # only a hash is kept
 
 
+def test_a_course_gets_its_own_report_theme_from_the_chat(bot, semester, sessions):
+    courses = say(bot, "menu", pick(say(bot, "menu"), "By course"))
+    course = say(bot, pick(courses, "DAA"))
+    assert "Report theme: default (change)" in text(course)
+    screen = say(bot, pick(course, "Report theme"))
+    assert "Now: the default theme, https://claude.ai/artifact/" in text(screen) and "Use the default theme" not in text(screen)
+
+    say(bot, pick(screen, "Set this course's theme link"))
+    assert text(say(bot, "https://example.com/x")).startswith("That is not a Claude artifact link")
+    say(bot, pick(screen, "Set this course's theme link"))
+    out = text(say(bot, "https://claude.ai/artifact/AbC123xyz_-9?utm=1"))
+    assert out.startswith("Saved. DAA reports use that theme") and "Now: https://claude.ai/artifact/AbC123xyz_-9" in out
+    with sessions() as s:
+        assert s.get(Course, semester["daa"]).theme == "https://claude.ai/artifact/AbC123xyz_-9"
+        assert s.get(Course, semester["lab"]).theme is None  # the rest keep the default
+
+    screen = say(bot, "0", pick(course, "Report theme"))
+    assert text(say(bot, pick(screen, "Use the default theme"))).startswith("DAA uses the default theme again.")
+    with sessions() as s:
+        assert s.get(Course, semester["daa"]).theme is None
+
+
 def test_files_are_sent_as_documents(bot, semester):
     say(bot, "menu", "1", "1", "1")
     (q,) = say(bot, "1")
