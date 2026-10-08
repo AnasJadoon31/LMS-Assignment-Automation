@@ -74,8 +74,17 @@ class Runtime:
             self.sessions, self.kv, self.outbox(), sandbox, self.settings.data_dir,
             guard=UsageGuard(self.kv, pause_at=cfg.pause_at, daily_cap=cfg.daily_cap),
             login=ClaudeLogin(self.settings.claude_home), drive=self.drive(),
-            public_url=self.settings.public_url, model=cfg.model, env=env,
+            public_url=self.settings.public_url, model=cfg.model, env=env, materials=self.materials(),
         )
+
+    def materials(self):
+        """Lecture notes, plans and outlines, read with a client of its own: the poller's is busy polling."""
+        from .lms.session import SessionStore
+        from .materials import Materials
+
+        store = self.adapter.store
+        reader = BahriaAdapter(self.settings, store=SessionStore(store.kv, store.box), guard=self.adapter.guard)
+        return Materials(reader, self.settings.data_dir, self.kv)
 
     def watcher(self) -> Watcher:
         if self.sessions is None:

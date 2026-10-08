@@ -20,6 +20,8 @@ from .models import (
     JobState,
     Notification,
     Setting,
+    Summary,
+    SummaryState,
 )
 
 MIGRATIONS = Path(__file__).parent / "migrations"
@@ -66,6 +68,8 @@ __all__ = [
     "JobState",
     "Notification",
     "Setting",
+    "Summary",
+    "SummaryState",
     "make_engine",
     "make_sessionmaker",
     "upgrade",

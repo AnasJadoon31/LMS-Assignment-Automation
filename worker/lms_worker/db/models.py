@@ -32,6 +32,14 @@ class SolveMode(StrEnum):
     AUTO = "auto"
 
 
+class LectureMode(StrEnum):
+    """The teacher's lecture notes as a reference for solving: Haiku decides, always, or never."""
+
+    AUTO = "auto"
+    ALWAYS = "always"
+    OFF = "off"
+
+
 class JobState(StrEnum):
     DETECTED = "DETECTED"
     DOWNLOADED = "DOWNLOADED"
@@ -67,6 +75,7 @@ class Course(Base):
     solve: Mapped[str] = mapped_column(String(16), default=SolveMode.BYPASS, server_default="bypass")
     # Safe mode: a report still waiting for your approval is uploaded when one hour is left
     safe: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    lectures: Mapped[str] = mapped_column(String(16), default=LectureMode.OFF, server_default="off")
     sandbox_profile: Mapped[str] = mapped_column(String(64), default="python-jupyter")
     # Your own system prompt for this course's solver runs, set in the chat: added to the
     # built-in one, or used instead of it
@@ -149,6 +158,9 @@ class Job(Base):
     claude_session: Mapped[str | None] = mapped_column(String(64))
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     summary: Mapped[str | None] = mapped_column(Text)
+    # What Haiku decided before the solve (JSON): the model and effort, handwritten or not, the
+    # lecture files to read, and the same again for a redo
+    triage: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
@@ -168,6 +180,36 @@ class Artifact(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
     job: Mapped[Job] = relationship(back_populates="artifacts")
+
+
+class SummaryState(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    DONE = "DONE"
+    FAILED = "FAILED"
+
+
+class Summary(Base):
+    """Summarized notes of the lectures you picked, asked for in the chat. Its own small queue."""
+
+    __tablename__ = "summaries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), index=True)
+    lectures: Mapped[str] = mapped_column(Text)  # JSON: [{week, title, file}]
+    style: Mapped[str] = mapped_column(String(16), default="short")  # short, detailed
+    state: Mapped[str] = mapped_column(String(16), default=SummaryState.QUEUED, index=True)
+    triage: Mapped[str | None] = mapped_column(Text)  # Haiku's choice: model, effort, diagrams
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    not_before: Mapped[datetime | None]
+    claude_session: Mapped[str | None] = mapped_column(String(64))
+    cost_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    path: Mapped[str | None] = mapped_column(String(1024))  # the finished PDF
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+    course: Mapped[Course] = relationship()
 
 
 class Event(Base):

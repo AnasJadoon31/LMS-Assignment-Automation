@@ -16,6 +16,14 @@ report.docx and report.pdf and checks every page (see prompt.py). Then, by Claud
 Both formats are kept next to the question file and, with Google Drive connected, saved to
 "University Assignments/<semester>/<course>/<report name>" on your Drive with the question.
 
+Routing: unless you fixed a model in Settings, Haiku looks at each new assignment first and
+sends it to the model it needs (Sonnet for most work, Opus for the hard ones) with an effort
+level. In the same look it sees whether the sheet asks for handwriting, picks the teacher's
+lecture notes worth reading when the course uses them as a reference, and, in auto solving,
+asks you for what is missing before a stronger model is started. A redo is sorted again by
+its note, so a small change does not run on the strongest model. Lecture summaries (see
+summaries.py) take their turn when no assignment is waiting.
+
 A redo resumes the Claude session, unless the course's prompt, theme or files changed since
 the last run: then it starts again from the sheet, so the new instructions are really read.
 
@@ -43,13 +51,15 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ..actions import EFFORT_KEY, MODEL_KEY
 from .. import files
-from ..db.models import Artifact, Assignment, Course, CourseMode, Event, Job, JobState, SolveMode, utcnow
+from ..db.models import Artifact, Assignment, Course, CourseMode, Event, Job, JobState, LectureMode, SolveMode, utcnow
 from ..kv import KeyValue
 from ..lms.bahria_pages import LMS_TZ
 from ..lms.models import PAPER
 from ..notify import Outbox
 from .claude import Outcome, StreamReader
-from .prompt import SUMMARY_SCHEMA, THEME_ARTIFACT, Brief, course_prompt, system_prompt, task_prompt, with_extras
+from .prompt import (REDO_SCHEMA, ROUTE_EFFORTS, ROUTE_MODELS, SUMMARY_SCHEMA, THEME_ARTIFACT, TRIAGE_MODEL, TRIAGE_SCHEMA,
+                     TRIAGE_SYSTEM, Brief, course_prompt, redo_triage_prompt, system_prompt, task_prompt, triage_prompt,
+                     with_extras)
 from .sandbox import Sandbox, SandboxRun
 from .usage import Pause, UsageGuard
 
@@ -60,6 +70,9 @@ POLL_NOW_KEY = "poll_requested"  # the watcher's: an auto-mode upload should not
 RUN_TIMEOUT = 90 * 60
 MAX_TURNS = 250
 MAX_ATTEMPTS = 2  # a failed run is retried once
+TRIAGE_TIMEOUT = 10 * 60
+TRIAGE_TURNS = 30
+MAX_LECTURES = 30  # "always": this many lecture files at most go into the work folder
 RETRY_AFTER = timedelta(minutes=10)
 WARN_WITHIN = timedelta(hours=3)  # a pause ending this close to a deadline gets a warning
 IDLE_SECONDS = 60
@@ -108,6 +121,8 @@ class Solver:
         env: dict[str, str] | None = None,
         timeout: float = RUN_TIMEOUT,
         max_turns: int = MAX_TURNS,
+        route: bool = True,  # Haiku picks the model, unless one is fixed in Settings or SOLVER_MODEL
+        materials=None,  # materials.Materials: the teacher's lecture notes, as a reference for solving
     ) -> None:
         self.sessions, self.kv, self.outbox, self.sandbox = sessions, kv, outbox, sandbox
         self.data_dir = data_dir
@@ -118,6 +133,10 @@ class Solver:
         self.model = model
         self.env = env or {}  # e.g. HTTPS_PROXY, the sandbox's way out
         self.timeout, self.max_turns = timeout, max_turns
+        self.route, self.materials = route, materials
+        from .summaries import Summarizer
+
+        self.summaries = Summarizer(self)
 
     # --- the loop ---
 
@@ -128,7 +147,8 @@ class Solver:
             for job in jobs:
                 job.attempts = max(0, job.attempts - 1)
                 _move(s, job, JobState.DOWNLOADED, "the worker restarted while solving; queued again")
-            return len(jobs)
+        self.summaries.recover()
+        return len(jobs)
 
     def run_forever(self, stop: threading.Event) -> None:
         self.recover()
@@ -150,7 +170,9 @@ class Solver:
     def _run_once(self) -> SolveResult:
         now = self.now()
         with self.sessions() as s:
-            if s.scalars(self._ready(now).limit(1)).first() is None:
+            job = s.scalars(self._ready(now).limit(1)).first()
+            prepare = job.id if job is not None and self._needs_prepare(job) else None
+            if job is None and not self.summaries.waiting(s, now):
                 return SolveResult("idle")
         if not self._signed_in():
             return SolveResult("signed_out")
@@ -158,13 +180,25 @@ class Solver:
         if pause:
             self._warn_deadlines(pause)
             return SolveResult("paused", detail=pause.describe())
+        if job is None:
+            return self.summaries.run_next(now)
+        if prepare is not None:
+            held = self._prepare(prepare)
+            if held is not None:
+                return held
         claimed = self._claim(now)
         if claimed is None:
             return SolveResult("idle")
-        job_id, work, prompt, resume, system = claimed
-        self._write_job(work, prompt, resume, system)
+        job_id, work, prompt, resume, system, route = claimed
+        self._write_job(work, prompt, resume, system, route)
         self.guard.count_run(now)
 
+        log.info("Solving job %s%s", job_id, " (resuming)" if resume else "")
+        run, outcome, pauses, overage = self.run_claude(work, self.timeout)
+        return self._finish(job_id, work, run, outcome, pauses, overage)
+
+    def run_claude(self, work: Path, timeout: float) -> tuple[SandboxRun, Outcome, list[Pause], bool]:
+        """One sandbox run on work/job.json, watching the plan's usage as it goes."""
         reader = StreamReader()
         pauses: list[Pause] = []
         overage = False
@@ -181,9 +215,152 @@ class Solver:
                     return False
             return True
 
-        log.info("Solving job %s%s", job_id, " (resuming)" if resume else "")
-        run = self.sandbox.run(work, self.env, on_line, self.timeout)
-        return self._finish(job_id, work, run, reader.outcome, pauses, overage)
+        run = self.sandbox.run(work, self.env, on_line, timeout)
+        return run, reader.outcome, pauses, overage
+
+    # --- routing: Haiku looks first ---
+
+    def fixed_model(self) -> str | None:
+        """The model you fixed in Settings, else SOLVER_MODEL; with neither, Haiku routes."""
+        return (self.kv.get(MODEL_KEY) or "").strip() or self.model
+
+    def routed(self) -> bool:
+        return self.route and not self.fixed_model()
+
+    def ask_haiku(self, work: Path, prompt: str, schema: dict, **spec) -> tuple[dict | None, Outcome, str, bool]:
+        """A short Haiku run in work (its files are in work/in). Returns its answer, or None with what went wrong."""
+        (work / "in").mkdir(parents=True, exist_ok=True)
+        (work / "out").mkdir(exist_ok=True)
+        (work / "out" / "stderr.txt").unlink(missing_ok=True)
+        (work / "job.json").write_text(json.dumps({"prompt": prompt, "system": TRIAGE_SYSTEM, "schema": schema,
+                                                   "max_turns": TRIAGE_TURNS, "model": TRIAGE_MODEL, **spec}))
+        run, o, _, overage = self.run_claude(work, TRIAGE_TIMEOUT)
+        answer = o.structured if o.finished and not o.is_error else None
+        if answer is not None and (answer.get("model") not in ROUTE_MODELS or answer.get("effort") not in ROUTE_EFFORTS):
+            answer = None
+        trouble = "" if answer is not None else " ".join(filter(None, [o.text, _tail(work / "out" / "stderr.txt"), run.error])) or "no answer"
+        return answer, o, trouble, overage
+
+    def _needs_prepare(self, job: Job) -> bool:
+        """Before a solve: Haiku's look (the model, handwriting, lecture notes, questions), once per
+        revision, and once more for each redo note."""
+        course = job.assignment.course
+        lectures = course.lectures != LectureMode.OFF and self.materials is not None
+        if job.triage is None:
+            return self.routed() or lectures
+        triage = json.loads(job.triage)
+        if self.routed() and _is_redo(job) and (triage.get("redo") or {}).get("note") != job.note:
+            return True
+        return lectures and "lectures" not in triage
+
+    def _prepare(self, job_id: int) -> SolveResult | None:
+        """Returns None to go on to the solve, or why it must wait."""
+        now = self.now()
+        with self.sessions() as s:
+            job = s.get(Job, job_id)
+            a, course = job.assignment, job.assignment.course
+            triage = json.loads(job.triage) if job.triage else {}
+            redo = bool(triage) and _is_redo(job)
+            folder = self.job_dir(a, job) / "triage"
+            questions = [Path(x.path) for x in job.artifacts if x.kind == "question" and Path(x.path).is_file()]
+            brief = Brief(course=course.name, semester=course.semester_name or course.semester, title=a.title, number=a.number,
+                          deadline=a.deadline, remarks=a.remarks, files=[q.name for q in questions], on=now, note=job.note)
+            mode, ask, where = course.lectures, course.solve == SolveMode.AUTO, f"{course.name} · {a.title}"
+            s.expunge_all()
+        notes: list[str] = []
+        listed: list[tuple[str, str, str]] = []
+        if not redo and mode != LectureMode.OFF and self.materials is not None:
+            try:
+                listed = [(f.week, f.title, f.filename) for lec in self.materials.lectures(course) for f in lec.files]
+            except Exception as e:  # the lecture notes are a help, never a reason to hold the solve
+                notes.append(f"the lecture notes could not be read: {e}")
+
+        answer, tokens = None, 0
+        if redo or self.routed() or (mode == LectureMode.AUTO and listed):
+            if folder.exists():
+                shutil.rmtree(folder)
+            (folder / "in").mkdir(parents=True)
+            if redo:
+                prompt, schema = redo_triage_prompt(brief, triage), REDO_SCHEMA
+            else:
+                for q in questions:
+                    shutil.copy2(q, folder / "in" / q.name)
+                prompt = triage_prompt(brief, self.sandbox.work_path(folder), ask=ask,
+                                       lectures=listed if mode == LectureMode.AUTO else None)
+                schema = TRIAGE_SCHEMA
+            answer, o, trouble, overage = self.ask_haiku(folder, prompt, schema)
+            tokens = o.tokens
+            if answer is None:
+                held = self._triage_held(job_id, o, trouble, overage, tokens)
+                if held is not None:
+                    return held
+                notes.append(f"Haiku could not sort it ({trouble[:200]}); solving with the default model")
+
+        if redo:
+            triage["redo"] = {"note": brief.note, **({k: answer[k] for k in ("model", "effort", "reason")} if answer else {"failed": True})}
+        else:
+            triage = {k: answer[k] for k in ("model", "effort", "reason", "handwritten")} if answer else {"failed": True}
+            if mode != LectureMode.OFF and self.materials is not None:
+                wanted = set(answer.get("lectures") or []) if answer else set()
+                picked = [x for x in listed if mode == LectureMode.ALWAYS or x[2] in wanted][:MAX_LECTURES]
+                triage["lectures"] = self._fetch_lectures(course, picked, notes)
+
+        asked = [str(q) for q in (answer or {}).get("questions") or [] if str(q).strip()][:8] if ask and not redo else []
+        with self.sessions.begin() as s:
+            job = s.get(Job, job_id, with_for_update=True)
+            job.triage = json.dumps(triage)
+            job.cost_tokens += tokens
+            route = triage.get("redo") if redo else triage
+            if route.get("model"):
+                s.add(Event(job_id=job.id, detail=f"Haiku sorted {'the redo' if redo else 'it'}: {route['model']}, {route['effort']} effort; {route['reason']}"))
+            if triage.get("lectures") and not redo:
+                s.add(Event(job_id=job.id, detail="lecture notes to read: " + ", ".join(triage["lectures"])))
+            for note in notes:
+                s.add(Event(job_id=job.id, detail=note))
+            if job.state != JobState.DOWNLOADED:  # stopped meanwhile
+                return SolveResult("stopped", job_id)
+            if triage.get("handwritten") and not redo:
+                self.outbox.queue(s, "handwritten", f"Handwritten work: {where}\nThe sheet asks for the work to be written by hand. "
+                                  "It is being solved in full anyway, as the worked solution for you to copy; it will wait for "
+                                  "your approval and is never uploaded by itself.", job_id=job.id)
+            if asked:
+                job.summary = json.dumps({"status": "needs_input", "questions": asked, "by": "triage"})
+                _move(s, job, JobState.NEEDS_INPUT, "asked before solving: " + " | ".join(asked))
+                self.outbox.queue(s, "question", f"Something is needed before solving: {where}\n"
+                                  + "\n".join(f"{n}. {q}" for n, q in enumerate(asked, start=1))
+                                  + "\nTo answer or send a file, reply menu, then Needs your action.", job_id=job.id)
+                return SolveResult("asked", job_id)
+        return None
+
+    def _triage_held(self, job_id: int, o: Outcome, trouble: str, overage: bool, tokens: int) -> SolveResult | None:
+        """Haiku gave no answer because Claude is signed out or the plan's limit is reached: the job
+        waits, as it would for the solve. Any other failure does not hold the solve up."""
+        now = self.now()
+        signed_out = bool(SIGNED_OUT.search(trouble))
+        if not (signed_out or o.usage_limited or overage):
+            return None
+        with self.sessions.begin() as s:
+            job = s.get(Job, job_id, with_for_update=True)
+            job.cost_tokens += tokens
+            if not signed_out:
+                pause = self.guard.paused(now)
+                job.not_before = pause.until if pause else now + timedelta(hours=1)
+                job.last_error = f"usage limit; resumes {_pkt(job.not_before)}"
+                s.add(Event(job_id=job.id, detail=job.last_error))
+        if signed_out:
+            self._signed_out(trouble)
+            return SolveResult("signed_out", job_id)
+        return SolveResult("retry", job_id, "usage limit")
+
+    def _fetch_lectures(self, course: Course, picked: list[tuple[str, str, str]], notes: list[str]) -> list[str]:
+        """Download what is not on the server yet; returns the file names that are there."""
+        names = []
+        for week, _, name in picked:
+            try:
+                names.append(self.materials.lecture(course, week, name).name)
+            except Exception as e:
+                notes.append(f"lecture file {name} could not be fetched: {e}")
+        return names
 
     # --- picking a job ---
 
@@ -204,7 +381,7 @@ class Solver:
             .order_by(Assignment.deadline.asc().nulls_last(), Job.id)
         )
 
-    def _claim(self, now: datetime) -> tuple[int, Path, str, str | None, str] | None:
+    def _claim(self, now: datetime) -> tuple[int, Path, str, str | None, str, tuple[str | None, str | None]] | None:
         with self.sessions() as s:
             job = s.scalars(self._ready(now).limit(1).with_for_update(of=Job, skip_locked=True)).first()
             if job is None:
@@ -215,11 +392,18 @@ class Solver:
             references = files.listed(files.refs_dir(self.data_dir, a))
             system = course_prompt(system_prompt(self.sandbox.work_path(work), course.theme or THEME_ARTIFACT),
                                    course.prompt, course.prompt_replaces)
-            system = with_extras(system, self.sandbox.work_path(work), ask=course.solve == SolveMode.AUTO,
-                                 theme_files=[p.name for p in theme_files], references=[p.name for p in references])
             last = json.loads(job.summary) if job.summary else {}
-            redo = bool(job.note) and job.summary is not None and last.get("status") != "needs_input"
+            redo = _is_redo(job)
             answered = last.get("status") == "needs_input"
+            triage = json.loads(job.triage) if job.triage else {}
+            lecture_dir = files.course_dir(self.data_dir, course) / "lectures"
+            lectures = [lecture_dir / n for n in triage.get("lectures") or [] if (lecture_dir / n).is_file()] \
+                if course.lectures != LectureMode.OFF else []
+            system = with_extras(system, self.sandbox.work_path(work), ask=course.solve == SolveMode.AUTO and not answered,
+                                 theme_files=[p.name for p in theme_files], references=[p.name for p in references],
+                                 lectures=[p.name for p in lectures], lectures_must=course.lectures == LectureMode.ALWAYS)
+            routed = (triage.get("redo") if redo and (triage.get("redo") or {}).get("note") == job.note else triage) or {}
+            route = (routed.get("model"), routed.get("effort")) if self.routed() else (None, None)
             # A run that ended blocked starts over: its session has already concluded it cannot go on.
             # So does a redo after the course's prompt, theme or files changed: a resumed session
             # would go on working from what it read the first time.
@@ -234,7 +418,7 @@ class Solver:
                 for art in job.artifacts:
                     if art.kind == "question" and Path(art.path).is_file():
                         shutil.copy2(art.path, work / "in" / Path(art.path).name)
-            for folder, sent in (("theme-reference", theme_files), ("reference", references)):
+            for folder, sent in (("theme-reference", theme_files), ("reference", references), ("lectures", lectures)):
                 shutil.rmtree(work / "in" / folder, ignore_errors=True)
                 if sent:
                     (work / "in" / folder).mkdir(parents=True)
@@ -253,30 +437,35 @@ class Solver:
                 sheet = sorted(p.name for p in (work / "in").iterdir() if p.is_file())
                 prompt = task_prompt(Brief(course=a.course.name, semester=a.course.semester_name or a.course.semester,
                                            title=a.title, number=a.number, deadline=a.deadline, remarks=a.remarks,
-                                           files=sheet, on=now, note=job.note))
+                                           files=sheet, on=now, note=job.note,
+                                           asked=tuple(last.get("questions") or ()) if answered else (),
+                                           answer=job.note if answered else None))
             if redo or answered:
                 job.summary = None  # from here it continues as a plain run
             job.attempts += 1
             job.not_before = None
             how = " (resuming the Claude session)" if resume else (" (a fresh run: the course's prompt, theme or files changed)" if changed else "")
+            if route[0]:
+                how += f" with {route[0]}, {route[1]} effort"
             _move(s, job, JobState.SOLVING, "solving" + how)
             s.commit()
-            return job.id, work, prompt, resume, system
+            return job.id, work, prompt, resume, system, route
 
     def job_dir(self, a: Assignment, job: Job) -> Path:
         return self.data_dir / _safe(a.course.code) / str(a.id) / str(job.revision)
 
-    def _write_job(self, work: Path, prompt: str, resume: str | None, system: str | None = None) -> None:
+    def _write_job(self, work: Path, prompt: str, resume: str | None, system: str | None = None,
+                   route: tuple[str | None, str | None] = (None, None)) -> None:
         (work / "out").mkdir(parents=True, exist_ok=True)
         if system is None:
             system = with_extras(system_prompt(self.sandbox.work_path(work)), self.sandbox.work_path(work),
                                  ask=False, theme_files=[], references=[])
         spec = {"prompt": prompt, "system": system, "schema": SUMMARY_SCHEMA,
                 "max_turns": self.max_turns}
-        model = (self.kv.get(MODEL_KEY) or "").strip() or self.model  # the chat's choice, else SOLVER_MODEL
+        model = self.fixed_model() or route[0]  # fixed by you, else Haiku's choice, else the CLI's default
         if model:
             spec["model"] = model
-        effort = (self.kv.get(EFFORT_KEY) or "").strip()
+        effort = (self.kv.get(EFFORT_KEY) or "").strip() or route[1]  # the same for the effort
         if effort:
             spec["effort"] = effort
         if resume:
@@ -461,6 +650,13 @@ class Solver:
 def _move(s: Session, job: Job, to: JobState, detail: str) -> None:
     s.add(Event(job_id=job.id, from_state=job.state, to_state=to, detail=detail))
     job.state = to
+
+
+def _is_redo(job: Job) -> bool:
+    """You asked for changes to a finished report (an answer to a question before solving is not a redo)."""
+    if not job.note or job.summary is None:
+        return False
+    return json.loads(job.summary).get("status") != "needs_input"
 
 
 def _day_start(now: datetime) -> datetime:

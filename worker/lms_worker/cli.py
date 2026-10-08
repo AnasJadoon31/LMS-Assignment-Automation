@@ -235,14 +235,12 @@ def cmd_api(rt: Runtime, args) -> int:
               "the api will run but cannot answer messages", flush=True)
     elif not rt.whatsapp_number().get():
         print("WhatsApp has no number to send to yet; save one on the setup page, or set WHATSAPP_NUMBER", flush=True)
-    from .materials import Materials
-
     app = create_app(
         rt.settings,
         rt.sessions,
         rt.kv,
         internal_url=os.environ.get("API_INTERNAL_URL", DEFAULT_INTERNAL_URL),
-        materials=Materials(rt.adapter, rt.settings.data_dir, rt.kv),
+        materials=rt.materials(),
     )
     serve(app, host=args.host, port=args.port)
     return 0

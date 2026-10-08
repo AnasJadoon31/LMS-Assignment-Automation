@@ -17,11 +17,11 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from .db.models import Assignment, Course, CourseMode, Event, Job, JobState, SolveMode
+from .db.models import Assignment, Course, CourseMode, Event, Job, JobState, LectureMode, SolveMode, Summary
 from .kv import KeyValue
 
 POLL_NOW_KEY = "poll_requested"  # the watcher's
-MODEL_KEY = "solver_model"  # the model picked in the chat; wins over SOLVER_MODEL
+MODEL_KEY = "solver_model"  # a model fixed in the chat; wins over SOLVER_MODEL. Without either, Haiku routes each job
 EFFORT_KEY = "solver_effort"  # the effort picked in the chat; the CLI's own default without it
 CAP_LIFTED_KEY = "solver_cap_lifted"  # the day (Pakistan time) the daily run limit is lifted for
 PASSWORD_KEY = "admin_password"  # the page password as reset from the chat (salted hash); wins over ADMIN_PASSWORD
@@ -63,6 +63,12 @@ SOLVE_WORDS = {
     SolveMode.MANUAL: "ask me each time before solving",
     SolveMode.AUTO: "Claude solves, or asks me first when it needs something",
 }
+LECTURE_WORDS = {
+    LectureMode.AUTO: "Haiku decides per assignment whether the lecture notes are needed, and which",
+    LectureMode.ALWAYS: "every assignment is solved with the lecture notes at hand",
+    LectureMode.OFF: "the lecture notes are not used",
+}
+SUMMARY_STYLES = {"short": "Short revision notes, about a page per lecture", "detailed": "Detailed notes, every topic explained"}
 UPLOAD_TYPES = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip")  # what the LMS takes
 
 
@@ -210,3 +216,18 @@ def set_solve(course: Course, solve: str) -> tuple[bool, str]:
         return False, f"Unknown solving mode {solve}"
     course.solve = solve
     return True, f"{course.name}: solving is now {solve} ({SOLVE_WORDS[solve]}), from the next new assignment."
+
+
+def set_lectures(course: Course, mode: str) -> tuple[bool, str]:
+    if mode not in LECTURE_WORDS:
+        return False, f"Unknown lecture notes mode {mode}"
+    course.lectures = mode
+    return True, f"{course.name}: lecture notes for solving are now {mode} ({LECTURE_WORDS[mode]}), from the next new assignment."
+
+
+def summarize(s: Session, course: Course, lectures: list[dict], style: str) -> Summary:
+    """Queue summarized notes of these lecture files ([{week, title, file}]), which are on the server."""
+    summary = Summary(course=course, lectures=json.dumps(lectures), style=style if style in SUMMARY_STYLES else "short")
+    s.add(summary)
+    s.flush()
+    return summary

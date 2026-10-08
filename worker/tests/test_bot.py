@@ -225,9 +225,9 @@ def test_a_course_gets_its_own_system_prompt_from_the_chat(bot, semester, sessio
 
 def test_the_solver_model_is_picked_in_the_chat(bot, semester, sessions):
     menu = say(bot, "menu", "6")
-    assert "1. Solver model: default (change)" in text(menu)
+    assert "1. Solver model: auto, picked by Haiku (change)" in text(menu)
     screen = say(bot, "1")
-    assert "Now: default" in text(screen)
+    assert "Now: auto." in text(screen)
     for label in ("Fable 5.1", "Opus 5.5", "Opus 4.8", "Opus 4.5", "Sonnet 5.5", "Sonnet 4.5", "Haiku 4.5"):
         assert f". {label} (claude-" in text(screen), label
     out = text(say(bot, pick(screen, "Opus 4.8")))
@@ -238,19 +238,19 @@ def test_the_solver_model_is_picked_in_the_chat(bot, semester, sessions):
     say(bot, pick(screen, "Type a model name"))
     assert text(say(bot, "rm -rf /; x")).startswith("That does not look like a model name. Nothing changed.")
     assert DbKV(sessions).get("solver_model") == "claude-opus-5-5"
-    assert text(say(bot, pick(screen, "Default"))).startswith("The solver uses the default model again.")
+    assert text(say(bot, pick(screen, "Auto"))).startswith("Haiku now picks the model for each job")
     assert DbKV(sessions).get("solver_model") is None
 
 
 def test_effort_the_daily_limit_and_the_built_in_prompt_from_the_chat(bot, semester, sessions):
     kv = DbKV(sessions)
     menu = say(bot, "menu", "6")
-    assert "Solver effort: default (change)" in text(menu) and "Daily solve limit: on (change)" in text(menu)
+    assert "Solver effort: auto (change)" in text(menu) and "Daily solve limit: on (change)" in text(menu)
     screen = say(bot, pick(menu, "Solver effort"))
-    assert [l.split(". ")[1] for l in text(screen).splitlines() if l[:1].isdigit()] == ["Default", "low", "medium", "high", "xhigh", "max"]
+    assert [l.split(". ")[1] for l in text(screen).splitlines() if l[:1].isdigit()] == ["Auto", "low", "medium", "high", "xhigh", "max"]
     assert text(say(bot, pick(screen, "xhigh"))).startswith("The solver now uses xhigh effort")
     assert kv.get("solver_effort") == "xhigh"
-    assert text(say(bot, pick(screen, "Default"))).startswith("The solver uses the default effort again.")
+    assert text(say(bot, pick(screen, "Auto"))).startswith("The effort is picked per job again.")
     assert kv.get("solver_effort") is None
 
     menu = say(bot, "menu", "6")
@@ -533,12 +533,12 @@ def test_reference_files_for_an_assignment_and_for_a_theme(sessions, semester, t
         assert [p.name for p in files.listed(files.refs_dir(tmp_path, a))] == ["data.csv", "lecture 4.pptx"]
     assert text(say(bot, pick(say(bot, "0", "1"), "Remove the reference files"))).startswith("The reference files were removed.")
 
-    theme = say(bot, "menu", "6", "4", "1", "5")
+    theme = say(bot, pick(say(bot, "menu", "6", "4", "1"), "Report theme"))
     say(bot, pick(theme, "Send a theme reference file"))
     out = text(bot.handle(CHAT, "", Incoming("Report format.docx", b"PK")))
     assert out.startswith("Saved Report format.docx as a theme reference for DAA.")
     assert "Your reference files, used with the artifact: Report format.docx" in out
-    assert "5. Report theme: default, 1 reference file (change)" in text(say(bot, "0"))
+    assert "Report theme: default, 1 reference file (change)" in text(say(bot, "0"))
 
     assert text(bot.handle(CHAT, "", Incoming("stray.pdf", b"x"))).startswith("I did not know what that file is for.")
 
@@ -625,3 +625,39 @@ def test_question_file_falls_back_to_the_download_record(bot, sessions, tmp_path
     assert "1. Send the question file" in item
     (reply,) = say(bot, "1")
     assert reply.file.read_bytes() == b"%PDF old"
+
+
+def test_lecture_notes_for_solving_are_set_per_course(bot, semester, sessions):
+    settings = say(bot, "menu", "6", "4", "1")
+    assert "4. Lecture notes for solving: off (change)" in text(settings)
+    picks = text(say(bot, "4"))
+    assert "1. auto: Haiku decides per assignment" in picks and "2. always:" in picks and "3. off:" in picks
+    assert text(say(bot, "1")).startswith("DAA: lecture notes for solving are now auto")
+    with sessions() as s:
+        assert (s.get(Course, semester["daa"]).lectures, s.get(Course, semester["lab"]).lectures) == ("auto", "off")
+
+
+def test_picked_lectures_are_queued_for_a_summary(sessions, semester, tmp_path):
+    from lms_worker.db import Summary
+
+    materials = FakeMaterials(tmp_path)
+    bot = Bot(sessions, DbKV(sessions), now=Clock(NOW), materials=materials, data_dir=tmp_path)
+    notes = say(bot, "menu", "5", "1", "2")
+    asked = text(say(bot, pick(notes, "Summarize lectures into notes")))
+    assert asked.startswith("Which lectures should be summarized?") and "Week 2: Regex (2 files)" in asked
+    assert text(say(bot, "7")).startswith("There is no week 7 with lecture files.")
+    style = text(say(bot, "1-2"))
+    assert "*DAA · summary of weeks 1, 2*" in style and "3 lecture files. Which kind of notes?" in style
+    assert "1. Short revision notes" in style and "2. Detailed notes" in style
+    out = text(say(bot, "2"))
+    assert out.startswith("Queued: detailed notes for DAA, weeks 1, 2 (3 files).") and "*DAA · lecture notes*" in out
+    with sessions() as s:
+        sm = s.scalar(select(Summary))
+        assert (sm.state, sm.style, sm.course_id) == ("QUEUED", "detailed", semester["daa"])
+        assert [x["file"] for x in json.loads(sm.lectures)] == ["Week-1-Intro-07092026-100828am.pptx", "lecture-2.pptx", "notes.pdf"]
+    assert len(materials.asked) == 3  # the files are fetched when you ask, so the worker has them
+    assert "Lecture summaries: 1 being written or waiting" in text(say(bot, "menu", "8"))
+
+    say(bot, "menu", "5", "1", "2", pick(notes, "Summarize lectures into notes"))
+    materials.fail = "The LMS did not answer"
+    assert text(say(bot, "all", "1")).startswith("Nothing was queued: The LMS did not answer")

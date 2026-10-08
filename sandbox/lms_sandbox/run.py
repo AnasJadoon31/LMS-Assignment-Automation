@@ -2,7 +2,9 @@
 
 /work/job.json holds the prompts, the summary schema and the limits (written by the worker).
 The question files in /work/in are rendered to page images first, so Claude sees figures in
-the sheet. Claude's stream-json output goes to stdout, for the worker to read live, and to
+the sheet. A job that asks for it ("text") also gets every file's text in /work/in/text, so
+slides can be read as text, which costs far less than reading them as pictures. A job that
+says "prepared" reuses what an earlier run in the same folder made. Claude's stream-json output goes to stdout, for the worker to read live, and to
 /work/out/stream.jsonl.
 """
 
@@ -21,8 +23,9 @@ OFFICE = {".doc", ".docx", ".ppt", ".pptx", ".odt", ".odp", ".rtf", ".xls", ".xl
 MAX_PAGES = 40
 
 
-def render_pages(inbox: Path) -> list[Path]:
-    """Each PDF and office file in inbox -> inbox/pages/<name>-<n>.png."""
+def render_pages(inbox: Path, text: bool = False) -> list[Path]:
+    """Each PDF and office file in inbox -> inbox/pages/<name>-<n>.png, and with text also
+    inbox/text/<name>.txt (pdftotext; one form feed between pages)."""
     pages = inbox / "pages"
     made = []
     for f in sorted(p for p in inbox.iterdir() if p.is_file()):
@@ -35,6 +38,10 @@ def render_pages(inbox: Path) -> list[Path]:
             pdf = converted if converted.exists() else None
         if pdf is None:
             continue
+        if text:
+            (inbox / "text").mkdir(exist_ok=True)
+            subprocess.run(["pdftotext", "-layout", str(pdf), str(inbox / "text" / (f.stem + ".txt"))],
+                           capture_output=True, timeout=300)
         pages.mkdir(exist_ok=True)
         subprocess.run(["pdftoppm", "-r", "110", "-png", "-l", str(MAX_PAGES), str(pdf), str(pages / f.stem)],
                        capture_output=True, timeout=300)
@@ -65,8 +72,8 @@ def main() -> int:
     out = WORK / "out"
     out.mkdir(parents=True, exist_ok=True)
     (WORK / "code").mkdir(exist_ok=True)
-    if (WORK / "in").is_dir() and not job.get("resume"):
-        render_pages(WORK / "in")
+    if (WORK / "in").is_dir() and not job.get("resume") and not job.get("prepared"):
+        render_pages(WORK / "in", text=bool(job.get("text")))
     if not shutil.which("claude"):
         print(json.dumps({"type": "result", "is_error": True, "result": "claude is not installed in the sandbox"}), flush=True)
         return 127
