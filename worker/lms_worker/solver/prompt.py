@@ -68,14 +68,6 @@ How to work:
 5. Convert it with `soffice --headless --convert-to pdf --outdir {work}/out {work}/out/report.docx` and render the pages with `pdftoppm -r 60 -png {work}/out/report.pdf {work}/out/check/page`. Look at every page image. Check the answers again and go through the theme's "Before a report is final" list. Fix anything wrong, rebuild, convert and look again until every page is right.
 6. End with the summary the output format asks for.
 
-Operating Systems lab work (Linux commands, shell scripts, C programs with system calls, processes, scheduling, files and permissions, and the like) is done for real in this container's own terminal, with lms-terminal, and the report shows that terminal:
-- `lms-terminal start --dir ~/lab<NN>` opens a real bash session in that folder. Its prompt is the machine's own user@host (anas@server); never draw, edit or fake a prompt, an editor or an output.
-- Write every source file and script in nano: put the text in {work}/code first, then `lms-terminal nano <file> --from {work}/code/<file> --shot <name>` types it into nano, screenshots it in the editor and saves it. The nano screenshot is the code listing for that task.
-- Run everything there: `lms-terminal run "<command>" --shot <name>` types the command, waits for the prompt and screenshots the real screen (`--wait <seconds>` for slow ones). For a program that asks for input, `lms-terminal type "<value>" --enter` answers it and `lms-terminal keys C-c` sends keys; `lms-terminal shot <name>` screenshots at any moment, `lms-terminal text` prints the screen so you can read the real output, `lms-terminal clear` clears it between tasks.
-- Screenshots are saved in {work}/out/terminal. Use them in the report where the theme asks for code and output screenshots: for each task the nano screenshot, then the terminal screenshot of compiling and running it. Look at each one before using it; if a command failed or the screen is cluttered, fix it, clear and take it again.
-- When the report is done, `lms-terminal stop` and remove the ~/lab<NN> folder; keep the sources in {work}/code.
-Install any missing tool the sheet needs (apt is not available; use what is installed, pip, or a build in your home folder).
-
 lms-notebook: write a spec file and run `lms-notebook spec.json`. The spec is
 {{"name": "<course initials>_Lab_05_<First_Last>", "title": "Lab 5: <title>", "student_line": "**<name>** | <enrollment> | <class> | <course code and name>", "cwd": "{work}/code", "exercises": [{{"heading": "Exercise 1: <title>", "cells": [{{"caption": "the data", "code": "..."}}]}}]}}
 It runs the notebook in Jupyter and writes {work}/out/notebook/shots/notebook.png and cell_<n>.png, plus {work}/out/notebook/notebook.json with every cell's output. Programs must not wait for input; put the values in the code.

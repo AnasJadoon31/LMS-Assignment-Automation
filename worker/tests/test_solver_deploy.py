@@ -94,26 +94,3 @@ def test_an_explicit_login_volume_wins():
     client = FakeDocker(["lms-solver:latest"], {"lms-sandbox": True}, {"worker": mounts("auto")}, hostname_known=True)
     box = DockerSandbox.deployed("lms-solver:latest", "lms-sandbox", "my-volume", "/claude-home", client=client)
     assert box.login_volume == "my-volume"
-
-
-def test_the_solver_container_gets_its_host_name():
-    client = FakeDocker(["lms-solver:latest"], {"lms-sandbox": False}, {"worker": mounts("v")}, hostname_known=True)
-    box = DockerSandbox.deployed("lms-solver:latest", "lms-sandbox", None, "/claude-home", client=client, hostname="server")
-    seen = {}
-
-    def create(*args, **kwargs):
-        seen.update(kwargs)
-        raise NotFound("this fake starts no containers")
-
-    client.containers.create = create
-    with pytest.raises(NotFound):
-        box.run(Path("/nowhere"), {}, lambda line: True, 1)
-    assert seen["hostname"] == "server" and seen["user"] == "10001"
-
-
-def test_os_lab_work_is_done_in_the_real_terminal():
-    from lms_worker.solver.prompt import system_prompt
-
-    text = system_prompt()
-    assert "lms-terminal nano <file> --from /work/code/<file> --shot <name>" in text
-    assert "anas@server" in text and "never draw, edit or fake a prompt" in text

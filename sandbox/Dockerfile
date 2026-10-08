@@ -13,13 +13,11 @@ FROM mcr.microsoft.com/playwright/python:v1.56.0-noble
 
 # LibreOffice for the PDF; Carlito and Caladea have Calibri's and Cambria's metrics, so pages
 # break as in Word (put licensed Calibri, Cambria and Consolas in fonts/ to use the real ones);
-# poppler renders pages to check them; graphviz for diagrams; compilers for C, C++ and Java labs;
-# nano, tmux and the usual shell tools for Operating Systems labs done in a real terminal (lms-terminal)
+# poppler renders pages to check them; graphviz for diagrams; compilers for C, C++ and Java labs
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer-nogui libreoffice-impress-nogui \
         fonts-crosextra-carlito fonts-crosextra-caladea fonts-dejavu-core \
-        poppler-utils graphviz g++ gcc make default-jdk-headless \
-        nano tmux procps psmisc less file tree \
+        poppler-utils graphviz g++ default-jdk-headless \
     && rm -rf /var/lib/apt/lists/*
 COPY fonts/ /usr/share/fonts/truetype/local/
 RUN fc-cache -f > /dev/null
@@ -36,15 +34,11 @@ ENV PYTHONPATH=/opt/lms \
     MPLBACKEND=Agg \
     DISABLE_AUTOUPDATER=1 \
     CLAUDE_CODE_ARTIFACT=1
-# The user's name is what the terminal prompt shows (name@host); the home folder and the uid stay
-# the same whatever the name, since the login volume is mounted there and the worker shares the uid
-ARG SOLVER_USER=anas
 RUN printf '#!/bin/sh\nexec python3 -m lms_sandbox.notebook "$@"\n' > /usr/local/bin/lms-notebook \
-    && printf '#!/bin/sh\nexec python3 -m lms_sandbox.terminal "$@"\n' > /usr/local/bin/lms-terminal \
-    && chmod +x /usr/local/bin/lms-notebook /usr/local/bin/lms-terminal \
-    && useradd --create-home --home-dir /home/solver --shell /bin/bash --uid 10001 "$SOLVER_USER" \
-    && mkdir -p /work && chown 10001 /work
+    && chmod +x /usr/local/bin/lms-notebook \
+    && useradd --create-home --uid 10001 solver \
+    && mkdir -p /work && chown solver /work
 
-USER 10001
+USER solver
 WORKDIR /work
 CMD ["python3", "-m", "lms_sandbox.run"]
