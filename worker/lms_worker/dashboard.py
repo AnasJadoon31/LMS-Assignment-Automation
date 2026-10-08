@@ -5,7 +5,7 @@ GET  /courses                       every course this semester, with its mode
 GET  /courses/{id}                  one course: assignments, lab papers, files, approvals
 GET  /api/courses                   the list as JSON
 GET  /api/courses/{id}              one course as JSON
-POST /api/courses/{id}/mode         {mode}: approve, auto or notify
+POST /api/courses/{id}/mode         {mode}: approve or auto
 POST /api/jobs/{id}/approve         upload the solved PDF
 POST /api/jobs/{id}/reject
 POST /api/jobs/{id}/redo            {note}: solve again with this note
@@ -241,7 +241,7 @@ def _send(path: Path) -> FileResponse:
 # --- pages ---
 
 MODE_JS = """
-const MODE_ORDER = ["approve", "auto", "notify"];
+const MODE_ORDER = ["approve", "auto"];
 function modeControl(course, modes, onDone) {
   const seg = document.createElement("div"); seg.className = "seg";
   for (const m of MODE_ORDER) {
@@ -271,7 +271,7 @@ COURSES_JS = MODE_JS + """
 async function load() {
   let d;
   try { d = await call("/api/courses"); } catch (e) { $("err").textContent = e.message; return; }
-  $("sem").textContent = d.courses.length ? (d.semester || "This semester") + " · " + d.courses.length + " courses. Approve sends you the PDF first; auto uploads without asking; notify only sends the question."
+  $("sem").textContent = d.courses.length ? (d.semester || "This semester") + " · " + d.courses.length + " courses. Approve sends you the PDF first; auto uploads without asking. Solving (bypass, manual, auto) and safe mode are set in the chat menu."
                                           : "No courses yet: they appear after the first check of the LMS.";
   const list = $("list"); list.innerHTML = "";
   for (const c of d.courses) {

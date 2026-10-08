@@ -141,6 +141,13 @@ class AssignmentsPage:
         return next((o for o in self.semesters if o.selected), self.semesters[0])
 
 
+def closes_at(deadline: datetime) -> datetime:
+    """When the LMS really stops taking uploads: the end of the deadline's day, whatever time
+    the teacher set. The posted time is still the deadline; this is only how long the Submit
+    button stays."""
+    return deadline.astimezone(LMS_TZ).replace(hour=23, minute=59, second=59, microsecond=0)
+
+
 def b64_id(value: str) -> str:
     """'MTUxNjk0' -> '151694'."""
     try:

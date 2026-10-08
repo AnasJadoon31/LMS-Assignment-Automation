@@ -91,7 +91,8 @@ class EvolutionNotifier:
             "sendMedia",
             {
                 "number": self._to(),
-                "mediatype": "document",
+                # a picture (the course plan) shows in the chat; everything else is a document
+                "mediatype": "image" if mimetype in ("image/png", "image/jpeg") else "document",
                 "mimetype": mimetype,
                 "caption": caption,
                 "fileName": path.name,

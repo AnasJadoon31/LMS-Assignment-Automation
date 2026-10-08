@@ -18,8 +18,17 @@ class Base(DeclarativeBase):
 
 
 class CourseMode(StrEnum):
-    NOTIFY = "notify"
+    """Uploading: wait for your yes, or upload by itself."""
+
     APPROVE = "approve"
+    AUTO = "auto"
+
+
+class SolveMode(StrEnum):
+    """Solving: always, only when you say so, or Claude asks you first when it needs something."""
+
+    BYPASS = "bypass"
+    MANUAL = "manual"
     AUTO = "auto"
 
 
@@ -35,6 +44,8 @@ class JobState(StrEnum):
     CONFIRMED = "CONFIRMED"
     NEEDS_HUMAN = "NEEDS_HUMAN"
     REJECTED = "REJECTED"
+    WAITING_GO = "WAITING_GO"  # manual solving: the question is here, solving waits for your go-ahead
+    NEEDS_INPUT = "NEEDS_INPUT"  # Claude asked you something before solving
     SUPERSEDED = "SUPERSEDED"  # the teacher changed the assignment; a newer revision took over
     HANDWRITTEN = "HANDWRITTEN"  # older jobs only; handwritten work now waits in AWAITING_APPROVAL
 
@@ -53,6 +64,9 @@ class Course(Base):
     semester: Mapped[str] = mapped_column(String(64))
     semester_name: Mapped[str] = mapped_column(String(64), default="")
     mode: Mapped[str] = mapped_column(String(16), default=CourseMode.APPROVE)
+    solve: Mapped[str] = mapped_column(String(16), default=SolveMode.BYPASS, server_default="bypass")
+    # Safe mode: a report still waiting for your approval is uploaded when one hour is left
+    safe: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     sandbox_profile: Mapped[str] = mapped_column(String(64), default="python-jupyter")
     # Your own system prompt for this course's solver runs, set in the chat: added to the
     # built-in one, or used instead of it
@@ -103,6 +117,9 @@ class Assignment(Base):
     reminders: Mapped[str] = mapped_column(String(64), default="", server_default="")
     # You asked for the LMS submission to be deleted; the worker does it at its next poll
     delete_requested_at: Mapped[datetime | None]
+    # Your own file, sent in the chat, and when you asked for it to be uploaded
+    own_file: Mapped[str | None] = mapped_column(String(1024))
+    upload_requested_at: Mapped[datetime | None]
     first_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
 

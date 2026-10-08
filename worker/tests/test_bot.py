@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from lms_worker.bot import Bot
+from lms_worker import files
+from lms_worker.bot import Bot, Incoming, MaterialsError
 from lms_worker.db import Artifact, Assignment, ChatSession, Course, Event, Job, JobState
 from lms_worker.kv import DbKV
 from lms_worker.lms.bahria_pages import LMS_TZ
@@ -86,7 +87,7 @@ def test_main_menu_counts_everything(bot, semester):
     assert out.splitlines()[0] == "*LMS BOT*"
     assert "1. Assignments: 2 remaining, 1 due soon" in out
     assert "2. Lab papers: 1 upcoming, next Sun 11 Oct, 8:00 AM" in out
-    assert "3. Waiting for your approval (1)" in out
+    assert "3. Needs your action (1)" in out
     assert "4. Due or starting in the next 48 hours (2)" in out
     assert "7. Check the LMS now" in out and "8. System status" in out
 
@@ -97,12 +98,14 @@ def test_assignment_categories(bot, semester):
         "1. Remaining (open, not submitted) (2)",
         "2. Due in the next 48 hours (1)",
         "3. Waiting for your approval (1)",
-        "4. Queued or being solved (0)",
-        "5. Stopped, needs you (0)",
-        "6. Submitted (2)",
-        "7. Missed (closed, no submission) (1)",
-        "8. Marked (1)",
-        "9. All (5)",
+        "4. Waiting for your go-ahead (0)",
+        "5. Claude is waiting for your answer (0)",
+        "6. Queued or being solved (0)",
+        "7. Stopped, needs you (0)",
+        "8. Submitted (2)",
+        "9. Missed (closed, no submission) (1)",
+        "10. Marked (1)",
+        "11. All (5)",
     ]:
         assert line in out
 
@@ -165,7 +168,7 @@ def pick(replies, label):
 
 
 def test_a_submission_on_an_open_assignment_can_be_deleted_after_a_yes(bot, semester, sessions):
-    listed = say(bot, "menu", "1", "6")  # Assignments, Submitted
+    listed = say(bot, "menu", "1", "8")  # Assignments, Submitted
     item = say(bot, pick(listed, "Lab 6"))
     assert "Status: submitted; still open, you can delete it and resubmit" in text(item)
     confirm = text(say(bot, pick(item, "Delete my submission from the LMS")))
@@ -191,8 +194,8 @@ def test_a_submission_on_an_open_assignment_can_be_deleted_after_a_yes(bot, seme
 
 
 def test_a_course_gets_its_own_system_prompt_from_the_chat(bot, semester, sessions):
-    courses = say(bot, "menu", pick(say(bot, "menu"), "By course"))
-    course = say(bot, pick(courses, "DAA"))
+    courses = say(bot, "menu", pick(say(bot, "menu"), "Courses"))
+    course = say(bot, pick(say(bot, pick(courses, "DAA")), "Settings"))
     assert "System prompt: built-in (change)" in text(course)
     screen = say(bot, pick(course, "System prompt"))
     assert "Now: built-in." in text(screen) and "Show my prompt" not in text(screen)
@@ -221,9 +224,9 @@ def test_a_course_gets_its_own_system_prompt_from_the_chat(bot, semester, sessio
 
 
 def test_the_solver_model_is_picked_in_the_chat(bot, semester, sessions):
-    menu = say(bot, "menu")
-    assert "9. Solver model: default (change)" in text(menu)
-    screen = say(bot, "9")
+    menu = say(bot, "menu", "6")
+    assert "1. Solver model: default (change)" in text(menu)
+    screen = say(bot, "1")
     assert "Now: default" in text(screen)
     for label in ("Fable 5.1", "Opus 5.5", "Opus 4.8", "Opus 4.5", "Sonnet 5.5", "Sonnet 4.5", "Haiku 4.5"):
         assert f". {label} (claude-" in text(screen), label
@@ -241,7 +244,7 @@ def test_the_solver_model_is_picked_in_the_chat(bot, semester, sessions):
 
 def test_effort_the_daily_limit_and_the_built_in_prompt_from_the_chat(bot, semester, sessions):
     kv = DbKV(sessions)
-    menu = say(bot, "menu")
+    menu = say(bot, "menu", "6")
     assert "Solver effort: default (change)" in text(menu) and "Daily solve limit: on (change)" in text(menu)
     screen = say(bot, pick(menu, "Solver effort"))
     assert [l.split(". ")[1] for l in text(screen).splitlines() if l[:1].isdigit()] == ["Default", "low", "medium", "high", "xhigh", "max"]
@@ -250,14 +253,14 @@ def test_effort_the_daily_limit_and_the_built_in_prompt_from_the_chat(bot, semes
     assert text(say(bot, pick(screen, "Default"))).startswith("The solver uses the default effort again.")
     assert kv.get("solver_effort") is None
 
-    menu = say(bot, "menu")
+    menu = say(bot, "menu", "6")
     out = text(say(bot, pick(menu, "Daily solve limit"), "1"))
     assert out.startswith("The daily limit is lifted for today.") and "Now: lifted for today." in out
     assert kv.get("solver_cap_lifted") == "2026-10-10"
     assert text(say(bot, "1")).startswith("The daily limit is back on.") and kv.get("solver_cap_lifted") is None
 
-    courses = say(bot, "menu", pick(say(bot, "menu"), "By course"))
-    course = say(bot, pick(courses, "DAA"))
+    courses = say(bot, "menu", pick(say(bot, "menu"), "Courses"))
+    course = say(bot, pick(say(bot, pick(courses, "DAA")), "Settings"))
     screen = say(bot, pick(course, "System prompt"))
     shown = text(say(bot, pick(screen, "Show the built-in prompt")))
     assert shown.startswith("You solve a university assignment") and "anas@server" in shown
@@ -268,7 +271,7 @@ def test_the_web_page_password_is_reset_from_the_chat(bot, semester, sessions):
 
     kv = DbKV(sessions)
     assert actions.password_matches(kv, "from-env", "from-env")
-    menu = say(bot, "menu")
+    menu = say(bot, "menu", "6")
     confirm = text(say(bot, pick(menu, "Reset the web page password")))
     assert "Reset the web page password?" in confirm and "1. Yes" in confirm
     out = text(say(bot, "1"))
@@ -280,8 +283,8 @@ def test_the_web_page_password_is_reset_from_the_chat(bot, semester, sessions):
 
 
 def test_a_course_gets_its_own_report_theme_from_the_chat(bot, semester, sessions):
-    courses = say(bot, "menu", pick(say(bot, "menu"), "By course"))
-    course = say(bot, pick(courses, "DAA"))
+    courses = say(bot, "menu", pick(say(bot, "menu"), "Courses"))
+    course = say(bot, pick(say(bot, pick(courses, "DAA")), "Settings"))
     assert "Report theme: default (change)" in text(course)
     screen = say(bot, pick(course, "Report theme"))
     assert "Now: the default theme, https://claude.ai/artifact/" in text(screen) and "Use the default theme" not in text(screen)
@@ -310,7 +313,7 @@ def test_files_are_sent_as_documents(bot, semester):
 
 
 def test_approve_needs_a_yes(bot, semester, sessions):
-    say(bot, "menu", "3", "1")
+    say(bot, "menu", "3", "1", "1")
     confirm = text(say(bot, "3"))
     assert "Upload the solved PDF for Recurrence Relations to the LMS now?" in confirm
     assert "1. Yes" in confirm and "2. No" in confirm
@@ -329,7 +332,7 @@ def test_approve_needs_a_yes(bot, semester, sessions):
 
 
 def test_a_wrong_digit_cannot_approve(bot, semester, sessions):
-    say(bot, "menu", "3", "1", "3")
+    say(bot, "menu", "3", "1", "1", "3")
     out = text(say(bot, "7"))
     assert "Reply with one of the numbers below." in out
     with sessions() as s:
@@ -337,7 +340,7 @@ def test_a_wrong_digit_cannot_approve(bot, semester, sessions):
 
 
 def test_redo_takes_a_note_then_a_yes(bot, semester, sessions):
-    say(bot, "menu", "3", "1")
+    say(bot, "menu", "3", "1", "1")
     assert "Type what should change" in text(say(bot, "5"))
     confirm = text(say(bot, "Use the master theorem for part b"))
     assert 'Redo Recurrence Relations with this note?\n"Use the master theorem for part b"' in confirm
@@ -348,7 +351,7 @@ def test_redo_takes_a_note_then_a_yes(bot, semester, sessions):
 
 
 def test_reject(bot, semester, sessions):
-    say(bot, "menu", "3", "1", "4")
+    say(bot, "menu", "3", "1", "1", "4")
     assert "Rejected: Recurrence Relations" in text(say(bot, "1"))
     with sessions() as s:
         assert s.scalar(select(Job.state)) == "REJECTED"
@@ -358,27 +361,186 @@ def test_by_course_has_assignments_papers_and_mode(bot, semester):
     out = text(say(bot, "menu", "5"))
     assert "1. DAA (2 assignments remaining)" in out and "2. CA Lab (1 paper coming)" in out
     daa = text(say(bot, "1"))
-    assert "Lab papers" not in daa and "2. Mode: approve (change)" in daa  # papers are for labs only
+    assert "Lab papers" not in daa  # papers are for labs only
+    assert "2. Lecture notes" in daa and "3. Course plan" in daa and "4. Course outline" in daa
+    assert "5. Settings: solving bypass, uploading approve, safe mode off" in daa
     course = text(say(bot, "0", "2"))
     assert "*CA Lab*" in course
     assert "1. Assignments: nothing remaining" in course
     assert "2. Lab papers: 1 upcoming, next Sun 11 Oct, 8:00 AM" in course
-    assert "3. Mode: approve (change)" in course
-    missed = text(say(bot, "1", "7"))
+    assert "3. Lecture notes" in course
+    missed = text(say(bot, "1", "9"))
     assert "Lab 4 · due" in missed and "CA Lab ·" not in missed  # course name left out inside a course
 
 
 def test_switching_to_auto_asks_first(bot, semester, sessions):
-    out = text(say(bot, "menu", "6", "1"))
-    assert "*DAA · now approve*" in out
+    listed = text(say(bot, "menu", "6", "4"))  # Settings, Course settings
+    assert "*Course settings*" in listed and "1. DAA: solving bypass, uploading approve, safe mode off" in listed
+    out = text(say(bot, "1", "2"))
+    assert "*DAA · uploading, now approve*" in out and "notify" not in out
     warn = text(say(bot, "2"))
-    assert "Switch DAA to auto?" in warn and "without you reading it first" in warn
+    assert "Switch DAA to auto uploading?" in warn and "without you reading it first" in warn
     done = text(say(bot, "1"))
-    assert done.startswith("DAA is now in auto mode.")
-    assert "*Course modes*" in done and "1. DAA: auto" in done
-    say(bot, "1", "3")
+    assert done.startswith("DAA: uploading is now auto")
+    assert "*DAA · settings*" in done and "2. Uploading: auto (change)" in done
     with sessions() as s:
-        assert s.scalar(select(Course.mode).where(Course.name == "DAA")) == "notify"
+        assert s.scalar(select(Course.mode).where(Course.name == "DAA")) == "auto"
+
+
+def test_solving_mode_and_safe_mode_are_set_per_course(bot, semester, sessions):
+    settings = say(bot, "menu", "6", "4", "1")
+    assert "1. Solving: bypass (change)" in text(settings) and "3. Safe mode: off (change)" in text(settings)
+    picks = text(say(bot, "1"))
+    assert "1. bypass: always solve, never ask me" in picks and "2. manual: ask me each time before solving" in picks
+    assert "3. auto: Claude solves, or asks me first when it needs something" in picks
+    assert text(say(bot, "2")).startswith("DAA: solving is now manual")
+    safe = text(say(bot, "3"))
+    assert "Now: off." in safe and "when one hour is left" in safe
+    assert text(say(bot, "1")).startswith("Safe mode is on for DAA")
+    with sessions() as s:
+        daa, lab = s.get(Course, semester["daa"]), s.get(Course, semester["lab"])
+        assert (daa.solve, daa.safe) == ("manual", True) and (lab.solve, lab.safe) == ("bypass", False)
+
+
+def test_manual_solving_waits_for_your_go_ahead(bot, semester, sessions):
+    with sessions.begin() as s:
+        s.scalar(select(Job)).state = JobState.WAITING_GO
+    assert "3. Needs your action (1)" in text(say(bot, "menu"))
+    action = text(say(bot, "3"))
+    assert "1. Waiting for your approval (0)" in action and "2. Waiting for your go-ahead (1)" in action
+    item = say(bot, "2", "1")
+    assert "Service: not solved; waiting for your go-ahead" in text(item)
+    assert text(say(bot, pick(item, "Solve it now"))).startswith("Queued: Recurrence Relations will be solved.")
+    with sessions() as s:
+        assert s.scalar(select(Job.state)) == "DOWNLOADED"
+
+
+def test_claudes_questions_are_answered_in_the_chat(bot, semester, sessions):
+    with sessions.begin() as s:
+        job = s.scalar(select(Job))
+        job.state, job.summary = JobState.NEEDS_INPUT, json.dumps({"status": "needs_input", "questions": ["Which dataset?"]})
+    item = say(bot, "menu", "3", "3", "1")
+    assert "Claude asks:\n• Which dataset?" in text(item)
+    assert text(say(bot, pick(item, "Answer Claude"))).startswith("Type your answer")
+    assert text(say(bot, "The iris one")).startswith("Thanks. Recurrence Relations is queued again")
+    with sessions() as s:
+        job = s.scalar(select(Job))
+        assert (job.state, job.note) == ("DOWNLOADED", "The iris one")
+
+
+def test_counts_follow_what_the_lms_shows(bot, semester, sessions):
+    """A report waiting for approval on a closed assignment, or queued work on a submitted one, is not counted."""
+    with sessions.begin() as s:
+        rec = s.get(Assignment, semester["rec"])
+        rec.deadline_passed = True
+    assert "3. Needs your action (0)" in text(say(bot, "menu"))
+    with sessions.begin() as s:
+        rec = s.get(Assignment, semester["rec"])
+        rec.deadline_passed, rec.submitted_file = False, "mine.pdf"
+        s.scalar(select(Job)).state = JobState.DOWNLOADED
+    out = text(say(bot, "menu", "1"))
+    assert "1. Remaining (open, not submitted) (1)" in out and "6. Queued or being solved (0)" in out and "8. Submitted (3)" in out
+
+
+class FakeMaterials:
+    def __init__(self, tmp_path, fail=None):
+        self.tmp, self.fail, self.asked = tmp_path, fail, []
+
+    def _file(self, name):
+        if self.fail:
+            raise MaterialsError(self.fail)
+        path = self.tmp / name
+        path.write_bytes(name.encode())
+        return path
+
+    def lectures(self, course):
+        from lms_worker.lms.materials import Lecture, LectureFile
+
+        if self.fail:
+            raise MaterialsError(self.fail)
+        return [Lecture("1", "Intro", (LectureFile("1", "Intro", "Week-1-Intro-07092026-100828am.pptx", "x"),), ("https://v.example/1",), None),
+                Lecture("2", "Regex", (LectureFile("2", "Regex", "lecture-2.pptx", "x"), LectureFile("2", "Regex", "notes.pdf", "x")), (), None)]
+
+    def lecture(self, course, week, filename):
+        self.asked.append((course.name, week, filename))
+        return self._file(filename)
+
+    def plan(self, course):
+        return self._file("plan.png") if course.name == "DAA" else None
+
+    def outline(self, course):
+        return self._file("outline.pdf")
+
+
+def test_lecture_notes_plan_and_outline_come_from_the_lms(sessions, semester, tmp_path):
+    materials = FakeMaterials(tmp_path)
+    bot = Bot(sessions, DbKV(sessions), now=Clock(NOW), materials=materials, data_dir=tmp_path)
+    course = say(bot, "menu", "5", "1")
+    notes = say(bot, pick(course, "Lecture notes"))
+    assert "*DAA · lecture notes*" in text(notes) and "Week 1 video: https://v.example/1" in text(notes)
+    assert "1. Week 1 · Intro · Week-1-Intro.pptx" in text(notes) and "3. Week 2 · Regex · notes.pdf" in text(notes)
+    (sent,) = say(bot, "3")
+    assert sent.file.name == "notes.pdf" and sent.text == "DAA · week 2 · Regex"
+    assert materials.asked == [("DAA", "2", "notes.pdf")]
+
+    (plan,) = say(bot, "0", pick(course, "Course plan"))
+    assert plan.file.name == "plan.png" and plan.text == "Course plan · DAA"
+    (outline,) = say(bot, pick(course, "Course outline"))
+    assert outline.file.name == "outline.pdf"
+    lab = say(bot, "0", "2")
+    assert text(say(bot, pick(lab, "Course plan"))).startswith("No course plan is on the LMS yet for CA Lab.")
+
+    materials.fail = "The LMS session has ended. A new login was asked for; try again in a minute."
+    assert "The LMS session has ended" in text(say(bot, "menu", "5", "1", pick(course, "Lecture notes")))
+    assert text(say(bot, "0", pick(course, "Course outline"))).startswith("The LMS session has ended")
+
+
+def test_your_own_file_is_uploaded_after_a_yes(sessions, semester, tmp_path):
+    bot = Bot(sessions, DbKV(sessions), now=Clock(NOW), data_dir=tmp_path)
+    item = say(bot, "menu", "1", "1", "2")  # Sorting: open, nothing submitted, no job
+    assert text(say(bot, pick(item, "Upload my own file"))).startswith("Send your own work, as one file")
+    assert text(say(bot, "here it comes")) == "Send the file as a document, or 0 to cancel."
+    refused = text(bot.handle(CHAT, "", Incoming("photo.heic", b"x")))
+    assert refused.startswith("The LMS takes .pdf, .doc, .docx, .xls, .xlsx, .zip, not .heic")
+
+    say(bot, pick(item, "Upload my own file"))
+    confirm = text(bot.handle(CHAT, "", Incoming("My Sorting (final).pdf", b"%PDF mine")))
+    assert "Upload My Sorting (final).pdf to the LMS for Sorting now?" in confirm and "1. Yes" in confirm
+    out = text(say(bot, "1"))
+    assert out.startswith("Uploading your file for Sorting now; a message will confirm it.")
+    assert "Your own file is being uploaded now." in out and "Upload my own file" not in out.split("---")[-1]
+    with sessions() as s:
+        a = s.scalar(select(Assignment).where(Assignment.title == "Sorting"))
+        assert Path(a.own_file).read_bytes() == b"%PDF mine" and a.upload_requested_at is not None
+    assert DbKV(sessions).get(POLL_NOW_KEY)
+
+
+def test_reference_files_for_an_assignment_and_for_a_theme(sessions, semester, tmp_path):
+    bot = Bot(sessions, DbKV(sessions), now=Clock(NOW), data_dir=tmp_path)
+    item = say(bot, "menu", "1", "1", "1")
+    say(bot, pick(item, "Add a reference file for solving"))
+    out = text(bot.handle(CHAT, "", Incoming("../../lecture 4.pptx", b"slides")))
+    assert out.startswith("Saved lecture 4.pptx as a reference for Recurrence Relations.")
+    assert "Your reference files: lecture 4.pptx" in out and "Remove the reference files" in out
+
+    # A file sent while an assignment is open: the menu asks what it is for
+    asked = bot.handle(CHAT, "", Incoming("data.csv", b"1,2"))
+    assert "You sent data.csv. What is it for?" in text(asked) and "Upload it to the LMS as my own work" in text(asked)
+    out = text(say(bot, pick(asked, "Use it as a reference")))
+    assert "Your reference files: data.csv, lecture 4.pptx" in out
+    with sessions() as s:
+        a = s.get(Assignment, semester["rec"])
+        assert [p.name for p in files.listed(files.refs_dir(tmp_path, a))] == ["data.csv", "lecture 4.pptx"]
+    assert text(say(bot, pick(say(bot, "0", "1"), "Remove the reference files"))).startswith("The reference files were removed.")
+
+    theme = say(bot, "menu", "6", "4", "1", "5")
+    say(bot, pick(theme, "Send a theme reference file"))
+    out = text(bot.handle(CHAT, "", Incoming("Report format.docx", b"PK")))
+    assert out.startswith("Saved Report format.docx as a theme reference for DAA.")
+    assert "Your reference files, used with the artifact: Report format.docx" in out
+    assert "5. Report theme: default, 1 reference file (change)" in text(say(bot, "0"))
+
+    assert text(bot.handle(CHAT, "", Incoming("stray.pdf", b"x"))).startswith("I did not know what that file is for.")
 
 
 def test_back_and_menu(bot, semester):
@@ -419,7 +581,7 @@ def test_long_lists_are_paged(bot, semester, sessions):
         for n in range(10, 22):
             s.add(Assignment(course=daa, lms_ref=f"155150:{n}", number=str(n), title=f"Old {n}",
                              deadline=NOW - timedelta(days=n), fingerprint="x", deadline_passed=True))
-    out = text(say(bot, "menu", "1", "9"))
+    out = text(say(bot, "menu", "1", "11"))
     assert "11. More (7 left)" in out
     page2 = text(say(bot, "11"))
     assert page2.count(" · due ") == 7

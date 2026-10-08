@@ -5,7 +5,16 @@ the top. Lists keep the numbering they were shown with, so an item that appears
 between two messages never shifts your choice. A chat idle for 10 minutes starts
 again at the main menu. Approve and Reject ask 1. Yes / 2. No first.
 
-Everything reads the database the poller keeps current; "Check the LMS now" asks the
+The main menu is short: your work (assignments, lab papers, what needs you, what is due),
+the courses (lecture notes, course plan, course outline and each course's settings) and the
+service's own settings. The same menu answers on WhatsApp and on Discord.
+
+Files: a lecture, an outline or a question file is sent as a document, the course plan as a
+picture of its table. A file you send is used for what the open screen says: your own
+submission, a reference for solving one assignment, or a reference for a course's theme.
+Lecture notes, plan and outline are read from the LMS when you ask; none of that uses Claude.
+
+Everything else reads the database the poller keeps current; "Check the LMS now" asks the
 worker for an immediate poll. Lab papers are listed by their exam window and never solved;
 their status is the LMS row colour: green submitted, white not submitted, red missed.
 """
@@ -23,11 +32,11 @@ from typing import Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
-from . import actions
+from . import actions, files
 from .solver.prompt import THEME_ARTIFACT, system_prompt
 from .db.models import TERMINAL_STATES, Artifact, Assignment, ChatSession, Course, CourseMode, Event, Job, JobState, utcnow
 from .kv import KeyValue
-from .lms.bahria_pages import LMS_TZ
+from .lms.bahria_pages import LMS_TZ, closes_at
 from .lms.models import PAPER_MISSED, PAPER_NOT_SUBMITTED, PAPER_SUBMITTED
 from .solver.pipeline import SIGNED_OUT_KEY
 from .solver.usage import UsageGuard
@@ -48,6 +57,8 @@ CATEGORIES = {
         ("remaining", "Remaining (open, not submitted)"),
         ("due_soon", "Due in the next 48 hours"),
         ("approval", "Waiting for your approval"),
+        ("go", "Waiting for your go-ahead"),
+        ("input", "Claude is waiting for your answer"),
         ("pipeline", "Queued or being solved"),
         ("needs_you", "Stopped, needs you"),
         ("submitted", "Submitted"),
@@ -68,6 +79,7 @@ CATEGORIES = {
 }
 LABELS = {k: v for cats in CATEGORIES.values() for k, v in cats}
 LABELS["due_soon"] = "Due or starting in the next 48 hours"
+ACTION = ("approval", "go", "input", "needs_you")  # what waits for you
 
 
 
@@ -75,6 +87,19 @@ LABELS["due_soon"] = "Due or starting in the next 48 hours"
 class Reply:
     text: str
     file: Path | None = None
+
+
+@dataclass(frozen=True)
+class Incoming:
+    """A file you sent in the chat."""
+
+    name: str
+    data: bytes
+
+
+class MaterialsError(Exception):
+    """Lecture notes, a plan or an outline could not be fetched; the message is for you."""
+
 
 THEME_LINK = re.compile(r"https://claude\.ai/(?:code/)?artifact/[A-Za-z0-9_-]{6,80}")
 
@@ -87,16 +112,20 @@ class Bot:
         now: Callable[[], datetime] = utcnow,
         login=None,  # ClaudeLogin: System status says whether Claude is signed in
         setup_url: str | None = None,
+        data_dir: Path | None = None,  # where files you send are kept; without it they are refused
+        materials=None,  # materials.Materials: lecture notes, course plan and outline from the LMS
     ) -> None:
         self.sessions = sessions
         self.kv = kv
         self.now = now
         self.login = login
         self.setup_url = setup_url
+        self.data_dir = data_dir
+        self.materials = materials
 
     # --- entry point ---
 
-    def handle(self, chat_id: str, text: str) -> list[Reply]:
+    def handle(self, chat_id: str, text: str, file: Incoming | None = None) -> list[Reply]:
         text = (text or "").strip()
         with self.sessions.begin() as s:
             chat = s.get(ChatSession, chat_id)
@@ -108,7 +137,7 @@ class Bot:
             if not stack or idle:
                 stack = [{"name": "main"}]
                 self._render(s, stack)  # a digit is read against the main menu
-            replies = self._dispatch(s, stack, text)
+            replies = self._file(s, stack, file) if file is not None else self._dispatch(s, stack, text)
             chat.state = json.dumps({"stack": stack})
             chat.updated_at = self.now()
             return replies
@@ -119,6 +148,20 @@ class Bot:
             del stack[1:]
             return [self._render(s, stack)]
         screen = stack[-1]
+
+        if screen["name"] == "file":  # waiting for a file
+            if text == "0":
+                stack.pop()
+                return [self._render(s, stack)]
+            return [Reply("Send the file as a document, or 0 to cancel.")]
+
+        if screen["name"] == "answer_text":  # free text: your answer to Claude's questions
+            stack.pop()
+            if text in ("", "0"):
+                return [self._render(s, stack)]
+            job = s.get(Job, screen["job"])
+            said = actions.answer(s, job, text, "the chat")[1] if job else "That job no longer exists."
+            return [Reply(said), self._render(s, stack)]
 
         if screen["name"] == "prompt_text":  # free text: the course's own system prompt
             if text in ("", "0"):
@@ -162,6 +205,60 @@ class Bot:
             return [self._render(s, stack, hint="Reply with one of the numbers below.")]
         return self._choose(s, stack, screen["options"][text])
 
+    # --- files you send ---
+
+    def _file(self, s: Session, stack: list[dict], file: Incoming) -> list[Reply]:
+        screen = stack[-1]
+        if self.data_dir is None:
+            return [Reply("Files cannot be kept on this server.")]
+        if len(file.data) > files.MAX_BYTES:
+            return [Reply(f"{file.name} is over {files.MAX_BYTES // 1048576} MB; nothing was saved.")]
+        if not file.data:
+            return [Reply("That file arrived empty; send it again as a document.")]
+        if screen["name"] == "file":
+            stack.pop()
+            return self._use_file(s, stack, screen["purpose"], screen.get("assignment") or screen.get("course"), file)
+        if screen["name"] == "theme":
+            return self._use_file(s, stack, "theme", screen["course"], file)
+        if screen["name"] == "item":
+            a = s.get(Assignment, screen["id"])
+            if a is not None and a.kind == ASSIGNMENT and not a.deadline_passed:
+                held = files.keep(self.data_dir / "inbox", f"{a.id}-{file.name}", file.data)
+                stack.append({"name": "file_what", "assignment": a.id, "path": str(held), "file": file.name})
+                return [self._render(s, stack)]
+        return [Reply("I did not know what that file is for. Open an assignment (to upload your own work or add a "
+                      "reference for solving it) or a course's Report theme, then send it.")]
+
+    def _use_file(self, s: Session, stack: list[dict], purpose: str, target: int, file: Incoming) -> list[Reply]:
+        if purpose == "theme":
+            course = s.get(Course, target)
+            folder = files.theme_dir(self.data_dir, course)
+            if len(files.listed(folder)) >= files.MAX_FILES:
+                return [Reply(f"{course.name} already has {files.MAX_FILES} theme reference files; remove them first."), self._render(s, stack)]
+            path = files.keep(folder, file.name, file.data)
+            return [Reply(f"Saved {path.name} as a theme reference for {course.name}. It is used with the theme artifact, "
+                          "from the next solve or redo."), self._render(s, stack)]
+        a = s.get(Assignment, target)
+        if a is None:
+            return [Reply("That assignment is no longer listed."), self._render(s, stack)]
+        if purpose == "ref":
+            folder = files.refs_dir(self.data_dir, a)
+            if len(files.listed(folder)) >= files.MAX_FILES:
+                return [Reply(f"{a.title} already has {files.MAX_FILES} reference files; remove them first."), self._render(s, stack)]
+            path = files.keep(folder, file.name, file.data)
+            return [Reply(f"Saved {path.name} as a reference for {a.title}. It is used from the next solve or redo."),
+                    self._render(s, stack)]
+        suffix = Path(file.name).suffix.lower()
+        if suffix not in actions.UPLOAD_TYPES:
+            return [Reply(f"The LMS takes {', '.join(actions.UPLOAD_TYPES)}, not {suffix or 'a file without a type'}. Nothing was saved."),
+                    self._render(s, stack)]
+        if not actions.can_upload_own(a):
+            return [Reply(f"{a.title} cannot take an upload now" + ("; delete the submission the LMS shows first." if a.submitted_file else ".")),
+                    self._render(s, stack)]
+        path = files.keep(files.own_dir(self.data_dir, a), file.name, file.data, only=True)
+        stack.append({"name": "confirm", "action": "own", "assignment": a.id, "path": str(path)})
+        return [self._render(s, stack)]
+
     # --- choices ---
 
     def _choose(self, s: Session, stack: list[dict], option: dict) -> list[Reply]:
@@ -177,6 +274,52 @@ class Bot:
             return [Reply("Checking the LMS now. Anything new arrives as its own message in a minute or two.")]
         if kind == "status":
             return [Reply(self._status(s))]
+        if kind in ("plan", "outline", "lecture"):
+            return self._material(s, stack, option)
+        if kind == "await_file":
+            stack.append({"name": "file", **{k: v for k, v in option.items() if k != "do"}})
+            what = {"own": f"your own work, as one file ({', '.join(actions.UPLOAD_TYPES)})",
+                    "ref": "the reference file", "theme": "the theme reference file"}[option["purpose"]]
+            return [Reply(f"Send {what} now, as a document. 0 cancels.")]
+        if kind == "held_file":  # a file sent on an assignment's screen: now you said what it is for
+            held = stack.pop()
+            path = Path(held["path"])
+            if not path.is_file():
+                return [Reply("That file is gone; send it again."), self._render(s, stack)]
+            file = Incoming(held["file"], path.read_bytes())
+            path.unlink()
+            return self._use_file(s, stack, option["purpose"], held["assignment"], file)
+        if kind == "refs_clear":
+            a = s.get(Assignment, option["assignment"])
+            for p in files.listed(files.refs_dir(self.data_dir, a)) if a and self.data_dir else []:
+                p.unlink()
+            return [Reply("The reference files were removed."), self._render(s, stack)]
+        if kind == "theme_files_clear":
+            course = s.get(Course, option["course"])
+            for p in files.listed(files.theme_dir(self.data_dir, course)) if self.data_dir else []:
+                p.unlink()
+            return [Reply(f"{course.name}'s theme reference files were removed."), self._render(s, stack)]
+        if kind == "go":
+            job = s.get(Job, option["job"])
+            return [Reply(actions.go(s, job, "the chat")[1] if job else "That job no longer exists."), self._render(s, stack)]
+        if kind == "answer_text":
+            stack.append({"name": "answer_text", "job": option["job"]})
+            return [Reply("Type your answer, in one message. To send a file as well, do that first with Add a reference file. 0 cancels.")]
+        if kind == "answer_none":
+            job = s.get(Job, option["job"])
+            return [Reply(actions.answer(s, job, "", "the chat")[1] if job else "That job no longer exists."), self._render(s, stack)]
+        if kind == "solve":
+            course = s.get(Course, option["course"])
+            said = actions.set_solve(course, option["solve"])[1]
+            stack.pop()
+            return [Reply(said), self._render(s, stack)]
+        if kind == "safe":
+            course = s.get(Course, option["course"])
+            course.safe = bool(option["on"])
+            said = (f"Safe mode is on for {course.name}: a report still waiting for your approval is uploaded when one hour is left."
+                    if course.safe else f"Safe mode is off for {course.name}.")
+            stack.pop()
+            return [Reply(said), self._render(s, stack)]
         if kind == "file":
             a = s.get(Assignment, option["assignment"])
             path = _question_file(a) if a else None
@@ -252,10 +395,29 @@ class Bot:
             if option["mode"] == CourseMode.AUTO:
                 stack.append({"name": "confirm", "action": "mode", "course": course.id, "mode": CourseMode.AUTO})
                 return [self._render(s, stack)]
-            course.mode = option["mode"]
+            said = actions.set_mode(course, option["mode"])[1]
             stack.pop()
-            return [Reply(f"{course.name} is now in {course.mode} mode."), self._render(s, stack)]
+            return [Reply(said), self._render(s, stack)]
         raise ValueError(f"Unknown option {kind}")
+
+    def _material(self, s: Session, stack: list[dict], option: dict) -> list[Reply]:
+        """A course plan (as a picture), a course outline or a lecture file, fetched from the LMS now."""
+        course = s.get(Course, option["course"])
+        if self.materials is None:
+            return [Reply("Course material is not available on this server.")]
+        try:
+            if option["do"] == "plan":
+                path = self.materials.plan(course)
+                return [Reply(f"Course plan · {course.name}", file=path) if path else
+                        Reply(f"No course plan is on the LMS yet for {course.name}."), *([] if path else [self._render(s, stack)])]
+            if option["do"] == "outline":
+                path = self.materials.outline(course)
+                return [Reply(f"Course outline · {course.name}", file=path) if path else
+                        Reply(f"No course outline is on the LMS yet for {course.name}."), *([] if path else [self._render(s, stack)])]
+            path = self.materials.lecture(course, option["week"], option["file"])
+            return [Reply(f"{course.name} · week {option['week']} · {option['title']}", file=path)]
+        except MaterialsError as e:
+            return [Reply(str(e))]
 
     def _set_model(self, model: str) -> str:
         model = model.strip()
@@ -275,6 +437,11 @@ class Bot:
             password = actions.reset_password(self.kv)
             where = self.setup_url.removesuffix("/setup") + "/login" if self.setup_url else "the web page"
             return f"The new web page password is:\n{password}\nSign in at {where}. Every browser was signed out; ADMIN_PASSWORD no longer works."
+        if action == "own":
+            a = s.get(Assignment, c["assignment"])
+            if a is None:
+                return "That assignment is no longer listed."
+            return actions.upload_own(s, a, c["path"], self.kv, self.now(), "the chat")[1]
         if action == "delete":
             a = s.get(Assignment, c["assignment"])
             if a is None:
@@ -316,20 +483,32 @@ class Bot:
         options = [
             (f"Assignments: {_summary(a, now)}", _open({"name": "section", "kind": ASSIGNMENT})),
             (f"Lab papers: {_paper_summary(p, now)}", _open({"name": "section", "kind": PAPER})),
-            (f"Waiting for your approval ({sum(_in(i, 'approval', now) for i in a)})",
-             _open({"name": "list", "kind": ASSIGNMENT, "category": "approval"})),
+            (f"Needs your action ({sum(_in(i, 'action', now) for i in a)})", _open({"name": "action"})),
             (f"Due or starting in the next 48 hours ({sum(_in(i, 'due_soon', now) for i in items)})",
              _open({"name": "list", "kind": None, "category": "due_soon"})),
-            ("By course", _open({"name": "courses"})),
-            ("Course modes (auto, approve, notify)", _open({"name": "modes"})),
+            ("Courses: lecture notes, plan, outline, settings", _open({"name": "courses"})),
+            ("Settings", _open({"name": "settings"})),
             ("Check the LMS now", {"do": "check"}),
             ("System status", {"do": "status"}),
+        ]
+        return "LMS BOT", [], options
+
+    def _screen_action(self, s: Session, screen: dict):
+        items = self._items(s, kind=ASSIGNMENT)
+        now = self.now()
+        options = [(f"{LABELS[key]} ({sum(_in(i, key, now) for i in items)})",
+                    _open({"name": "list", "kind": ASSIGNMENT, "category": key})) for key in ACTION]
+        return "Needs your action", [], options
+
+    def _screen_settings(self, s: Session, screen: dict):
+        options = [
             (f"Solver model: {self.kv.get(actions.MODEL_KEY) or 'default'} (change)", _open({"name": "model"})),
             (f"Solver effort: {self.kv.get(actions.EFFORT_KEY) or 'default'} (change)", _open({"name": "effort"})),
             (f"Daily solve limit: {'lifted for today' if self._cap_lifted() else 'on'} (change)", _open({"name": "cap"})),
+            ("Course settings: solving, uploading, safe mode, prompt, theme", _open({"name": "modes"})),
             ("Reset the web page password", {"do": "confirm", "action": "password"}),
         ]
-        return "LMS BOT", [], options
+        return "Settings", [], options
 
     def _cap_lifted(self) -> bool:
         return self.kv.get(actions.CAP_LIFTED_KEY) == self.now().astimezone(LMS_TZ).date().isoformat()
@@ -398,7 +577,7 @@ class Bot:
         if a.kind == PAPER and a.starts_at:
             lines.append(f"{_window(a)} ({_paper_timing(a, now)})")
         elif a.deadline:
-            lines.append(f"Due {_when(a.deadline)}" + (f" ({_relative(a.deadline, now)})" if not a.deadline_passed else ""))
+            lines.append(f"Due {_when(a.deadline)}" + (f" ({_due_words(a, now)})" if not a.deadline_passed else ""))
         else:
             lines.append("No deadline shown")
         lines.append(f"Status: {_status(a, now)}")
@@ -409,10 +588,17 @@ class Bot:
             if job:
                 state = actions.job_words(job) + (f": {job.last_error}" if job.state == JobState.NEEDS_HUMAN and job.last_error else "")
                 lines.append(f"Service: {state} (revision {job.revision})")
+                if job.state == JobState.NEEDS_INPUT:
+                    lines += ["Claude asks:"] + [f"• {q}" for q in _questions(job)]
             elif a.skipped_reason:
                 lines.append(f"Service: not handled; {a.skipped_reason.lower()}")
         else:
             lines.append("Lab papers are tracked only; the service never solves them.")
+        refs = files.listed(files.refs_dir(self.data_dir, a)) if self.data_dir and a.kind == ASSIGNMENT else []
+        if refs:
+            lines.append("Your reference files: " + ", ".join(p.name for p in refs))
+        if a.upload_requested_at:
+            lines.append("Your own file is being uploaded now.")
 
         options = []
         if _question_file(a):
@@ -422,15 +608,35 @@ class Bot:
                 if art.kind in ("pdf", "docx", "notebook", "receipt"):
                     label = {"pdf": "Send the solved PDF", "docx": "Send the DOCX", "notebook": "Send the notebook and code", "receipt": "Send the LMS receipt"}[art.kind]
                     options.append((label, {"do": "artifact", "artifact": art.id}))
+            if job.state == JobState.WAITING_GO and not a.deadline_passed:
+                options.append(("Solve it now", {"do": "go", "job": job.id}))
+            if job.state == JobState.NEEDS_INPUT and not a.deadline_passed:
+                options.append(("Answer Claude", {"do": "answer_text", "job": job.id}))
+                options.append(("Solve it without an answer", {"do": "answer_none", "job": job.id}))
             if job.state == JobState.AWAITING_APPROVAL:
-                options.append(("Approve and upload", {"do": "confirm", "action": "approve", "job": job.id}))
+                label = "Approve and upload" + (" (replaces what is on the LMS)" if a.submitted_file else "")
+                options.append((label, {"do": "confirm", "action": "approve", "job": job.id}))
                 options.append(("Reject", {"do": "confirm", "action": "reject", "job": job.id}))
             if actions.can_redo(job):
                 options.append(("Redo with a note", {"do": "note", "job": job.id}))
             options.append(("History", {"do": "history", "job": job.id}))
+        if a.kind == ASSIGNMENT and not a.deadline_passed and self.data_dir:
+            options.append(("Add a reference file for solving", {"do": "await_file", "purpose": "ref", "assignment": a.id}))
+            if refs:
+                options.append(("Remove the reference files", {"do": "refs_clear", "assignment": a.id}))
+        if actions.can_upload_own(a) and self.data_dir:
+            options.append(("Upload my own file", {"do": "await_file", "purpose": "own", "assignment": a.id}))
         if actions.can_delete(a):
             options.append(("Delete my submission from the LMS", {"do": "confirm", "action": "delete", "assignment": a.id}))
         return "", lines, options
+
+    def _screen_file_what(self, s: Session, screen: dict):
+        a = s.get(Assignment, screen["assignment"])
+        options = []
+        if a is not None and actions.can_upload_own(a):
+            options.append(("Upload it to the LMS as my own work", {"do": "held_file", "purpose": "own"}))
+        options.append(("Use it as a reference for solving this assignment", {"do": "held_file", "purpose": "ref"}))
+        return "", [f"You sent {screen['file']}. What is it for?"], options
 
     def _screen_courses(self, s: Session, screen: dict):
         now = self.now()
@@ -453,18 +659,73 @@ class Bot:
         options = [(f"Assignments: {_summary(a, now)}", _open({"name": "section", "kind": ASSIGNMENT, "course": c.id}))]
         if is_lab(c.name):
             options.append((f"Lab papers: {_paper_summary(p, now)}", _open({"name": "section", "kind": PAPER, "course": c.id})))
-        options.append((f"Mode: {c.mode} (change)", _open({"name": "mode_pick", "course": c.id})))
-        options.append((f"System prompt: {_prompt_words(c)} (change)", _open({"name": "prompt", "course": c.id})))
-        options.append((f"Report theme: {'its own' if c.theme else 'default'} (change)", _open({"name": "theme", "course": c.id})))
+        options.append(("Lecture notes", _open({"name": "lectures", "course": c.id})))
+        options.append(("Course plan", {"do": "plan", "course": c.id}))
+        options.append(("Course outline", {"do": "outline", "course": c.id}))
+        options.append((f"Settings: {_settings_words(c)}", _open({"name": "course_settings", "course": c.id})))
         return c.name, [], options
+
+    def _screen_course_settings(self, s: Session, screen: dict):
+        c = s.get(Course, screen["course"])
+        options = [
+            (f"Solving: {c.solve} (change)", _open({"name": "solve_pick", "course": c.id})),
+            (f"Uploading: {c.mode} (change)", _open({"name": "mode_pick", "course": c.id})),
+            (f"Safe mode: {'on' if c.safe else 'off'} (change)", _open({"name": "safe", "course": c.id})),
+            (f"System prompt: {_prompt_words(c)} (change)", _open({"name": "prompt", "course": c.id})),
+            (f"Report theme: {_theme_words(c, self.data_dir)} (change)", _open({"name": "theme", "course": c.id})),
+        ]
+        return f"{c.name} · settings", [], options
+
+    def _screen_solve_pick(self, s: Session, screen: dict):
+        c = s.get(Course, screen["course"])
+        options = [(f"{mode}: {words}", {"do": "solve", "course": c.id, "solve": mode}) for mode, words in actions.SOLVE_WORDS.items()]
+        return f"{c.name} · solving, now {c.solve}", ["When a new assignment appears in this course:"], options
+
+    def _screen_safe(self, s: Session, screen: dict):
+        c = s.get(Course, screen["course"])
+        lines = [f"Now: {'on' if c.safe else 'off'}.",
+                 "With safe mode on, a solved report that is still waiting for your approval is uploaded by itself when "
+                 "one hour is left to the deadline and nothing is submitted. A report for handwritten work goes up too."]
+        options = [("Turn safe mode off", {"do": "safe", "course": c.id, "on": False})] if c.safe else \
+                  [("Turn safe mode on", {"do": "safe", "course": c.id, "on": True})]
+        return f"{c.name} · safe mode", lines, options
+
+    def _screen_lectures(self, s: Session, screen: dict):
+        c = s.get(Course, screen["course"])
+        page = screen.get("page", 0)
+        if "items" not in screen:  # read from the LMS once, then keep the numbering
+            if self.materials is None:
+                return f"{c.name} · lecture notes", ["Course material is not available on this server."], []
+            try:
+                lectures = self.materials.lectures(c)
+            except MaterialsError as e:
+                return f"{c.name} · lecture notes", [str(e)], []
+            screen["items"] = [[f.week, f.title, f.filename] for lec in lectures for f in lec.files]
+            screen["notes"] = [f"Week {lec.week} video: {url}" for lec in lectures for url in lec.videos][:12]
+        items = screen["items"]
+        shown = items[page * PAGE:(page + 1) * PAGE]
+        options = [(f"Week {week} · {title} · {_short(name)}",
+                    {"do": "lecture", "course": c.id, "week": week, "title": title, "file": name}) for week, title, name in shown]
+        if len(items) > (page + 1) * PAGE:
+            options.append((f"More ({len(items) - (page + 1) * PAGE} left)",
+                            _open({"name": "lectures", "course": c.id, "page": page + 1, "items": items, "notes": []})))
+        lines = (["No lecture files are on the LMS yet."] if not items else ["Pick a file to get it here."]) + screen.get("notes", [])
+        return f"{c.name} · lecture notes", lines, options
 
     def _screen_theme(self, s: Session, screen: dict):
         c = s.get(Course, screen["course"])
+        sent = files.listed(files.theme_dir(self.data_dir, c)) if self.data_dir else []
         lines = [f"Now: {c.theme or 'the default theme, ' + THEME_ARTIFACT}",
                  "The design system artifact this course's reports are built from. Courses without their own use the default."]
+        if sent:
+            lines.append("Your reference files, used with the artifact: " + ", ".join(p.name for p in sent))
         options = [("Set this course's theme link", {"do": "theme_text", "course": c.id})]
         if c.theme:
             options.append(("Use the default theme", {"do": "theme_clear", "course": c.id}))
+        if self.data_dir:
+            options.append(("Send a theme reference file", {"do": "await_file", "purpose": "theme", "course": c.id}))
+        if sent:
+            options.append(("Remove the reference files", {"do": "theme_files_clear", "course": c.id}))
         return f"{c.name} · report theme", lines, options
 
     def _screen_prompt(self, s: Session, screen: dict):
@@ -481,24 +742,28 @@ class Bot:
         return f"{c.name} · system prompt", lines, options
 
     def _screen_modes(self, s: Session, screen: dict):
-        options = [(f"{c.name}: {c.mode}", _open({"name": "mode_pick", "course": c.id})) for c in self._courses(s)]
-        lines = ["auto uploads after the checks, approve waits for your yes, notify only sends the question."]
-        return "Course modes", lines, options
+        options = [(f"{c.name}: {_settings_words(c)}", _open({"name": "course_settings", "course": c.id})) for c in self._courses(s)]
+        return "Course settings", ["Pick a course."], options
 
     def _screen_mode_pick(self, s: Session, screen: dict):
         c = s.get(Course, screen["course"])
         options = [
             ("approve: send me the PDF, upload when I say yes", {"do": "mode", "course": c.id, "mode": CourseMode.APPROVE}),
             ("auto: upload after the checks, without asking", {"do": "mode", "course": c.id, "mode": CourseMode.AUTO}),
-            ("notify: only send me the question", {"do": "mode", "course": c.id, "mode": CourseMode.NOTIFY}),
         ]
-        return f"{c.name} · now {c.mode}", [], options
+        return f"{c.name} · uploading, now {c.mode}", ["When a report is solved in this course:"], options
 
     def _screen_confirm(self, s: Session, screen: dict):
         action = screen["action"]
         if action == "mode":
             c = s.get(Course, screen["course"])
-            question = [f"Switch {c.name} to auto?", "Work will be uploaded under your name without you reading it first."]
+            question = [f"Switch {c.name} to auto uploading?", "Work will be uploaded under your name without you reading it first."]
+        elif action == "own":
+            a = s.get(Assignment, screen["assignment"])
+            if a is None:
+                return "", ["That assignment is no longer listed."], [("OK", {"do": "no"})]
+            question = [f"Upload {Path(screen['path']).name} to the LMS for {a.title} now?",
+                        "It goes up as your submission, as it is. The service's own work on this assignment stops."]
         elif action == "password":
             question = ["Reset the web page password?", "A new one is made and sent here; the old one stops working and every browser is signed out."]
         elif action == "delete":
@@ -514,7 +779,8 @@ class Bot:
             a = job.assignment
             typed = ["The sheet asks for handwritten work; this uploads the typed report as it is."] * actions.handwritten(job)
             question = {
-                "approve": [f"Upload the solved PDF for {a.title} to the LMS now?", *typed],
+                "approve": [f"Upload the solved PDF for {a.title} to the LMS now?", *typed,
+                            *([f"The LMS shows {a.submitted_file}; it is replaced if the service uploaded it."] * bool(a.submitted_file))],
                 "reject": [f"Reject the solution for {a.title}? Nothing will be uploaded."],
                 "redo": [f"Redo {a.title} with this note?", f'"{screen.get("note", "")}"'],
             }[action]
@@ -615,10 +881,16 @@ def _in(a: Assignment, category: str, now: datetime) -> bool:
         return is_open and not a.submitted_file
     if category == "due_soon":
         return is_open and not a.submitted_file and a.deadline is not None and a.deadline - now <= DUE_SOON
-    if category == "approval":
-        return state == JobState.AWAITING_APPROVAL
+    if category == "action":
+        return any(_in(a, c, now) for c in ACTION)
+    if category == "approval":  # a redo of an uploaded report waits here too: approving replaces the upload
+        return state == JobState.AWAITING_APPROVAL and is_open
+    if category == "go":
+        return state == JobState.WAITING_GO and is_open and not a.submitted_file
+    if category == "input":
+        return state == JobState.NEEDS_INPUT and is_open and not a.submitted_file
     if category == "pipeline":
-        return state in PIPELINE
+        return state in PIPELINE and is_open and not a.submitted_file
     if category == "needs_you":
         return state == JobState.NEEDS_HUMAN and is_open and not a.submitted_file
     if category == "submitted":
@@ -702,7 +974,7 @@ def _paper_phase(a: Assignment, now: datetime) -> str:
 
 def _order(category: str):
     far = datetime.max.replace(tzinfo=LMS_TZ)
-    if category in ("remaining", "due_soon", "approval", "pipeline", "needs_you", "upcoming", "open_now"):
+    if category in ("remaining", "due_soon", "approval", "go", "input", "pipeline", "needs_you", "upcoming", "open_now"):
         return lambda a: (a.starts_at or a.deadline or far, a.id)
     return lambda a: (-(a.deadline or far).timestamp(), -a.id)
 
@@ -715,6 +987,37 @@ def _summary(items: list[Assignment], now: datetime) -> str:
     if not left:
         return "nothing remaining"
     return f"{left} remaining" + (f", {soon} due soon" if soon else "")
+
+
+def _settings_words(c: Course) -> str:
+    return f"solving {c.solve}, uploading {c.mode}, safe mode {'on' if c.safe else 'off'}"
+
+
+def _theme_words(c: Course, data_dir: Path | None) -> str:
+    sent = len(files.listed(files.theme_dir(data_dir, c))) if data_dir else 0
+    return ("its own" if c.theme else "default") + (f", {sent} reference file{'s' * (sent != 1)}" if sent else "")
+
+
+def _questions(job: Job) -> list[str]:
+    try:
+        return [str(q) for q in json.loads(job.summary or "{}").get("questions") or []][:8]
+    except ValueError:
+        return []
+
+
+def _short(name: str, limit: int = 38) -> str:
+    """'Week-4-NFA-15092026-012828pm.pptx' -> 'Week-4-NFA.pptx': the LMS adds upload stamps to names."""
+    stem, dot, ext = name.rpartition(".")
+    stem = re.sub(r"(-+\d+-+)?(-\d{8}-\d{6}[ap]m)+$", "", stem if dot else name)
+    stem = stem if len(stem) <= limit else stem[:limit - 1] + "…"
+    return f"{stem}.{ext}" if dot else stem
+
+
+def _due_words(a: Assignment, now: datetime) -> str:
+    """Past the posted time the LMS still takes an upload until the end of that day."""
+    if a.deadline > now:
+        return _relative(a.deadline, now)
+    return f"the posted time has passed; the LMS still takes it until {_when(closes_at(a.deadline))}"
 
 
 def _prompt_words(c: Course) -> str:
@@ -758,8 +1061,11 @@ def _line(a: Assignment, now: datetime, *, with_course: bool) -> str:
     elif a.deadline_passed:
         bits.append("missed")
     job = _job(a)
-    if job and job.state == JobState.AWAITING_APPROVAL:
-        bits.append("waiting for you")
+    if job and not a.deadline_passed:
+        tag = {JobState.AWAITING_APPROVAL: "new version waiting for you" if a.submitted_file else "waiting for you",
+               JobState.WAITING_GO: "waiting for your go-ahead", JobState.NEEDS_INPUT: "Claude asked you"}.get(job.state)
+        if tag:
+            bits.append(tag)
     return " · ".join(bits)
 
 

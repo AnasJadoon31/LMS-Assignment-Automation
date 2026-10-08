@@ -21,8 +21,11 @@ SUMMARY_SCHEMA = {
     "additionalProperties": False,
     "required": ["status", "kind", "number", "title", "course_code", "course_name", "exercises", "checked"],
     "properties": {
-        "status": {"type": "string", "enum": ["done", "handwritten", "blocked"],
-                   "description": "handwritten: the sheet asks for handwritten work; the report is the full solution for the student to copy."},
+        "status": {"type": "string", "enum": ["done", "handwritten", "blocked", "needs_input"],
+                   "description": "handwritten: the sheet asks for handwritten work; the report is the full solution for the student to copy. "
+                                  "needs_input: you asked the student something before solving (only when you were told you may)."},
+        "questions": {"type": "array", "items": {"type": "string"},
+                      "description": "What you need from the student, when status is needs_input: short, one thing each."},
         "blocked_reason": {"type": "string", "description": "Why this cannot be done here, when status is blocked."},
         "kind": {"type": "string", "enum": ["lab", "assignment"]},
         "number": {"type": "integer", "description": "The lab or assignment number on the sheet."},
@@ -81,6 +84,23 @@ Rules:
 - Operating Systems Lab work: always solve it for real on this server, and attach the real screenshots from nano and the terminal, with the name anas@server. Execute every example in the lab sheet as well, not only the tasks, and show each one's real screenshot.
 - If the sheet says the work must be handwritten, still solve all of it completely and build the report the same way, as the worked solution the student will copy by hand; finish with status handwritten.
 - If the work cannot be done here (it needs hardware, a group, a website login, or a tool that cannot be installed), stop and give the reason with status blocked."""
+
+
+ASK_FIRST = """Before you solve, decide whether you can do all of it well on your own. If something only the student can give is missing (a reference file, data or a document the sheet points to, a choice the sheet leaves open, a format the teacher asked for in class), do not guess and do not build a report: stop with status needs_input and list what you need in questions. If nothing is missing, solve it without asking."""
+NEVER_ASK = """Do not ask the student anything: where the sheet leaves something open, make the sensible choice and say which in notes_for_student."""
+
+
+def with_extras(system: str, work: str, *, ask: bool, theme_files: list[str], references: list[str]) -> str:
+    """What changes from one run to the next: whether Claude may ask first, and the files you sent."""
+    lines = [system, "", ASK_FIRST if ask else NEVER_ASK]
+    if theme_files:
+        lines.append(f"The student also sent theme reference files for this course, in {work}/in/theme-reference: "
+                     f"{', '.join(theme_files)}. Read them. The report still follows the theme artifact; where these files "
+                     "show a format the artifact does not have, or a different one the teacher wants, follow the files.")
+    if references:
+        lines.append(f"The student sent reference files for this assignment, in {work}/in/reference: {', '.join(references)}. "
+                     "Read them before solving and use them.")
+    return "\n".join(lines)
 
 
 def course_prompt(built_in: str, own: str | None, replaces: bool) -> str:

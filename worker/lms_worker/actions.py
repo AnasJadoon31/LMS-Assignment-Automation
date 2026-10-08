@@ -17,7 +17,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from .db.models import Assignment, Course, CourseMode, Event, Job, JobState
+from .db.models import Assignment, Course, CourseMode, Event, Job, JobState, SolveMode
 from .kv import KeyValue
 
 POLL_NOW_KEY = "poll_requested"  # the watcher's
@@ -48,6 +48,8 @@ JOB_WORDS = {
     JobState.CONFIRMED: "uploaded by the service",
     JobState.NEEDS_HUMAN: "stopped",
     JobState.REJECTED: "rejected by you",
+    JobState.WAITING_GO: "not solved; waiting for your go-ahead",
+    JobState.NEEDS_INPUT: "not solved; Claude is waiting for your answer",
     JobState.SUPERSEDED: "replaced by a newer revision",
     JobState.HANDWRITTEN: "solved; handwritten, sent to you to copy",  # older jobs only
 }
@@ -55,8 +57,13 @@ HANDWRITTEN_WORDS = "solved; the sheet asks for handwritten work; waiting for yo
 MODE_WORDS = {
     CourseMode.APPROVE: "send me the PDF, upload when I say yes",
     CourseMode.AUTO: "upload after the checks, without asking",
-    CourseMode.NOTIFY: "only send me the question",
 }
+SOLVE_WORDS = {
+    SolveMode.BYPASS: "always solve, never ask me",
+    SolveMode.MANUAL: "ask me each time before solving",
+    SolveMode.AUTO: "Claude solves, or asks me first when it needs something",
+}
+UPLOAD_TYPES = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip")  # what the LMS takes
 
 
 def _hash(password: str, salt: str) -> str:
@@ -138,6 +145,42 @@ def redo(s: Session, job: Job, note: str, via: str) -> tuple[bool, str]:
     return True, f"Redo queued for {a.title}. The new PDF comes to you before anything is uploaded."
 
 
+def go(s: Session, job: Job, via: str) -> tuple[bool, str]:
+    """Manual solving: your go-ahead."""
+    a = job.assignment
+    if job.state != JobState.WAITING_GO:
+        return False, f"Nothing changed: {a.title} is {JOB_WORDS.get(job.state, job.state)} now."
+    job.attempts = 0
+    move(s, job, JobState.DOWNLOADED, f"go-ahead on {via}")
+    return True, f"Queued: {a.title} will be solved. The PDF comes to you when it is ready."
+
+
+def answer(s: Session, job: Job, text: str, via: str) -> tuple[bool, str]:
+    """Your answer to what Claude asked; empty means solve it without one."""
+    a = job.assignment
+    if job.state != JobState.NEEDS_INPUT:
+        return False, f"Nothing changed: {a.title} is {JOB_WORDS.get(job.state, job.state)} now."
+    job.note = (text or "").strip()[:2000] or None
+    job.attempts = 0
+    move(s, job, JobState.DOWNLOADED, f"answered on {via}: {job.note}" if job.note else f"told to go on without an answer, on {via}")
+    return True, f"Thanks. {a.title} is queued again; the PDF comes to you when it is ready."
+
+
+def can_upload_own(a: Assignment) -> bool:
+    """Open, and the LMS shows nothing submitted: its Submit button is there."""
+    return a.kind == "assignment" and not a.deadline_passed and not a.submitted_file and a.upload_requested_at is None
+
+
+def upload_own(s: Session, a: Assignment, path: str, kv: KeyValue, now: datetime, via: str) -> tuple[bool, str]:
+    if not can_upload_own(a):
+        return False, f"Nothing changed: {a.title} cannot take an upload now."
+    a.own_file, a.upload_requested_at = path, now
+    job = a.jobs[-1] if a.jobs else None
+    s.add(Event(job_id=job.id if job else None, detail=f"upload of your own file requested on {via}: {path.rsplit('/', 1)[-1]}"))
+    kv.set(POLL_NOW_KEY, now.isoformat())
+    return True, f"Uploading your file for {a.title} now; a message will confirm it."
+
+
 def can_delete(a: Assignment) -> bool:
     """The LMS shows a submission and the assignment is still open, so the LMS would offer Delete."""
     return a.kind == "assignment" and bool(a.submitted_file) and not a.deadline_passed and a.delete_requested_at is None
@@ -159,4 +202,11 @@ def set_mode(course: Course, mode: str) -> tuple[bool, str]:
     if mode not in MODE_WORDS:
         return False, f"Unknown mode {mode}"
     course.mode = mode
-    return True, f"{course.name} is now in {mode} mode."
+    return True, f"{course.name}: uploading is now {mode} ({MODE_WORDS[mode]})."
+
+
+def set_solve(course: Course, solve: str) -> tuple[bool, str]:
+    if solve not in SOLVE_WORDS:
+        return False, f"Unknown solving mode {solve}"
+    course.solve = solve
+    return True, f"{course.name}: solving is now {solve} ({SOLVE_WORDS[solve]}), from the next new assignment."

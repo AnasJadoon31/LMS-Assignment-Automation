@@ -104,6 +104,10 @@ class Webhook(BaseModel):
     url: str
 
 
+class Token(BaseModel):
+    token: str
+
+
 class Number(BaseModel):
     number: str | None = None
 
@@ -111,7 +115,7 @@ class Number(BaseModel):
 def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | None, admin: EvolutionAdmin | None,
                  drive: GoogleDrive | None = None, discord: DiscordSetting | None = None, public_url: str | None = None,
                  clock=time.time, auth: Auth | None = None, whatsapp: WhatsAppNumber | None = None,
-                 sender: Notifier | None = None) -> APIRouter:
+                 sender: Notifier | None = None, discord_bot=None) -> APIRouter:
     router = APIRouter()
     auth = auth or Auth(password, secret_key, clock)
     failures: dict[str, list[float]] = defaultdict(list)
@@ -196,7 +200,28 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
             url = discord.url()
             out["discord"] = {"available": True, "on": bool(url), "source": discord.source(), "masked": masked(url),
                               "editable": discord.editable}
+        out["discord_bot"] = {"available": discord_bot is not None, **(discord_bot.status() if discord_bot else {})}
         return out
+
+    @router.post("/api/setup/discord-bot")
+    def discord_bot_save(request: Request, body: Token) -> dict:
+        from .discord_bot import DiscordBotError
+
+        guard(request)
+        if discord_bot is None:
+            raise HTTPException(status_code=503, detail="Discord chat needs APP_SECRET_KEY")
+        try:
+            discord_bot.save(body.token)
+        except DiscordBotError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {"ok": True}
+
+    @router.post("/api/setup/discord-bot/off")
+    def discord_bot_off(request: Request) -> dict:
+        guard(request)
+        if discord_bot is not None:
+            discord_bot.off()
+        return {"ok": True}
 
     def _discord() -> DiscordSetting:
         if discord is None:
@@ -496,8 +521,18 @@ SETUP_BODY = """
   <div class="muted" id="d-detail"></div>
   <div class="row"><input id="d-url" autocomplete="off" placeholder="https://discord.com/api/webhooks/…"><button id="d-save">Save</button></div>
   <div class="row"><button class="secondary" id="d-test" hidden>Send a test message</button><button class="secondary" id="d-off" hidden>Turn off</button></div>
-  <p class="muted">Discord gets the same alerts and files as WhatsApp; approvals stay on WhatsApp and this page. In Discord: channel settings, Integrations, Webhooks, New Webhook, Copy Webhook URL.</p>
+  <p class="muted">The webhook gets the same alerts and files as WhatsApp. In Discord: channel settings, Integrations, Webhooks, New Webhook, Copy Webhook URL. To use the menu from Discord, set up Discord chat below.</p>
   <div class="err" id="d-err"></div>
+</div>
+<div class="card" id="discord-bot">
+  <h2>Discord chat</h2>
+  <div>Bot: <span class="state" id="b-state">checking…</span></div>
+  <div class="muted" id="b-detail"></div>
+  <div class="code" id="b-code" hidden></div>
+  <div class="row"><input id="b-token" type="password" autocomplete="off" placeholder="Bot token"><button id="b-save">Save</button></div>
+  <div class="row"><button class="secondary" id="b-off" hidden>Turn off</button></div>
+  <p class="muted">Use the same menu in a Discord direct message, files included. At discord.com/developers/applications: New Application, then Bot, Reset Token and paste it here. Under Installation choose Guild Install with the bot scope, open the install link and add the bot to a server you are in. Then open a direct message with the bot and send it the code shown here. It answers only the person who sent the code.</p>
+  <div class="err" id="b-err"></div>
 </div>
 """
 
@@ -537,7 +572,23 @@ async function refresh() {
   $("d-detail").textContent = d.on ? d.masked + (d.source === "env" ? " · from DISCORD_WEBHOOK_URL" : " · saved here") : "Messages go to WhatsApp only.";
   $("d-test").hidden = !d.on; $("d-off").hidden = !d.on || !d.editable;
   $("d-save").textContent = d.on ? "Replace" : "Save";
+  const b = s.discord_bot || {};
+  $("b-state").textContent = !b.available ? "not available" : !b.on ? "off" : b.error ? "not connected" : b.linked ? "linked" : "waiting for your code";
+  $("b-state").className = "state " + (b.on && b.linked && !b.error ? "ok" : "bad");
+  $("b-detail").textContent = b.error ? b.error : !b.on ? "The menu answers on WhatsApp only."
+    : b.linked ? "Bot " + (b.name || "") + " answers " + (b.owner || "you") + " in direct messages."
+    : "Send this code to the bot " + (b.name || "") + " in a direct message:";
+  $("b-code").hidden = !b.code; $("b-code").textContent = b.code || "";
+  $("b-off").hidden = !b.on; $("b-save").textContent = b.on ? "Replace" : "Save";
 }
+$("b-save").onclick = async () => {
+  $("b-err").textContent = ""; busy($("b-save"), true);
+  try { await call("/api/setup/discord-bot", { token: $("b-token").value }); $("b-token").value = ""; await refresh(); }
+  catch (e) { $("b-err").textContent = e.message; }
+  busy($("b-save"), false);
+};
+$("b-off").onclick = async () => { if (!confirm("Turn Discord chat off and forget the bot token?")) return;
+  try { await call("/api/setup/discord-bot/off", {}); await refresh(); } catch (e) { $("b-err").textContent = e.message; } };
 $("g-connect").onclick = () => { location.href = "/setup/google/start"; };
 $("g-off").onclick = async () => { if (!confirm("Stop saving reports to Google Drive?")) return;
   try { await call("/api/setup/google/disconnect", {}); await refresh(); } catch (e) { $("g-err").textContent = e.message; } };
@@ -600,5 +651,5 @@ $("d-test").onclick = async () => {
 };
 $("d-off").onclick = async () => { if (!confirm("Stop sending messages to Discord?")) return;
   try { await call("/api/setup/discord/off", {}); await refresh(); } catch (e) { $("d-err").textContent = e.message; } };
-refresh(); setInterval(refresh, 30000);
+refresh(); setInterval(refresh, 15000);
 """

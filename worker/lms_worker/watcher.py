@@ -17,6 +17,12 @@ Rules (from the spec):
   paper file the moment its window opens (the scheduler polls at the start time).
   The row colour is the paper's status: green submitted, white not submitted, red
   missed. A paper that turns green or red gets one message; either ends its reminders.
+- A course in manual solving keeps a new assignment waiting for your go-ahead. A course in
+  safe mode has a report that still waits for your approval uploaded when one hour is left.
+- Your own file, sent in the chat, is uploaded through the same Submit form, on your request.
+- The LMS keeps the Submit button until the end of the deadline's day, whatever time the
+  teacher set. The posted time stays the deadline for reminders and safe mode; uploads and
+  deletes you ask for are tried for as long as the LMS shows the button.
 - Every poll records what the LMS shows for each item (submitted file, open or
   closed, marks), sends "marks posted" when marks appear, and reminds you 24 hours
   and 2 hours before an assignment deadline that has nothing submitted.
@@ -47,13 +53,14 @@ from .db.models import (
     Event,
     Job,
     JobState,
+    SolveMode,
     utcnow,
 )
 from .kv import KeyValue
 from .lms import models as lms
 from .lms.models import PAPER, PAPER_MISSED, PAPER_NOT_SUBMITTED, PAPER_SUBMITTED
 from .lms.adapter import LMSAdapter
-from .lms.bahria_pages import LMS_TZ
+from .lms.bahria_pages import LMS_TZ, closes_at
 from .lms.errors import (AlreadySubmitted, BadCredentials, ContractBroken, LMSError, LoginError, NothingSubmitted,
                          ReloginPaused, SessionExpired)
 
@@ -67,7 +74,8 @@ DOWNLOAD_ALERT_AFTER = 3
 ANNOUNCED_EARLY = "announced without the question file"
 LMS_DOWN_ALERT_AFTER = 3
 # Stopping a job the service has not worked on yet is not worth a message
-QUIET_STATES = {JobState.DETECTED, JobState.DOWNLOADED}
+QUIET_STATES = {JobState.DETECTED, JobState.DOWNLOADED, JobState.WAITING_GO}
+SAFE_WITHIN = timedelta(hours=1)  # safe mode: a waiting report goes up this long before the deadline
 REMINDER_HOURS = (24, 2)  # before an assignment's deadline
 PAPER_REMINDER_HOURS = (24, 1)  # before a paper's start
 OPEN_RETRY = timedelta(seconds=60)  # while an open paper's file is not delivered yet
@@ -191,6 +199,8 @@ class Watcher:
                 )
         result.downloaded = self._download_pending(result)
         self._delete_pending(result)
+        self._upload_own_pending(result)
+        self._safe_mode(result)
         self._submit_pending(result)
         self._announce_papers(result)
         self._remind(result)
@@ -410,8 +420,14 @@ class Watcher:
                 job.last_error = None
                 a.question_path = str(paths[0]) if paths else None
                 a.announced_at = self.now()
-                self._transition(s, job, JobState.DOWNLOADED, f"downloaded {len(paths)} file(s)")
+                manual = a.course.solve == SolveMode.MANUAL
+                if manual:
+                    self._transition(s, job, JobState.WAITING_GO, f"downloaded {len(paths)} file(s); solving waits for your go-ahead")
+                else:
+                    self._transition(s, job, JobState.DOWNLOADED, f"downloaded {len(paths)} file(s)")
                 text = _announce(a, job, self._detected_detail(s, job), file_only=self._announced_early(s, job))
+                if manual:
+                    text += "\nSolving is manual for this course. To have it solved, reply menu, then Needs your action."
                 self.outbox.queue(s, "assignment", text, file=paths[0] if paths else None, job_id=job.id)
                 s.commit()
                 done += 1
@@ -451,7 +467,7 @@ class Watcher:
                 where = f"{a.course.name} · {a.title}"
                 refused = None
                 try:
-                    if a.deadline_passed or (a.deadline is not None and a.deadline <= self.now()):
+                    if self._closed(a):
                         raise LMSError("The deadline has passed, so the LMS no longer lets a submission be deleted")
                     filename = self.adapter.delete_submission(_meta(a))
                 except (ContractBroken, SessionExpired, httpx.HTTPError):
@@ -506,11 +522,11 @@ class Watcher:
                 pdf = next((p for p in pdfs if p.is_file()), None)
                 if pdf is None:
                     self._stop(s, job, "The solved PDF is missing")
-                elif a.deadline_passed or (a.deadline is not None and a.deadline <= self.now()):
+                elif self._closed(a):
                     self._stop(s, job, "The deadline passed before the upload")
                 else:
                     try:
-                        receipt = self.adapter.submit(_meta(a), pdf)
+                        receipt = self._upload(a, pdf)
                     except AlreadySubmitted as e:
                         if job.attempts and e.filename:  # an earlier try went through before it could be confirmed
                             receipt = lms.Receipt(filename=e.filename, submitted_at=self.now())
@@ -545,8 +561,91 @@ class Watcher:
                     result.uploaded += 1
                 s.commit()
 
+    def _closed(self, a: Assignment) -> bool:
+        """Closed on the LMS at the last poll, or past the end of the deadline's day."""
+        return a.deadline_passed or (a.deadline is not None and self.now() > closes_at(a.deadline))
+
+    def _upload(self, a: Assignment, pdf: Path) -> lms.Receipt:
+        """A report that replaces the service's own earlier upload (a redo) takes its place:
+        the old one is deleted first. A submission the service did not make is never touched."""
+        meta = _meta(a)
+        try:
+            return self.adapter.submit(meta, pdf)
+        except AlreadySubmitted as e:
+            own = {j.lms_submission_file for j in a.jobs if j.lms_submission_file}
+            if not e.filename or e.filename not in own:
+                raise
+            self.adapter.delete_submission(meta)
+            return self.adapter.submit(meta, pdf)
+
+    def _safe_mode(self, result: PollResult) -> None:
+        """Safe mode: with an hour or less to the posted deadline, nothing submitted and a
+        report still waiting for your approval, the report goes up without waiting."""
+        now = self.now()
+        with self.sessions() as s:
+            for job in s.scalars(self._safe_waiting().where(Assignment.deadline <= now + SAFE_WITHIN)).all():
+                a = job.assignment
+                if job is not a.jobs[-1]:
+                    continue
+                job.attempts = 0
+                self._transition(s, job, JobState.SUBMITTING, "safe mode: an hour or less is left, uploading without waiting")
+                self.outbox.queue(s, "safe", f"Safe mode: {a.course.name} · {a.title}\nDue {_pkt(a.deadline)} and nothing is "
+                                  "submitted, so the report that was waiting for your approval is being uploaded now.", job_id=job.id)
+            s.commit()
+
+    @staticmethod
+    def _safe_waiting():
+        return (select(Job).join(Job.assignment).join(Assignment.course)
+                .where(Job.state == JobState.AWAITING_APPROVAL, Course.safe.is_(True), Assignment.deadline_passed.is_(False),
+                       Assignment.submitted_file.is_(None), Assignment.deadline.is_not(None)).order_by(Job.id))
+
+    def _upload_own_pending(self, result: PollResult) -> None:
+        """Your own file, sent in the chat: uploaded through the row's Submit form. Asked once,
+        tried once. The service's own work on that assignment stops; a solved report is kept."""
+        with self.sessions() as s:
+            rows = s.scalars(
+                select(Assignment).where(Assignment.upload_requested_at.is_not(None)).order_by(Assignment.id)
+                .with_for_update(skip_locked=True)
+            ).all()
+            for a in rows:
+                job = a.jobs[-1] if a.jobs else None
+                job_id = job.id if job else None
+                where = f"{a.course.name} · {a.title}"
+                path = Path(a.own_file or "")
+                refused = receipt = None
+                try:
+                    if not a.own_file or not path.is_file():
+                        raise LMSError("The file you sent is no longer on the server; send it again")
+                    receipt = self.adapter.submit(_meta(a), path)
+                except (ContractBroken, SessionExpired, httpx.HTTPError):
+                    s.commit()  # the request stays for the next poll
+                    raise
+                except NotImplementedError:
+                    refused = "Uploading is not available here; upload it on the LMS."
+                except AlreadySubmitted as e:
+                    refused = f"The LMS already shows {e.filename or 'a submission'}. Delete it first, then send your file again."
+                except LMSError as e:
+                    refused = str(e)
+                a.upload_requested_at = None
+                if refused:
+                    result.errors.append(f"{a.title}: your file was not uploaded: {refused}")
+                    s.add(Event(job_id=job_id, detail=f"your file was not uploaded: {refused}"))
+                    self.outbox.queue(s, "upload", f"Not uploaded: {where}\n{refused}", job_id=job_id)
+                    s.commit()
+                    continue
+                a.submitted_file = receipt.filename
+                if job and job.state not in TERMINAL_STATES:
+                    job.last_error = "You uploaded your own file"
+                    self._transition(s, job, JobState.NEEDS_HUMAN, f"you uploaded your own file ({path.name}); the service's work on this one stopped")
+                else:
+                    s.add(Event(job_id=job_id, detail=f"your own file {path.name} uploaded as {receipt.filename}"))
+                self.outbox.queue(s, "receipt", f"Uploaded your file: {where}\nThe LMS shows {receipt.filename}.", job_id=job_id)
+                result.uploaded += 1
+                s.commit()
+
     def _confirm(self, s: Session, job: Job, receipt: lms.Receipt) -> None:
         a = job.assignment
+        a.submitted_file = receipt.filename  # what the LMS shows now; the menu's counts follow at once
         job.lms_submission_file = receipt.filename
         job.last_error = None
         if receipt.screenshot is not None:
@@ -619,7 +718,8 @@ class Watcher:
                     Assignment.starts_at.is_not(None),
                 )
             ).all()
-        times = []
+            safe = [j.assignment.deadline - SAFE_WITHIN for j in s.scalars(self._safe_waiting()).all()]
+        times = [t + timedelta(seconds=15) for t in safe if t > now]  # safe mode's moment
         for a in papers:
             if a.starts_at > now:
                 times.append(a.starts_at + timedelta(seconds=15))
@@ -790,7 +890,12 @@ def _reminder(a: Assignment, now: datetime) -> str:
     lines = [f"Assignment due in {_left(a.deadline - now)}, nothing submitted", a.course.name, a.title, f"Due {_pkt(a.deadline)}"]
     latest = a.jobs[-1] if a.jobs else None
     if latest and latest.state == JobState.AWAITING_APPROVAL:
-        lines.append("The solved PDF is waiting for your approval.")
+        lines.append("The solved PDF is waiting for your approval."
+                     + (" Safe mode uploads it when one hour is left." if a.course.safe else ""))
+    elif latest and latest.state == JobState.WAITING_GO:
+        lines.append("It is not solved: solving is manual for this course and waits for your go-ahead.")
+    elif latest and latest.state == JobState.NEEDS_INPUT:
+        lines.append("It is not solved: Claude is waiting for your answer.")
     return "\n".join(lines)
 
 

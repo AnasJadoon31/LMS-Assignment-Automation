@@ -10,6 +10,7 @@ Evolution v2 endpoints used (all with the global `apikey` header from EVOLUTION_
   GET    /instance/connect/{instance}[?number=] -> {code, base64, pairingCode, count}
   DELETE /instance/logout/{instance}
   GET    /instance/fetchInstances?instanceName=
+  POST   /chat/getBase64FromMediaMessage/{instance}  {message: {key, message}} -> {base64}: a file you sent
   POST   /webhook/set/{instance}                {webhook: {enabled, url, headers, events: [MESSAGES_UPSERT]}}
 A pairing code is only issued when a connection starts with a number, so a pending QR
 session is logged out first.
@@ -138,6 +139,17 @@ class EvolutionAdmin:
                 }
             },
         )
+
+    def media(self, data: dict) -> bytes:
+        """The file of an incoming media message (the webhook's `data`), decrypted by Evolution."""
+        import base64
+
+        r = self._request("POST", f"/chat/getBase64FromMediaMessage/{self.cfg.instance}",
+                          json={"message": {"key": data.get("key") or {}, "message": data.get("message") or {}}, "convertToMp4": False})
+        encoded = r.json().get("base64")
+        if not encoded:
+            raise WhatsAppError("Evolution API returned no file for that message")
+        return base64.b64decode(encoded)
 
     def unlink(self) -> None:
         if self.state().state in ("open", "connecting"):

@@ -66,10 +66,10 @@ def test_course_list_with_modes_and_counts(client, semester):
     by_name = {c["name"]: c for c in d["courses"]}
     assert by_name["DAA"]["counts"] == {"remaining": 2, "due_soon": 1, "approval": 1, "needs_you": 0, "papers_coming": 0}
     assert by_name["CA Lab"]["counts"]["papers_coming"] == 1 and by_name["CA Lab"]["lab"] is True
-    assert by_name["DAA"]["mode"] == "approve" and set(d["modes"]) == {"approve", "auto", "notify"}
+    assert by_name["DAA"]["mode"] == "approve" and set(d["modes"]) == {"approve", "auto"}
 
     assert client.post(f"/api/courses/{semester['daa']}/mode", headers=H, json={"mode": "auto"}).json() == {
-        "message": "DAA is now in auto mode."}
+        "message": "DAA: uploading is now auto (upload after the checks, without asking)."}
     assert client.post(f"/api/courses/{semester['daa']}/mode", headers=H, json={"mode": "sometimes"}).status_code == 400
 
 

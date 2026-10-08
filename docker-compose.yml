@@ -3,8 +3,9 @@
 # neither. Set DATABASE_URL, EVOLUTION_API_URL, EVOLUTION_API_KEY and API_INTERNAL_URL.
 # Deploy it as a Docker Compose resource; values come from the resource's environment variables.
 #
-# Only the worker talks to the LMS. The api answers your WhatsApp messages through the
-# menu and serves the setup page (/setup): give it a domain (port 8000; on Coolify, in the
+# The worker polls the LMS, logs in, uploads and deletes. The api answers your WhatsApp and
+# Discord messages through the menu, reads lecture notes, plans and outlines from the LMS with
+# the worker's session, and serves the setup page (/setup): give it a domain (port 8000; on Coolify, in the
 # api service's Domains), open it, sign Claude in and link WhatsApp there. Nothing else is
 # reachable from outside. Each assignment is solved in a throwaway container from the
 # solver image, started through the Docker socket proxy, on its own network, which the worker
@@ -70,7 +71,8 @@ services:
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
       - TZ=Asia/Karachi
     volumes:
-      - artifacts:/data:ro
+      # Writable: files you send in the chat, and lectures fetched for you, are kept here
+      - artifacts:/data
       - claude-home:/claude-home
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]

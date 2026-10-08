@@ -9,7 +9,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import select
 
-from lms_worker import actions
+from lms_worker import actions, files
 from lms_worker.claude_login import LoginStatus
 from lms_worker.db import Artifact, Assignment, Course, Event, Job, JobState
 from lms_worker.kv import DbKV
@@ -265,10 +265,11 @@ def test_a_course_prompt_is_added_to_or_replaces_the_built_in_one(solver, sandbo
     solver.run_once()
     system = sandbox.runs[0]["job"]["system"]
     if replaces:
-        assert system == "Execute every example too."
+        assert system.startswith("Execute every example too.\n\nDo not ask the student anything")
+        assert "You solve a university assignment" not in system
     else:
         assert system.startswith("You solve a university assignment") and "The work folder is /work" in system
-        assert system.endswith("The student's own instructions for this course; follow them too:\nExecute every example too.")
+        assert "The student's own instructions for this course; follow them too:\nExecute every example too." in system
         assert "Execute every example in the lab sheet as well" in system  # the built-in OS Lab rule
 
 
@@ -435,14 +436,78 @@ def test_a_run_that_finds_claude_signed_out_does_not_count(solver, sandbox, chan
     assert len(sandbox.runs) == 1
 
 
-def test_only_open_assignments_in_approve_or_auto_mode_are_solved(solver, sandbox, sessions, tmp_path):
+def test_only_open_assignments_are_solved_until_the_end_of_the_deadlines_day(solver, sandbox, sessions, tmp_path):
     add_job(sessions, tmp_path, kind="paper", ref="155150:P1", title="Mid Term paper")
-    add_job(sessions, tmp_path, ref="155150:2", title="Closed", deadline=NOW - timedelta(minutes=1))
-    assert solver.run_once().status == "idle"
-    job_id = add_job(sessions, tmp_path, ref="155150:3", title="Sorting")
+    add_job(sessions, tmp_path, ref="155150:2", title="Yesterday", deadline=NOW - timedelta(days=1))
+    waiting = add_job(sessions, tmp_path, ref="155150:4", title="Manual")
     with sessions.begin() as s:
-        s.get(Job, job_id).assignment.course.mode = "notify"
+        s.get(Job, waiting).state = JobState.WAITING_GO  # manual solving: not before your go-ahead
     assert solver.run_once().status == "idle" and not sandbox.runs
+    # The posted time passed a minute ago, but the LMS takes uploads until 11:59 pm that day
+    late = add_job(sessions, tmp_path, ref="155150:3", title="Sorting", deadline=NOW - timedelta(minutes=1))
+    sandbox.script = play(stream(SUMMARY))
+    assert solver.run_once().status == "solved" and state(sessions, late) == "AWAITING_APPROVAL"
+
+
+def test_a_redo_starts_fresh_when_the_prompt_or_theme_changed(solver, sandbox, sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    with sessions.begin() as s:
+        actions.redo(s, s.get(Job, job_id), "tighter margins", "WhatsApp")
+    solver.run_once()
+    same = sandbox.runs[1]["job"]
+    assert same["resume"] == "sess-1" and same["prompt"].startswith("The student asked for changes: tighter margins")
+
+    with sessions.begin() as s:
+        job = s.get(Job, job_id)
+        job.assignment.course.theme = "https://claude.ai/artifact/NewTheme42"
+        job.assignment.course.prompt = "Use C."
+        actions.redo(s, job, "new theme please", "WhatsApp")
+    solver.run_once()
+    fresh = sandbox.runs[2]["job"]
+    assert "resume" not in fresh  # a resumed session would keep working from the old theme
+    assert "NewTheme42" in fresh["system"] and "Use C." in fresh["system"]
+    assert "The student asked for a redo with this note: new theme please" in fresh["prompt"]
+    with sessions() as s:
+        assert "a fresh run: the course's prompt, theme or files changed" in s.scalars(
+            select(Event.detail).where(Event.job_id == job_id, Event.to_state == "SOLVING").order_by(Event.id.desc())).first()
+
+
+def test_auto_solving_lets_claude_ask_first_and_your_answer_resumes_it(solver, sandbox, channel, sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path)
+    with sessions.begin() as s:
+        a = s.get(Job, job_id).assignment
+        a.course.solve = "auto"
+        files.keep(files.refs_dir(solver.data_dir, a), "notes.pdf", b"%PDF notes")
+        files.keep(files.theme_dir(solver.data_dir, a.course), "format.docx", b"PK")
+    asked = {**SUMMARY, "status": "needs_input", "questions": ["Which dataset should Q2 use?"]}
+    sandbox.script = play(stream(asked), files=False)
+    assert solver.run_once().status == "asked" and state(sessions, job_id) == "NEEDS_INPUT"
+    first = sandbox.runs[0]["job"]["system"]
+    assert "Before you solve, decide whether you can do all of it well on your own" in first
+    assert "/work/in/theme-reference: format.docx" in first and "/work/in/reference: notes.pdf" in first
+    assert channel.sent[-1][0].startswith("Claude needs something before solving: Design & Analysis of Algorithms · Recurrence Relations\n"
+                                          "1. Which dataset should Q2 use?")
+
+    with sessions.begin() as s:
+        actions.answer(s, s.get(Job, job_id), "Use iris.", "the chat")
+    sandbox.script = play(stream(SUMMARY))
+    assert solver.run_once().status == "solved"
+    again = sandbox.runs[1]["job"]
+    assert again["resume"] == "sess-1" and again["prompt"].startswith("The student answered: Use iris.")
+    with sessions() as s:
+        job = s.get(Job, job_id)
+        work = solver.job_dir(job.assignment, job) / "work" / "in"
+    assert (work / "reference" / "notes.pdf").read_bytes() == b"%PDF notes" and (work / "theme-reference" / "format.docx").is_file()
+
+
+def test_bypass_solving_tells_claude_never_to_ask(solver, sandbox, sessions, tmp_path):
+    add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    system = sandbox.runs[0]["job"]["system"]
+    assert "Do not ask the student anything" in system and "Before you solve, decide" not in system
 
 
 def test_nearest_deadline_first_and_a_deadline_warning_while_paused(solver, sandbox, channel, sessions, tmp_path):
@@ -671,7 +736,7 @@ def test_a_redo_after_a_blocked_run_starts_a_new_session(solver, sandbox, sessio
     sandbox.script = play(stream({**SUMMARY, "status": "blocked", "blocked_reason": "No Artifact tool."}), files=False)
     assert solver.run_once().status == "blocked"
     with sessions.begin() as s:
-        from lms_worker import actions
+        from lms_worker import actions, files
         assert actions.redo(s, s.get(Job, job_id), "Try again", "the web page")[0]
 
     sandbox.script = play(stream(SUMMARY, session="sess-2"))

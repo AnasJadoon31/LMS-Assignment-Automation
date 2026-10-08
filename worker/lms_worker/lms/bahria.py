@@ -14,6 +14,7 @@ from playwright.sync_api import sync_playwright
 from ..config import Settings
 from ..kv import FileKV
 from .bahria_pages import AssignmentRow, b64_id, parse_assignments_page, parse_papers_page
+from .materials import Lecture, LectureFile, PlanWeek, parse_lectures, parse_outlines, parse_plan, plan_html
 from .cms_login import login
 from .errors import (
     AlreadySubmitted,
@@ -195,6 +196,43 @@ class BahriaAdapter:
         if after.action != "submit" or after.submission_file:
             raise LMSError("The LMS still shows the submission after the delete")
         return row.submission_file or "the submission"
+
+    # --- course material, read on request; nothing here uses Claude ---
+
+    def course_plan(self, course: Course) -> list[PlanWeek]:
+        return parse_plan(self._get("CoursePlan.php", {"s": course.semester, "oc": course.lms_ref}).text)
+
+    def lectures(self, course: Course) -> list[Lecture]:
+        return parse_lectures(self._get("LectureNotes.php", {"s": course.semester, "oc": course.lms_ref}).text)
+
+    def download_lecture(self, course: Course, week: str, filename: str, dest: Path) -> Path:
+        """Reads the list again for today's link. A file already saved is not fetched twice."""
+        path = dest / Path(filename).name
+        if path.is_file() and path.stat().st_size:
+            return path
+        for lecture in self.lectures(course):
+            for f in lecture.files:
+                if f.filename == filename and f.week == week:
+                    return self._save(f.href, path)
+        raise LMSError(f"{filename} is no longer in {course.name}'s lecture notes")
+
+    def download_outline(self, course: Course, dest: Path) -> Path | None:
+        """The course outline file, or None when the teacher posted none."""
+        page = self._get("CourseOutline.php", {"s": course.semester, "oc": course.lms_ref}).text
+        found = parse_outlines(page).get(course.name.lower())
+        if found is None:
+            return None
+        filename, href = found
+        path = dest / Path(filename).name
+        return path if path.is_file() and path.stat().st_size else self._save(href, path)
+
+    def _save(self, href: str, path: Path) -> Path:
+        r = self._get(href)
+        if "text/html" in r.headers.get("content-type", "") and b"<html" in r.content[:2000].lower():
+            raise LMSError("The LMS answered with a page instead of the file")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(r.content)
+        return path
 
     def submission_status(self, a: AssignmentMeta) -> SubmissionStatus:
         row = self._row(a)

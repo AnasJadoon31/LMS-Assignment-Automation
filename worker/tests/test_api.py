@@ -126,3 +126,35 @@ def test_the_webhook_is_registered_with_the_secret(sessions):
     assert body["url"] == "http://api:8000/api/webhooks/evolution"
     assert body["headers"] == {SECRET_HEADER: webhook_secret(SECRET_KEY)}
     assert body["events"] == ["MESSAGES_UPSERT"] and body["enabled"] is True
+
+
+def test_a_document_you_send_reaches_the_menu(sessions, phone, tmp_path):
+    import base64
+    import dataclasses
+
+    from lms_worker.api import _incoming
+
+    body = upsert("", msg_id="doc1")
+    body["data"]["message"] = {"documentWithCaptionMessage": {"message": {"documentMessage": {
+        "fileName": "My work.pdf", "mimetype": "application/pdf", "caption": "here"}}}}
+    number, _, text, media = _incoming(body)
+    assert (number, text, media["name"], media["inline"]) == (ME, "here", "My work.pdf", None)
+    picture = upsert("", msg_id="img1")
+    picture["data"]["message"] = {"imageMessage": {"mimetype": "image/jpeg"}, "base64": base64.b64encode(b"jpg").decode()}
+    assert _incoming(picture)[3]["name"] == "image.jpg"
+
+    class Media:
+        asked = []
+
+        def media(self, data):
+            self.asked.append(data["key"]["id"])
+            return b"%PDF mine"
+
+    admin = Media()
+    app = create_app(dataclasses.replace(SETTINGS, data_dir=tmp_path), sessions, DbKV(sessions), sender=phone, admin=admin,
+                     register_webhook=False, discord_chat=False)
+    with TestClient(app) as client:
+        assert post(client, body).json() == {"handled": True, "replies": 1}
+        assert admin.asked == ["doc1"]  # fetched from Evolution, then handed to the menu
+        assert phone.sent[-1][0].startswith("I did not know what that file is for.")
+        assert post(client, picture).json()["handled"] and admin.asked == ["doc1"]  # sent along: no second fetch
