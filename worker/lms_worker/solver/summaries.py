@@ -100,7 +100,7 @@ class Summarizer:
 
         spec = {"prompt": CONTINUE if resume else notes_prompt(name, lectures),
                 "system": notes_system(where, detailed=style == "detailed", diagrams=triage.get("diagrams")),
-                "schema": NOTES_SCHEMA, "max_turns": MAX_TURNS, "text": True,
+                "schema": NOTES_SCHEMA, "max_turns": MAX_TURNS, "text": True, "plain": True,
                 "prepared": (work / "in" / "text").is_dir()}
         model = v.fixed_model() or triage.get("model")
         effort = (v.kv.get(EFFORT_KEY) or "").strip() or triage.get("effort")

@@ -233,7 +233,7 @@ class Solver:
         (work / "out").mkdir(exist_ok=True)
         (work / "out" / "stderr.txt").unlink(missing_ok=True)
         (work / "job.json").write_text(json.dumps({"prompt": prompt, "system": TRIAGE_SYSTEM, "schema": schema,
-                                                   "max_turns": TRIAGE_TURNS, "model": TRIAGE_MODEL, **spec}))
+                                                   "max_turns": TRIAGE_TURNS, "model": TRIAGE_MODEL, "lean": True, **spec}))
         run, o, _, overage = self.run_claude(work, TRIAGE_TIMEOUT)
         answer = o.structured if o.finished and not o.is_error else None
         if answer is not None and (answer.get("model") not in ROUTE_MODELS or answer.get("effort") not in ROUTE_EFFORTS):

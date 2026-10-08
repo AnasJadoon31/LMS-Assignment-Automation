@@ -781,6 +781,7 @@ def test_haiku_reads_the_sheet_and_routes_the_solve(router, sandbox, channel, se
     assert router.run_once().status == "solved"
     look, solve = sandbox.runs
     assert look["job"]["model"] == "haiku" and look["files"] == ["DAA-Assignment-01.pdf"] and "resume" not in look["job"]
+    assert look["job"]["lean"] is True and "lean" not in solve["job"]  # only Haiku's look runs without connectors and skills
     assert "Do not solve anything" in look["job"]["prompt"] and "lectures: leave empty." in look["job"]["prompt"]
     assert (solve["job"]["model"], solve["job"]["effort"]) == ("sonnet", "medium")
     log = details(sessions, job_id)
@@ -952,6 +953,7 @@ def test_a_lecture_summary_is_routed_written_and_sent(router, sandbox, drive, ch
     assert look["job"]["model"] == "haiku" and look["job"]["text"] is True and look["files"] == ["week-1.pptx", "week-2.pdf"]
     assert "Read the text only" in look["job"]["prompt"]
     assert (write["job"]["model"], write["job"]["effort"], write["job"]["text"]) == ("sonnet", "low", True)
+    assert write["job"]["plain"] is True and "lean" not in write["job"]
     assert "Detailed notes" in write["job"]["system"] and "The slides lean on their figures" in write["job"]["system"]
     assert "lms-notes /work/notes.md /work/out/notes.pdf" in write["job"]["system"]
     assert "week 1: Intro (week-1.pptx); week 2: Recurrences (week-2.pdf)" in write["job"]["prompt"]

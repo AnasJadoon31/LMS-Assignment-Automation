@@ -51,11 +51,21 @@ def render_pages(inbox: Path, text: bool = False) -> list[Path]:
 
 def claude_args(job: dict) -> list[str]:
     """Every Claude Code tool, the account's claude.ai connectors and skills, and no permission
-    prompts (you chose full access): the container is the boundary."""
+    prompts (you chose full access): the container is the boundary.
+
+    Two lighter kinds of run, to spend less of the plan: "plain" loads no connectors and no
+    skills (a run that needs neither, like writing lecture notes); "lean" also swaps Claude
+    Code's own long system prompt for the job's and keeps four tools (a short look by Haiku,
+    which is then about a tenth of the tokens)."""
     args = ["claude", "-p", job["prompt"], "--output-format", "stream-json", "--verbose",
             "--permission-mode", "bypassPermissions", "--max-turns", str(job.get("max_turns", 200))]
+    lean = bool(job.get("lean"))
     if job.get("system"):
-        args += ["--append-system-prompt", job["system"]]
+        args += ["--system-prompt" if lean else "--append-system-prompt", job["system"]]
+    if lean or job.get("plain"):
+        args += ["--strict-mcp-config", "--disable-slash-commands"]
+    if lean:
+        args += ["--tools", "Read,Glob,Grep,Bash"]
     if job.get("schema"):
         args += ["--json-schema", json.dumps(job["schema"])]
     if job.get("model"):
