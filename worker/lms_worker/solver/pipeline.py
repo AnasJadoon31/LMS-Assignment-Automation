@@ -251,7 +251,7 @@ class Solver:
         triage = json.loads(job.triage)
         if self.routed() and _is_redo(job) and (triage.get("redo") or {}).get("note") != job.note:
             return True
-        return lectures and "lectures" not in triage
+        return lectures and "lectures" not in triage and not _is_redo(job)
 
     def _prepare(self, job_id: int) -> SolveResult | None:
         """Returns None to go on to the solve, or why it must wait."""
@@ -381,7 +381,7 @@ class Solver:
             .order_by(Assignment.deadline.asc().nulls_last(), Job.id)
         )
 
-    def _claim(self, now: datetime) -> tuple[int, Path, str, str | None, str, tuple[str | None, str | None]] | None:
+    def _claim(self, now: datetime) -> tuple[int, Path, str, str | None, str, tuple] | None:
         with self.sessions() as s:
             job = s.scalars(self._ready(now).limit(1).with_for_update(of=Job, skip_locked=True)).first()
             if job is None:
@@ -403,12 +403,13 @@ class Solver:
                                  theme_files=[p.name for p in theme_files], references=[p.name for p in references],
                                  lectures=[p.name for p in lectures], lectures_must=course.lectures == LectureMode.ALWAYS)
             routed = (triage.get("redo") if redo and (triage.get("redo") or {}).get("note") == job.note else triage) or {}
-            route = (routed.get("model"), routed.get("effort")) if self.routed() else (None, None)
+            forced = redo and bool(routed.get("forced"))  # "Redo with Opus": over Haiku's choice and a fixed model
+            route = (routed.get("model"), routed.get("effort"), forced) if self.routed() or forced else (None, None, False)
             # A run that ended blocked starts over: its session has already concluded it cannot go on.
             # So does a redo after the course's prompt, theme or files changed: a resumed session
             # would go on working from what it read the first time.
             blocked = last.get("status") == "blocked"
-            changed = redo and _spec(work).get("system") != system
+            changed = redo and (forced or _spec(work).get("system") != system)
             resume = (job.claude_session if job.claude_session and (work / "job.json").exists() and not blocked and not changed
                       else None)
             if not resume:
@@ -444,7 +445,8 @@ class Solver:
                 job.summary = None  # from here it continues as a plain run
             job.attempts += 1
             job.not_before = None
-            how = " (resuming the Claude session)" if resume else (" (a fresh run: the course's prompt, theme or files changed)" if changed else "")
+            how = (" (resuming the Claude session)" if resume else " (a fresh run, as you asked)" if forced
+                   else " (a fresh run: the course's prompt, theme or files changed)" if changed else "")
             if route[0]:
                 how += f" with {route[0]}, {route[1]} effort"
             _move(s, job, JobState.SOLVING, "solving" + how)
@@ -455,14 +457,15 @@ class Solver:
         return self.data_dir / _safe(a.course.code) / str(a.id) / str(job.revision)
 
     def _write_job(self, work: Path, prompt: str, resume: str | None, system: str | None = None,
-                   route: tuple[str | None, str | None] = (None, None)) -> None:
+                   route: tuple = (None, None, False)) -> None:
         (work / "out").mkdir(parents=True, exist_ok=True)
         if system is None:
             system = with_extras(system_prompt(self.sandbox.work_path(work)), self.sandbox.work_path(work),
                                  ask=False, theme_files=[], references=[])
         spec = {"prompt": prompt, "system": system, "schema": SUMMARY_SCHEMA,
                 "max_turns": self.max_turns}
-        model = self.fixed_model() or route[0]  # fixed by you, else Haiku's choice, else the CLI's default
+        # "Redo with Opus" first; else the model you fixed, else Haiku's choice, else the CLI's default
+        model = route[0] if route[2] else self.fixed_model() or route[0]
         if model:
             spec["model"] = model
         effort = (self.kv.get(EFFORT_KEY) or "").strip() or route[1]  # the same for the effort

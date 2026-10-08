@@ -206,7 +206,8 @@ class Bot:
             if text in ("", "0"):
                 stack.pop()
                 return [self._render(s, stack)]
-            stack[-1] = {"name": "confirm", "action": "redo", "job": screen["job"], "note": text[:1000]}
+            stack[-1] = {"name": "confirm", "action": "redo", "job": screen["job"], "note": text[:1000],
+                         "strong": bool(screen.get("strong"))}
             return [self._render(s, stack)]
 
         if text == "0":
@@ -407,7 +408,9 @@ class Bot:
             stack.append({"name": "model_text"})
             return [Reply("Type the model name, e.g. claude-opus-5-5, in one message. 0 cancels.")]
         if kind == "note":
-            stack.append({"name": "note", "job": option["job"]})
+            stack.append({"name": "note", "job": option["job"], "strong": bool(option.get("strong"))})
+            if option.get("strong"):
+                return [Reply("Opus will solve it again from the sheet. Type what was wrong or what should change, in one message. 0 cancels.")]
             return [Reply("Type what should change in the redo, in one message. 0 cancels.")]
         if kind == "yes":
             confirmed = stack.pop()
@@ -501,7 +504,7 @@ class Bot:
         if action == "reject":
             return actions.reject(s, job, "WhatsApp")[1]
         if action == "redo":
-            return actions.redo(s, job, c.get("note") or "", "WhatsApp")[1]
+            return actions.redo(s, job, c.get("note") or "", "WhatsApp", strong=bool(c.get("strong")))[1]
         raise ValueError(f"Unknown action {action}")
 
     # --- rendering ---
@@ -669,6 +672,7 @@ class Bot:
                 options.append(("Reject", {"do": "confirm", "action": "reject", "job": job.id}))
             if actions.can_redo(job):
                 options.append(("Redo with a note", {"do": "note", "job": job.id}))
+                options.append(("Redo with Opus", {"do": "note", "job": job.id, "strong": True}))
             options.append(("History", {"do": "history", "job": job.id}))
         if a.kind == ASSIGNMENT and not a.deadline_passed and self.data_dir:
             options.append(("Add a reference file for solving", {"do": "await_file", "purpose": "ref", "assignment": a.id}))
@@ -848,7 +852,8 @@ class Bot:
                 "approve": [f"Upload the solved PDF for {a.title} to the LMS now?", *typed,
                             *([f"The LMS shows {a.submitted_file}; it is replaced if the service uploaded it."] * bool(a.submitted_file))],
                 "reject": [f"Reject the solution for {a.title}? Nothing will be uploaded."],
-                "redo": [f"Redo {a.title} with this note?", f'"{screen.get("note", "")}"'],
+                "redo": [f"Redo {a.title} with this note?", f'"{screen.get("note", "")}"',
+                         *(["Opus solves it again from the start, which uses more of your plan than a normal redo."] * bool(screen.get("strong")))],
             }[action]
         return "", question, [("Yes", {"do": "yes"}), ("No", {"do": "no"})]
 

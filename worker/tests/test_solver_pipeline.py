@@ -989,3 +989,23 @@ def test_assignments_go_before_summaries_and_a_failed_summary_is_retried_once(ro
         assert s.get(Summary, sm_id).state == "FAILED"
     assert channel.sent[-1][0].startswith("The lecture summary could not be written: Design & Analysis of Algorithms, weeks 1, 2\n"
                                           "the run ended without notes.pdf")
+
+
+def test_redo_with_opus_starts_again_on_opus_whatever_else_is_set(router, sandbox, sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path)
+    sandbox.script = routed_script([TRIAGE])
+    router.run_once()
+    DbKV(sessions).set("solver_model", "claude-sonnet-5-5")  # even a model fixed in Settings
+    with sessions.begin() as s:
+        actions.redo(s, s.get(Job, job_id), "Q2 is wrong", "WhatsApp", strong=True)
+    assert router.run_once().status == "solved"
+    again = sandbox.runs[-1]["job"]
+    assert len(sandbox.runs) == 3  # Haiku is not asked: you already chose
+    assert (again["model"], again["effort"]) == ("opus", "high") and "resume" not in again
+    assert "The student asked for a redo with this note: Q2 is wrong" in again["prompt"]
+    assert "solving (a fresh run, as you asked) with opus, high effort" in details(sessions, job_id)
+
+    with sessions.begin() as s:  # a normal redo afterwards goes back to the fixed model
+        actions.redo(s, s.get(Job, job_id), "bigger headings", "WhatsApp")
+    router.run_once()
+    assert sandbox.runs[-1]["job"]["model"] == "claude-sonnet-5-5" and sandbox.runs[-1]["job"]["resume"] == "sess-1"

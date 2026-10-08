@@ -661,3 +661,16 @@ def test_picked_lectures_are_queued_for_a_summary(sessions, semester, tmp_path):
     say(bot, "menu", "5", "1", "2", pick(notes, "Summarize lectures into notes"))
     materials.fail = "The LMS did not answer"
     assert text(say(bot, "all", "1")).startswith("Nothing was queued: The LMS did not answer")
+
+
+def test_redo_with_opus_is_an_option_on_a_finished_report(bot, semester, sessions):
+    item = say(bot, "menu", "3", "1", "1")
+    assert text(say(bot, pick(item, "Redo with Opus"))).startswith("Opus will solve it again from the sheet.")
+    confirm = text(say(bot, "Q2 is wrong"))
+    assert 'Redo Recurrence Relations with this note?\n"Q2 is wrong"' in confirm and "Opus solves it again from the start" in confirm
+    assert text(say(bot, "1")).startswith("Redo queued for Recurrence Relations, solved again from the start with Opus.")
+    with sessions() as s:
+        job = s.scalar(select(Job))
+        assert (job.state, job.note) == ("DOWNLOADED", "Q2 is wrong")
+        assert json.loads(job.triage)["redo"] == {"note": "Q2 is wrong", "model": "opus", "effort": "high",
+                                                  "reason": "you asked for Opus", "forced": True}

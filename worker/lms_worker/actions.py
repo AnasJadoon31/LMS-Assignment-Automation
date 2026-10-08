@@ -138,7 +138,8 @@ def reject(s: Session, job: Job, via: str) -> tuple[bool, str]:
     return True, f"Rejected: {a.title}. Nothing will be uploaded."
 
 
-def redo(s: Session, job: Job, note: str, via: str) -> tuple[bool, str]:
+def redo(s: Session, job: Job, note: str, via: str, *, strong: bool = False) -> tuple[bool, str]:
+    """strong: solve it again from the sheet with Opus, whatever model Haiku or Settings would pick."""
     a = job.assignment
     note = (note or "").strip()[:1000]
     if not note:
@@ -147,8 +148,13 @@ def redo(s: Session, job: Job, note: str, via: str) -> tuple[bool, str]:
         return False, f"Nothing changed: {a.title} is {JOB_WORDS.get(job.state, job.state)} now."
     job.note = note
     job.attempts = 0
-    move(s, job, JobState.DOWNLOADED, f"redo requested on {via}: {note}")
-    return True, f"Redo queued for {a.title}. The new PDF comes to you before anything is uploaded."
+    if strong:  # Haiku's place in the triage is taken: this redo is already sorted
+        triage = json.loads(job.triage) if job.triage else {}
+        triage["redo"] = {"note": note, "model": "opus", "effort": "high", "reason": "you asked for Opus", "forced": True}
+        job.triage = json.dumps(triage)
+    move(s, job, JobState.DOWNLOADED, f"redo{' with Opus' * strong} requested on {via}: {note}")
+    return True, (f"Redo queued for {a.title}{', solved again from the start with Opus' * strong}. "
+                  "The new PDF comes to you before anything is uploaded.")
 
 
 def go(s: Session, job: Job, via: str) -> tuple[bool, str]:
