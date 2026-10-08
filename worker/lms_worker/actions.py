@@ -68,7 +68,6 @@ LECTURE_WORDS = {
     LectureMode.ALWAYS: "every assignment is solved with the lecture notes at hand",
     LectureMode.OFF: "the lecture notes are not used",
 }
-SUMMARY_STYLES = {"short": "Short revision notes, about a page per lecture", "detailed": "Detailed notes, every topic explained"}
 UPLOAD_TYPES = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip")  # what the LMS takes
 
 
@@ -231,9 +230,9 @@ def set_lectures(course: Course, mode: str) -> tuple[bool, str]:
     return True, f"{course.name}: lecture notes for solving are now {mode} ({LECTURE_WORDS[mode]}), from the next new assignment."
 
 
-def summarize(s: Session, course: Course, lectures: list[dict], style: str) -> Summary:
-    """Queue summarized notes of these lecture files ([{week, title, file}]), which are on the server."""
-    summary = Summary(course=course, lectures=json.dumps(lectures), style=style if style in SUMMARY_STYLES else "short")
+def summarize(s: Session, course: Course, lectures: list[dict]) -> Summary:
+    """Queue explained notes of these lecture files ([{week, title, file}]), which are on the server."""
+    summary = Summary(course=course, lectures=json.dumps(lectures), style="notes")
     s.add(summary)
     s.flush()
     return summary

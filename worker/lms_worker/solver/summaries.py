@@ -1,4 +1,5 @@
-"""Summarized notes of the lectures you picked: asked for in the chat, written in the sandbox.
+"""Notes of the lectures you picked: asked for in the chat, written in the sandbox. One document
+that explains what the slides only list, so the lectures can be learnt from it alone.
 
 The lecture files are already on the server (the chat fetched them when you asked). One job:
 
@@ -68,7 +69,7 @@ class Summarizer:
             course = sm.course
             lectures = json.loads(sm.lectures)
             sm.state, sm.attempts = SummaryState.RUNNING, sm.attempts + 1
-            sm_id, style, session, triage = sm.id, sm.style, sm.claude_session, json.loads(sm.triage) if sm.triage else None
+            sm_id, session, triage = sm.id, sm.claude_session, json.loads(sm.triage) if sm.triage else None
             base = files.course_dir(v.data_dir, course)
             name, semester = course.name, course.semester_name or course.semester
             s.commit()
@@ -99,7 +100,7 @@ class Summarizer:
         triage = triage or {}
 
         spec = {"prompt": CONTINUE if resume else notes_prompt(name, lectures),
-                "system": notes_system(where, detailed=style == "detailed", diagrams=triage.get("diagrams")),
+                "system": notes_system(where, diagrams=triage.get("diagrams")),
                 "schema": NOTES_SCHEMA, "max_turns": MAX_TURNS, "text": True, "plain": True,
                 "prepared": (work / "in" / "text").is_dir()}
         model = v.fixed_model() or triage.get("model")

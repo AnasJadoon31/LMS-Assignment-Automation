@@ -927,7 +927,7 @@ def notes_script(answers, result=NOTES, pdf=True):
     return script
 
 
-def queue_summary(solver, sessions, style="short"):
+def queue_summary(solver, sessions):
     from lms_worker.db import Summary
 
     with sessions.begin() as s:
@@ -940,13 +940,13 @@ def queue_summary(solver, sessions, style="short"):
         for name in ("week-1.pptx", "week-2.pdf"):
             files.keep(files.course_dir(solver.data_dir, course) / "lectures", name, b"slides")
         lectures = [{"week": "1", "title": "Intro", "file": "week-1.pptx"}, {"week": "2", "title": "Recurrences", "file": "week-2.pdf"}]
-        return actions.summarize(s, course, lectures, style).id
+        return actions.summarize(s, course, lectures).id
 
 
 def test_a_lecture_summary_is_routed_written_and_sent(router, sandbox, drive, channel, sessions, tmp_path):
     from lms_worker.db import Summary
 
-    sm_id = queue_summary(router, sessions, "detailed")
+    sm_id = queue_summary(router, sessions)
     sandbox.script = notes_script([NOTES_TRIAGE])
     assert router.run_once().status == "solved"
     look, write = sandbox.runs
@@ -954,7 +954,8 @@ def test_a_lecture_summary_is_routed_written_and_sent(router, sandbox, drive, ch
     assert "Read the text only" in look["job"]["prompt"]
     assert (write["job"]["model"], write["job"]["effort"], write["job"]["text"]) == ("sonnet", "low", True)
     assert write["job"]["plain"] is True and "lean" not in write["job"]
-    assert "Detailed notes" in write["job"]["system"] and "The slides lean on their figures" in write["job"]["system"]
+    assert "one document from which the lectures can be learnt without opening the slides" in write["job"]["system"]
+    assert "Leave nothing out to save space" in write["job"]["system"] and "The slides lean on their figures" in write["job"]["system"]
     assert "lms-notes /work/notes.md /work/out/notes.pdf" in write["job"]["system"]
     assert "week 1: Intro (week-1.pptx); week 2: Recurrences (week-2.pdf)" in write["job"]["prompt"]
     with sessions() as s:

@@ -6,8 +6,10 @@ Every run reports the plan's usage (see claude.py). Solving pauses until the win
 - a request is billed as paid extra usage: automation never spends money;
 - a window passes PAUSE_AT (80% by default), so your own chats keep some room.
 
-A cap on runs per day (Pakistan time) applies on top. Polling, downloads and messages never
-pause; only solving does.
+A cap on runs per day (Pakistan time) applies on top. Lifting the limit for a day, from the
+chat, takes away both of the service's own barriers for that day: the cap on runs and the stop
+at PAUSE_AT. The plan's own limit and the rule against paid extra usage always hold. Polling,
+downloads and messages never pause; only solving does.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from .claude import RateLimit
 USAGE_KEY = "claude_usage"
 PAUSE_KEY = "claude_paused"
 RUNS_KEY = "solver_runs"
-CAP_LIFTED_KEY = "solver_cap_lifted"  # set from the chat: the day the daily run limit does not apply
+CAP_LIFTED_KEY = "solver_cap_lifted"  # set from the chat: the day the service's own limits do not apply
 MARGIN = timedelta(minutes=3)
 WINDOW_NAMES = {"five_hour": "5-hour", "seven_day": "weekly", "seven_day_opus": "weekly Opus", "seven_day_sonnet": "weekly Sonnet"}
 
@@ -72,7 +74,7 @@ class UsageGuard:
         if rl.using_overage:
             return Pause((rl.resets_at or fallback) + MARGIN, "extra usage")
         high = [r for _, (u, r) in rl.windows.items() if u >= self.pause_at and r and r > now]
-        if high:
+        if high and not self.lifted(now):
             return Pause(max(high) + MARGIN, "headroom")
         return None
 
@@ -87,13 +89,18 @@ class UsageGuard:
         if raw:
             d = json.loads(raw)
             until = datetime.fromisoformat(d["until"])
-            if until > now:
+            if until > now and not (d["reason"] == "headroom" and self.lifted(now)):
                 return Pause(until, d["reason"])
-            self.kv.delete(PAUSE_KEY)
-        if self.runs_today(now) >= self.daily_cap and self.kv.get(CAP_LIFTED_KEY) != _day(now):
+            if until <= now:
+                self.kv.delete(PAUSE_KEY)
+        if self.runs_today(now) >= self.daily_cap and not self.lifted(now):
             midnight = (now.astimezone(LMS_TZ) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             return Pause(midnight.astimezone(timezone.utc), "daily cap")
         return None
+
+    def lifted(self, now: datetime) -> bool:
+        """You lifted the service's own limits for today."""
+        return self.kv.get(CAP_LIFTED_KEY) == _day(now)
 
     def runs_today(self, now: datetime) -> int:
         raw = self.kv.get(RUNS_KEY)
@@ -116,7 +123,7 @@ class UsageGuard:
                 when = f", resets {resets.astimezone(LMS_TZ).strftime('%a %I:%M %p').replace(' 0', ' ')}" if resets and resets > now else ""
                 parts.append(f"{label} {round(util * 100)}%{when}")
         line = "Claude usage: " + ("; ".join(parts) if parts else "not reported yet")
-        line += f". Solver runs today: {self.runs_today(now)} of {self.daily_cap}."
+        line += f". Solver runs today: {self.runs_today(now)} of {self.daily_cap}" + (" (limits lifted for today)." if self.lifted(now) else ".")
         pause = self.paused(now)
         return line + (f"\n{pause.describe()}" if pause else "")
 

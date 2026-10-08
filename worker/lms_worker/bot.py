@@ -164,8 +164,8 @@ class Bot:
             picked, problem = _pick_weeks(text, screen["items"])
             if problem:
                 return [Reply(f"{problem} Reply like 1,3,5 or 2-4 or all. 0 cancels.")]
-            stack[-1] = {"name": "sum_style", "course": screen["course"], "picked": picked}
-            return [self._render(s, stack)]
+            stack[-1] = {"name": "sum_text", "course": screen["course"], "picked": picked}
+            return self._summarize(s, stack)
 
         if screen["name"] == "answer_text":  # free text: your answer to Claude's questions
             stack.pop()
@@ -298,8 +298,6 @@ class Bot:
             lines = ["Which lectures should be summarized? Reply with the week numbers: 1,3,5 or 2-4, or all. 0 cancels."]
             lines += [f"Week {w}: {title}" + (f" ({n} files)" if n > 1 else "") for w, (title, n) in weeks.items()]
             return [Reply("\n".join(lines))]
-        if kind == "summarize":
-            return self._summarize(s, stack, option)
         if kind == "lectures_mode":
             course = s.get(Course, option["course"])
             said = actions.set_lectures(course, option["mode"])[1]
@@ -388,10 +386,11 @@ class Bot:
         if kind == "cap":
             if option["lift"]:
                 self.kv.set(actions.CAP_LIFTED_KEY, self.now().astimezone(LMS_TZ).date().isoformat())
-                said = "The daily limit is lifted for today. Waiting work is picked up within a minute."
+                said = ("The limits are lifted for today: no cap on runs and no early stop at 80% of your plan. "
+                        "Waiting work is picked up within a minute.")
             else:
                 self.kv.delete(actions.CAP_LIFTED_KEY)
-                said = "The daily limit is back on."
+                said = "The limits are back on."
             return [Reply(said), self._render(s, stack)]
         if kind == "prompt_builtin":
             return [Reply(system_prompt())]
@@ -450,7 +449,7 @@ class Bot:
         except MaterialsError as e:
             return [Reply(str(e))]
 
-    def _summarize(self, s: Session, stack: list[dict], option: dict) -> list[Reply]:
+    def _summarize(self, s: Session, stack: list[dict]) -> list[Reply]:
         """Fetch the picked lecture files (the worker reads them from the server) and queue the notes."""
         screen = stack.pop()
         course = s.get(Course, screen["course"])
@@ -462,9 +461,9 @@ class Bot:
                         for week, title, name in picked]
         except MaterialsError as e:
             return [Reply(f"Nothing was queued: {e}"), self._render(s, stack)]
-        actions.summarize(s, course, lectures, option["style"])
+        actions.summarize(s, course, lectures)
         weeks = ", ".join(dict.fromkeys(week for week, _, _ in picked))
-        return [Reply(f"Queued: {option['style']} notes for {course.name}, week{'s' * (',' in weeks)} {weeks} ({len(lectures)} "
+        return [Reply(f"Queued: notes for {course.name}, week{'s' * (',' in weeks)} {weeks} ({len(lectures)} "
                       f"file{'s' * (len(lectures) != 1)}). Haiku first picks the model that writes them; the PDF comes here when "
                       "it is ready, after any assignment that is waiting to be solved."), self._render(s, stack)]
 
@@ -582,9 +581,10 @@ class Bot:
     def _screen_cap(self, s: Session, screen: dict):
         lifted = self._cap_lifted()
         lines = [f"Now: {'lifted for today' if lifted else 'on'}.",
-                 "The limit on solver runs per day. Lifting it lets more be solved today; your Claude plan's own limits still apply.",
-                 "It is back on by itself tomorrow."]
-        options = [("Put the limit back", {"do": "cap", "lift": False})] if lifted else [("Lift the limit for today", {"do": "cap", "lift": True})]
+                 "The service's own two limits: the number of solver runs per day, and stopping when your Claude plan is 80% used "
+                 "so your own chats keep room. Lifting them lets it solve today until the plan itself says stop; it never pays for extra usage.",
+                 "They are back on by themselves tomorrow."]
+        options = [("Put the limits back", {"do": "cap", "lift": False})] if lifted else [("Lift the limits for today", {"do": "cap", "lift": True})]
         return "Daily solve limit", lines, options
 
     def _screen_section(self, s: Session, screen: dict):
@@ -741,13 +741,6 @@ class Bot:
         options = [(f"{mode}: {words}", {"do": "lectures_mode", "course": c.id, "mode": mode}) for mode, words in actions.LECTURE_WORDS.items()]
         lines = ["The lecture notes the teacher posted on the LMS, as a reference when this course's assignments are solved:"]
         return f"{c.name} · lecture notes for solving, now {c.lectures}", lines, options
-
-    def _screen_sum_style(self, s: Session, screen: dict):
-        c = s.get(Course, screen["course"])
-        picked = screen["picked"]
-        weeks = ", ".join(dict.fromkeys(week for week, _, _ in picked))
-        options = [(words, {"do": "summarize", "style": style}) for style, words in actions.SUMMARY_STYLES.items()]
-        return f"{c.name} · summary of week{'s' * (',' in weeks)} {weeks}", [f"{len(picked)} lecture file{'s' * (len(picked) != 1)}. Which kind of notes?"], options
 
     def _screen_safe(self, s: Session, screen: dict):
         c = s.get(Course, screen["course"])

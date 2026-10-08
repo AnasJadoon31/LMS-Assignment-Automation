@@ -255,9 +255,9 @@ def test_effort_the_daily_limit_and_the_built_in_prompt_from_the_chat(bot, semes
 
     menu = say(bot, "menu", "6")
     out = text(say(bot, pick(menu, "Daily solve limit"), "1"))
-    assert out.startswith("The daily limit is lifted for today.") and "Now: lifted for today." in out
+    assert out.startswith("The limits are lifted for today") and "Now: lifted for today." in out
     assert kv.get("solver_cap_lifted") == "2026-10-10"
-    assert text(say(bot, "1")).startswith("The daily limit is back on.") and kv.get("solver_cap_lifted") is None
+    assert text(say(bot, "1")).startswith("The limits are back on.") and kv.get("solver_cap_lifted") is None
 
     courses = say(bot, "menu", pick(say(bot, "menu"), "Courses"))
     course = say(bot, pick(say(bot, pick(courses, "DAA")), "Settings"))
@@ -646,21 +646,18 @@ def test_picked_lectures_are_queued_for_a_summary(sessions, semester, tmp_path):
     asked = text(say(bot, pick(notes, "Summarize lectures into notes")))
     assert asked.startswith("Which lectures should be summarized?") and "Week 2: Regex (2 files)" in asked
     assert text(say(bot, "7")).startswith("There is no week 7 with lecture files.")
-    style = text(say(bot, "1-2"))
-    assert "*DAA · summary of weeks 1, 2*" in style and "3 lecture files. Which kind of notes?" in style
-    assert "1. Short revision notes" in style and "2. Detailed notes" in style
-    out = text(say(bot, "2"))
-    assert out.startswith("Queued: detailed notes for DAA, weeks 1, 2 (3 files).") and "*DAA · lecture notes*" in out
+    out = text(say(bot, "1-2"))
+    assert out.startswith("Queued: notes for DAA, weeks 1, 2 (3 files).") and "*DAA · lecture notes*" in out
     with sessions() as s:
         sm = s.scalar(select(Summary))
-        assert (sm.state, sm.style, sm.course_id) == ("QUEUED", "detailed", semester["daa"])
+        assert (sm.state, sm.course_id) == ("QUEUED", semester["daa"])
         assert [x["file"] for x in json.loads(sm.lectures)] == ["Week-1-Intro-07092026-100828am.pptx", "lecture-2.pptx", "notes.pdf"]
     assert len(materials.asked) == 3  # the files are fetched when you ask, so the worker has them
     assert "Lecture summaries: 1 being written or waiting" in text(say(bot, "menu", "8"))
 
     say(bot, "menu", "5", "1", "2", pick(notes, "Summarize lectures into notes"))
     materials.fail = "The LMS did not answer"
-    assert text(say(bot, "all", "1")).startswith("Nothing was queued: The LMS did not answer")
+    assert text(say(bot, "all")).startswith("Nothing was queued: The LMS did not answer")
 
 
 def test_redo_with_opus_is_an_option_on_a_finished_report(bot, semester, sessions):

@@ -197,7 +197,7 @@ class Summary(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), index=True)
     lectures: Mapped[str] = mapped_column(Text)  # JSON: [{week, title, file}]
-    style: Mapped[str] = mapped_column(String(16), default="short")  # short, detailed
+    style: Mapped[str] = mapped_column(String(16), default="notes")  # one kind now; older rows say short or detailed
     state: Mapped[str] = mapped_column(String(16), default=SummaryState.QUEUED, index=True)
     triage: Mapped[str | None] = mapped_column(Text)  # Haiku's choice: model, effort, diagrams
     attempts: Mapped[int] = mapped_column(Integer, default=0)
