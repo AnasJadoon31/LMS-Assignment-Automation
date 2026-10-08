@@ -565,6 +565,25 @@ def test_a_report_that_stopped_on_your_old_submission_can_go_up_once_you_delete_
     assert channel.sent[-1][0].endswith("The solved report waits for your approval again: reply menu, then Waiting for your approval.")
 
 
+def test_a_submission_deleted_on_the_lms_itself_puts_the_report_back_for_approval(sessions, channel, tmp_path):
+    job_id = uploaded_job(sessions, tmp_path)
+    fake = FakeLMS()
+    fake.set(DAA, dataclasses.replace(LISTED, submitted_file=UPLOADED))
+    watcher = Watcher(fake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data", now=Clock(NOW))
+    watcher.poll_once()
+    assert state(sessions, job_id) == "CONFIRMED"  # still on the LMS: nothing changes
+
+    fake.set(DAA, LISTED)  # you deleted it on the LMS website
+    watcher.poll_once()
+    with sessions() as s:
+        job = s.get(Job, job_id)
+        assert (job.state, job.lms_submission_file) == ("AWAITING_APPROVAL", None)
+    assert channel.sent[-1][0].startswith("No longer submitted: Design & Analysis of Algorithms · Recurrence Relations")
+    sent = len(channel.sent)
+    watcher.poll_once()
+    assert len(channel.sent) == sent and state(sessions, job_id) == "AWAITING_APPROVAL"  # said once
+
+
 def test_a_delete_the_lms_refuses_is_reported_and_not_repeated(sessions, channel, tmp_path):
     job_id = uploaded_job(sessions, tmp_path)
     ask_to_delete(sessions, job_id)

@@ -294,6 +294,16 @@ class Watcher:
                 self._stop(s, latest, "The deadline passed before the job finished")
                 return "stopped"
 
+        if latest and latest.state == JobState.CONFIRMED and not meta.submitted_file and not meta.deadline_passed:
+            # The upload is gone from the LMS (deleted there, or here): the report can go up again
+            latest.lms_submission_file = None
+            latest.attempts = 0
+            self._transition(s, latest, JobState.AWAITING_APPROVAL,
+                             "the submission is no longer on the LMS; waiting for your approval to upload it again")
+            self.outbox.queue(s, "deleted", f"No longer submitted: {course.name} · {row.title}\n"
+                              "The LMS shows no submission now. To upload the solved report again, reply menu, "
+                              "then Waiting for your approval.", job_id=latest.id)
+
         if fp == row.fingerprint:
             return None
         row.fingerprint = fp
