@@ -78,6 +78,7 @@ Rules:
 - The student details are in the theme README; use them exactly as written there.
 - Never change or delete the theme artifact or any other existing artifact; the report goes in {work}/out.
 - You have the internet and every Claude Code tool: search, fetch pages and install what you need (pip, or tools into your home folder) whenever it helps.
+- Operating Systems Lab work: always solve it for real on this server, and attach the real screenshots from nano and the terminal, with the name anas@server.
 - If the sheet says the work must be handwritten, still solve all of it completely and build the report the same way, as the worked solution the student will copy by hand; finish with status handwritten.
 - If the work cannot be done here (it needs hardware, a group, a website login, or a tool that cannot be installed), stop and give the reason with status blocked."""
 
