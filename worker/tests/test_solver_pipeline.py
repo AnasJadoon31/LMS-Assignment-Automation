@@ -516,6 +516,30 @@ def test_a_submission_you_ask_to_delete_is_deleted_and_the_report_waits_again(se
     assert state(sessions, job_id) == "AWAITING_APPROVAL"
 
 
+def test_a_report_that_stopped_on_your_old_submission_can_go_up_once_you_delete_it(sessions, channel, tmp_path):
+    job_id = uploaded_job(sessions, tmp_path, state=JobState.NEEDS_HUMAN)
+    pdf = tmp_path / "Assignment 01 - Recurrence Relations.pdf"
+    pdf.write_bytes(b"%PDF solved")
+    with sessions.begin() as s:
+        job = s.get(Job, job_id)
+        job.last_error = "The LMS already shows a submission; the service never replaces one"
+        s.add(Artifact(job_id=job_id, kind="pdf", path=str(pdf), sha256="0" * 64, size=11))
+    ask_to_delete(sessions, job_id)
+
+    class Deleting(FakeLMS):
+        def delete_submission(self, a):
+            self.listing[DAA.lms_ref] = [LISTED]
+            return UPLOADED
+
+    fake = Deleting()
+    fake.set(DAA, dataclasses.replace(LISTED, submitted_file=UPLOADED))
+    Watcher(fake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data", now=Clock(NOW)).poll_once()
+    with sessions() as s:
+        job = s.get(Job, job_id)
+        assert (job.state, job.last_error) == ("AWAITING_APPROVAL", None)
+    assert channel.sent[-1][0].endswith("The solved report waits for your approval again: reply menu, then Waiting for your approval.")
+
+
 def test_a_delete_the_lms_refuses_is_reported_and_not_repeated(sessions, channel, tmp_path):
     job_id = uploaded_job(sessions, tmp_path)
     ask_to_delete(sessions, job_id)

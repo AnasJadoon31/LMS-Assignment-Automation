@@ -426,8 +426,9 @@ class Watcher:
 
     def _delete_pending(self, result: PollResult) -> None:
         """Submissions you asked to delete while the assignment is open: the row's Delete link is
-        followed and the row read back. A report the service had uploaded then waits for your
-        approval again; nothing is uploaded in its place by itself. Asked once, tried once: a
+        followed and the row read back. A solved report (one the service had uploaded, or one
+        that stopped because the LMS already showed a submission) then waits for your approval;
+        nothing is uploaded in its place by itself. Asked once, tried once: a
         delete the LMS refuses is reported, not repeated."""
         with self.sessions() as s:
             rows = s.scalars(
@@ -462,8 +463,12 @@ class Watcher:
                     continue
                 a.submitted_file = None
                 lines = [f"Deleted from the LMS: {where}", f"{filename} is no longer submitted."]
-                if job and job.state == JobState.CONFIRMED:
+                solved = bool(job) and any(x.kind == "pdf" and Path(x.path).is_file() for x in job.artifacts)
+                # Uploaded by the service, or solved and then stopped (most often because the LMS
+                # already showed a submission): with the way clear, the report can go up when you say so
+                if job and (job.state == JobState.CONFIRMED or (job.state == JobState.NEEDS_HUMAN and solved)):
                     job.lms_submission_file = None
+                    job.last_error = None
                     job.attempts = 0
                     self._transition(s, job, JobState.AWAITING_APPROVAL,
                                      f"{filename} deleted from the LMS at your request; waiting for your approval again")
