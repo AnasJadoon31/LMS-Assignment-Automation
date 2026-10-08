@@ -36,6 +36,7 @@ from typing import Callable, Protocol
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from ..actions import MODEL_KEY
 from ..db.models import Artifact, Assignment, Course, CourseMode, Event, Job, JobState, utcnow
 from ..kv import KeyValue
 from ..lms.bahria_pages import LMS_TZ
@@ -244,8 +245,9 @@ class Solver:
         system = course_prompt(system_prompt(self.sandbox.work_path(work)), *own)
         spec = {"prompt": prompt, "system": system, "schema": SUMMARY_SCHEMA,
                 "max_turns": self.max_turns}
-        if self.model:
-            spec["model"] = self.model
+        model = (self.kv.get(MODEL_KEY) or "").strip() or self.model  # the chat's choice, else SOLVER_MODEL
+        if model:
+            spec["model"] = model
         if resume:
             spec["resume"] = resume
         (work / "job.json").write_text(json.dumps(spec))

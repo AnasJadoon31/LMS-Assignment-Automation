@@ -220,6 +220,23 @@ def test_a_course_gets_its_own_system_prompt_from_the_chat(bot, semester, sessio
         assert s.get(Course, semester["daa"]).prompt is None
 
 
+def test_the_solver_model_is_picked_in_the_chat(bot, semester, sessions):
+    menu = say(bot, "menu")
+    assert "9. Solver model: default (change)" in text(menu)
+    screen = say(bot, "9")
+    assert "Now: default" in text(screen)
+    out = text(say(bot, pick(screen, "Sonnet")))
+    assert out.startswith("The solver now uses sonnet, from the next solve or redo.") and "Now: sonnet." in out
+    assert DbKV(sessions).get("solver_model") == "sonnet"
+    say(bot, pick(screen, "Type a model name"))
+    assert text(say(bot, "claude-opus-5-5")).startswith("The solver now uses claude-opus-5-5")
+    say(bot, pick(screen, "Type a model name"))
+    assert text(say(bot, "rm -rf /; x")).startswith("That does not look like a model name. Nothing changed.")
+    assert DbKV(sessions).get("solver_model") == "claude-opus-5-5"
+    assert text(say(bot, pick(screen, "Default"))).startswith("The solver uses the default model again.")
+    assert DbKV(sessions).get("solver_model") is None
+
+
 def test_files_are_sent_as_documents(bot, semester):
     say(bot, "menu", "1", "1", "1")
     (q,) = say(bot, "1")

@@ -12,6 +12,8 @@ their status is the LMS row colour: green submitted, white not submitted, red mi
 
 from __future__ import annotations
 
+import re
+
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -126,6 +128,12 @@ class Bot:
             how = "It replaces the built-in prompt" if course.prompt_replaces else "It is added to the built-in prompt"
             return [Reply(f"Saved for {course.name}. {how}, from the next solve or redo."), self._render(s, stack)]
 
+        if screen["name"] == "model_text":  # free text: a model name
+            stack.pop()
+            if text in ("", "0"):
+                return [self._render(s, stack)]
+            return [Reply(self._set_model(text)), self._render(s, stack)]
+
         if screen["name"] == "note":  # free text: the redo note
             if text in ("", "0"):
                 stack.pop()
@@ -184,6 +192,11 @@ class Bot:
             course = s.get(Course, option["course"])
             course.prompt, course.prompt_replaces = None, False
             return [Reply(f"Removed. {course.name} uses the built-in prompt only."), self._render(s, stack)]
+        if kind == "model":
+            return [Reply(self._set_model(option["model"])), self._render(s, stack)]
+        if kind == "model_text":
+            stack.append({"name": "model_text"})
+            return [Reply("Type the model name, e.g. claude-opus-5-5, in one message. 0 cancels.")]
         if kind == "note":
             stack.append({"name": "note", "job": option["job"]})
             return [Reply("Type what should change in the redo, in one message. 0 cancels.")]
@@ -205,6 +218,16 @@ class Bot:
             stack.pop()
             return [Reply(f"{course.name} is now in {course.mode} mode."), self._render(s, stack)]
         raise ValueError(f"Unknown option {kind}")
+
+    def _set_model(self, model: str) -> str:
+        model = model.strip()
+        if not model:
+            self.kv.delete(actions.MODEL_KEY)
+            return "The solver uses the default model again."
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,79}", model):
+            return "That does not look like a model name. Nothing changed."
+        self.kv.set(actions.MODEL_KEY, model)
+        return f"The solver now uses {model}, from the next solve or redo."
 
     def _execute(self, s: Session, c: dict) -> str:
         action = c["action"]
@@ -259,8 +282,17 @@ class Bot:
             ("Course modes (auto, approve, notify)", _open({"name": "modes"})),
             ("Check the LMS now", {"do": "check"}),
             ("System status", {"do": "status"}),
+            (f"Solver model: {self.kv.get(actions.MODEL_KEY) or 'default'} (change)", _open({"name": "model"})),
         ]
         return "LMS BOT", [], options
+
+    def _screen_model(self, s: Session, screen: dict):
+        now = self.kv.get(actions.MODEL_KEY)
+        lines = [f"Now: {now or 'default (SOLVER_MODEL, else your plan’s)'}.", "The Claude model that solves your work, from the next solve or redo."]
+        options = [(label, {"do": "model", "model": m}) for label, m in (
+            ("Default", ""), ("Opus", "opus"), ("Sonnet", "sonnet"), ("Haiku", "haiku"))]
+        options.append(("Type a model name", {"do": "model_text"}))
+        return "Solver model", lines, options
 
     def _screen_section(self, s: Session, screen: dict):
         kind, course_id = screen["kind"], screen.get("course")

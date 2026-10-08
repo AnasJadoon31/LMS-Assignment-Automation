@@ -18,6 +18,7 @@ from .db.models import Assignment, Course, CourseMode, Event, Job, JobState
 from .kv import KeyValue
 
 POLL_NOW_KEY = "poll_requested"  # the watcher's
+MODEL_KEY = "solver_model"  # the model picked in the chat; wins over SOLVER_MODEL
 REDO_STATES = {JobState.AWAITING_APPROVAL, JobState.NEEDS_HUMAN, JobState.CONFIRMED, JobState.HANDWRITTEN}
 
 JOB_WORDS = {

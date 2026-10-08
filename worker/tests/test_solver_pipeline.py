@@ -272,6 +272,14 @@ def test_a_course_prompt_is_added_to_or_replaces_the_built_in_one(solver, sandbo
         assert "Execute every example in the lab sheet as well" in system  # the built-in OS Lab rule
 
 
+def test_the_model_picked_in_the_chat_is_the_one_the_run_uses(solver, sandbox, sessions, tmp_path):
+    add_job(sessions, tmp_path)
+    DbKV(sessions).set("solver_model", "sonnet")
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    assert sandbox.runs[0]["job"]["model"] == "sonnet"
+
+
 def test_handwritten_work_waits_for_approval_even_in_auto_mode(solver, sandbox, channel, sessions, tmp_path):
     job_id = add_job(sessions, tmp_path, mode="auto")
     sandbox.script = play(stream({**SUMMARY, "status": "handwritten"}))
