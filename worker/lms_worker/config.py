@@ -67,6 +67,7 @@ class SolverConfig:
 
     image: str
     network: str | None = "lms-sandbox"
+    hostname: str | None = "server"  # the solver container's host name, shown in its terminal prompt
     proxy: str | None = None  # an HTTPS proxy for solver containers; direct internet without one
     docker_host: str | None = None  # the socket proxy; the local Docker socket without it
     login_volume: str | None = None  # found from the worker's own mounts when not set
@@ -129,6 +130,7 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         solver = SolverConfig(
             image=os.environ["SOLVER_IMAGE"].strip(),
             network=os.environ.get("SOLVER_NETWORK", "lms-sandbox").strip() or None,
+            hostname=os.environ.get("SOLVER_HOSTNAME", "server").strip() or None,
             proxy=os.environ.get("SOLVER_PROXY", "").strip() or None,
             docker_host=os.environ.get("DOCKER_HOST", "").strip() or None,
             login_volume=os.environ.get("SOLVER_LOGIN_VOLUME", "").strip() or None,

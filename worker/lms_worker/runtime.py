@@ -68,7 +68,8 @@ class Runtime:
         from .solver.usage import UsageGuard
 
         home = str(self.settings.claude_home)
-        sandbox = DockerSandbox.deployed(cfg.image, cfg.network, cfg.login_volume, home, docker_host=cfg.docker_host)
+        sandbox = DockerSandbox.deployed(cfg.image, cfg.network, cfg.login_volume, home, docker_host=cfg.docker_host,
+                                         hostname=cfg.hostname)
         env = {"HTTPS_PROXY": cfg.proxy, "https_proxy": cfg.proxy} if cfg.proxy else {}
         return Solver(
             self.sessions, self.kv, self.outbox(), sandbox, self.settings.data_dir,

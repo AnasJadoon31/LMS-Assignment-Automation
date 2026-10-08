@@ -120,7 +120,7 @@ def _safe_extract(stream, dest: Path, strip: str) -> None:
 
 class DockerSandbox:
     def __init__(self, image: str, network: str | None, login_volume: str, *, docker_host: str | None = None,
-                 cpus: float = 2.0, memory: str = "4g", pids: int = 512, client=None):
+                 cpus: float = 2.0, memory: str = "4g", pids: int = 512, client=None, hostname: str | None = None):
         if client is None:
             import docker  # only the worker in production needs it
 
@@ -128,12 +128,13 @@ class DockerSandbox:
         self.client = client
         self.image, self.network, self.login_volume = image, network, login_volume
         self.cpus, self.memory, self.pids = cpus, memory, pids
+        self.hostname = hostname  # what the container calls itself, e.g. in a terminal prompt
 
     @classmethod
     def deployed(cls, image: str, network: str | None, login_volume: str | None, login_path: str,
-                 *, docker_host: str | None = None, client=None) -> DockerSandbox:
+                 *, docker_host: str | None = None, client=None, hostname: str | None = None) -> DockerSandbox:
         """Coolify renames a compose file's images, volumes and networks; find them as deployed."""
-        box = cls(image, network, login_volume or "", docker_host=docker_host, client=client)
+        box = cls(image, network, login_volume or "", docker_host=docker_host, client=client, hostname=hostname)
         box.image = _find_image(box.client, image)
         box.network = _find_network(box.client, network) if network else None
         box.login_volume = login_volume or _own_volume(box.client, login_path) or "lms-claude-home"
@@ -160,7 +161,7 @@ class DockerSandbox:
         self._ensure_network()
         container = self.client.containers.create(
             self.image, command=["python3", "-m", "lms_sandbox.run"], environment=env, working_dir="/work",
-            network=self.network, network_disabled=self.network is None, user=str(SANDBOX_UID),
+            network=self.network, network_disabled=self.network is None, user=str(SANDBOX_UID), hostname=self.hostname,
             volumes={self.login_volume: {"bind": "/home/solver", "mode": "rw"}},
             nano_cpus=int(self.cpus * 1e9), mem_limit=self.memory, pids_limit=self.pids,
             cap_drop=["ALL"], security_opt=["no-new-privileges"], detach=True,

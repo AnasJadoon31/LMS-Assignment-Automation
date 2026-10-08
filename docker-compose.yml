@@ -34,6 +34,8 @@ services:
       - DOCKER_HOST=tcp://docker-proxy:2375
       - SOLVER_IMAGE=lms-solver:latest
       - SOLVER_NETWORK=lms-sandbox
+      # The solver container's host name: with SOLVER_USER, the prompt in terminal screenshots (anas@server)
+      - SOLVER_HOSTNAME=${SOLVER_HOSTNAME:-server}
       - SOLVER_DAILY_CAP=${SOLVER_DAILY_CAP:-6}
       - SOLVER_PAUSE_AT=${SOLVER_PAUSE_AT:-0.8}
       - SOLVER_MODEL=${SOLVER_MODEL:-}
@@ -99,7 +101,10 @@ services:
   # of its containers is on, which put the proxy next to the solver, and then no deploy could
   # change the network because the proxy was still on it.
   solver-image:
-    build: ./sandbox
+    build:
+      context: ./sandbox
+      args:
+        SOLVER_USER: ${SOLVER_USER:-anas}
     image: lms-solver:latest
     restart: unless-stopped
     command: ["sleep", "infinity"]
