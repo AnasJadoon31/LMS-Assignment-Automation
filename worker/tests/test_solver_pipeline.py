@@ -255,6 +255,23 @@ def test_without_an_upload_the_pdf_comes_back_to_upload_by_hand(sessions, channe
     assert file == pdf.name
 
 
+@pytest.mark.parametrize("replaces", [False, True])
+def test_a_course_prompt_is_added_to_or_replaces_the_built_in_one(solver, sandbox, sessions, tmp_path, replaces):
+    job_id = add_job(sessions, tmp_path)
+    with sessions.begin() as s:
+        course = s.get(Job, job_id).assignment.course
+        course.prompt, course.prompt_replaces = "Execute every example too.", replaces
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    system = sandbox.runs[0]["job"]["system"]
+    if replaces:
+        assert system == "Execute every example too."
+    else:
+        assert system.startswith("You solve a university assignment") and "The work folder is /work" in system
+        assert system.endswith("The student's own instructions for this course; follow them too:\nExecute every example too.")
+        assert "Execute every example in the lab sheet as well" in system  # the built-in OS Lab rule
+
+
 def test_handwritten_work_waits_for_approval_even_in_auto_mode(solver, sandbox, channel, sessions, tmp_path):
     job_id = add_job(sessions, tmp_path, mode="auto")
     sandbox.script = play(stream({**SUMMARY, "status": "handwritten"}))

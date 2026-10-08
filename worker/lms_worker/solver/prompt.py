@@ -78,9 +78,17 @@ Rules:
 - The student details are in the theme README; use them exactly as written there.
 - Never change or delete the theme artifact or any other existing artifact; the report goes in {work}/out.
 - You have the internet and every Claude Code tool: search, fetch pages and install what you need (pip, or tools into your home folder) whenever it helps.
-- Operating Systems Lab work: always solve it for real on this server, and attach the real screenshots from nano and the terminal, with the name anas@server.
+- Operating Systems Lab work: always solve it for real on this server, and attach the real screenshots from nano and the terminal, with the name anas@server. Execute every example in the lab sheet as well, not only the tasks, and show each one's real screenshot.
 - If the sheet says the work must be handwritten, still solve all of it completely and build the report the same way, as the worked solution the student will copy by hand; finish with status handwritten.
 - If the work cannot be done here (it needs hardware, a group, a website login, or a tool that cannot be installed), stop and give the reason with status blocked."""
+
+
+def course_prompt(built_in: str, own: str | None, replaces: bool) -> str:
+    """A course's own system prompt, set in the chat: added after the built-in one, or used instead of it."""
+    own = (own or "").strip()
+    if not own:
+        return built_in
+    return own if replaces else f"{built_in}\n\nThe student's own instructions for this course; follow them too:\n{own}"
 
 
 @dataclass(frozen=True)

@@ -116,6 +116,16 @@ class Bot:
             return [self._render(s, stack)]
         screen = stack[-1]
 
+        if screen["name"] == "prompt_text":  # free text: the course's own system prompt
+            if text in ("", "0"):
+                stack.pop()
+                return [self._render(s, stack)]
+            course = s.get(Course, screen["course"])
+            course.prompt, course.prompt_replaces = text[:6000], bool(screen["replace"])
+            stack.pop()
+            how = "It replaces the built-in prompt" if course.prompt_replaces else "It is added to the built-in prompt"
+            return [Reply(f"Saved for {course.name}. {how}, from the next solve or redo."), self._render(s, stack)]
+
         if screen["name"] == "note":  # free text: the redo note
             if text in ("", "0"):
                 stack.pop()
@@ -162,6 +172,18 @@ class Bot:
         if kind == "confirm":
             stack.append({"name": "confirm", **{k: v for k, v in option.items() if k != "do"}})
             return [self._render(s, stack)]
+        if kind == "prompt_text":
+            stack.append({"name": "prompt_text", "course": option["course"], "replace": option["replace"]})
+            what = ("the whole system prompt for this course; it replaces the built-in one" if option["replace"]
+                    else "your instructions for this course; they are added to the built-in prompt")
+            return [Reply(f"Type {what}, in one message. 0 cancels.")]
+        if kind == "prompt_show":
+            course = s.get(Course, option["course"])
+            return [Reply(course.prompt or "No prompt of your own is set for this course.")]
+        if kind == "prompt_clear":
+            course = s.get(Course, option["course"])
+            course.prompt, course.prompt_replaces = None, False
+            return [Reply(f"Removed. {course.name} uses the built-in prompt only."), self._render(s, stack)]
         if kind == "note":
             stack.append({"name": "note", "job": option["job"]})
             return [Reply("Type what should change in the redo, in one message. 0 cancels.")]
@@ -338,7 +360,20 @@ class Bot:
         if is_lab(c.name):
             options.append((f"Lab papers: {_paper_summary(p, now)}", _open({"name": "section", "kind": PAPER, "course": c.id})))
         options.append((f"Mode: {c.mode} (change)", _open({"name": "mode_pick", "course": c.id})))
+        options.append((f"System prompt: {_prompt_words(c)} (change)", _open({"name": "prompt", "course": c.id})))
         return c.name, [], options
+
+    def _screen_prompt(self, s: Session, screen: dict):
+        c = s.get(Course, screen["course"])
+        lines = [f"Now: {_prompt_words(c)}.", "What Claude is told when it solves this course's work."]
+        options = [
+            ("Add my instructions to the built-in prompt", {"do": "prompt_text", "course": c.id, "replace": False}),
+            ("Replace the built-in prompt with mine", {"do": "prompt_text", "course": c.id, "replace": True}),
+        ]
+        if c.prompt:
+            options += [("Show my prompt", {"do": "prompt_show", "course": c.id}),
+                        ("Remove my prompt (built-in only)", {"do": "prompt_clear", "course": c.id})]
+        return f"{c.name} · system prompt", lines, options
 
     def _screen_modes(self, s: Session, screen: dict):
         options = [(f"{c.name}: {c.mode}", _open({"name": "mode_pick", "course": c.id})) for c in self._courses(s)]
@@ -573,6 +608,12 @@ def _summary(items: list[Assignment], now: datetime) -> str:
     if not left:
         return "nothing remaining"
     return f"{left} remaining" + (f", {soon} due soon" if soon else "")
+
+
+def _prompt_words(c: Course) -> str:
+    if not c.prompt:
+        return "built-in"
+    return "yours, replacing the built-in one" if c.prompt_replaces else "built-in plus your instructions"
 
 
 def _status(a: Assignment, now: datetime) -> str:

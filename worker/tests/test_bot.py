@@ -190,6 +190,36 @@ def test_a_submission_on_an_open_assignment_can_be_deleted_after_a_yes(bot, seme
     assert "Delete my submission" not in text(closed)
 
 
+def test_a_course_gets_its_own_system_prompt_from_the_chat(bot, semester, sessions):
+    courses = say(bot, "menu", pick(say(bot, "menu"), "By course"))
+    course = say(bot, pick(courses, "DAA"))
+    assert "System prompt: built-in (change)" in text(course)
+    screen = say(bot, pick(course, "System prompt"))
+    assert "Now: built-in." in text(screen) and "Show my prompt" not in text(screen)
+
+    asked = text(say(bot, pick(screen, "Add my instructions")))
+    assert asked.startswith("Type your instructions for this course; they are added to the built-in prompt")
+    out = text(say(bot, "Use C, never Python."))
+    assert out.startswith("Saved for DAA. It is added to the built-in prompt, from the next solve or redo.")
+    assert "Now: built-in plus your instructions." in out
+    with sessions() as s:
+        c = s.get(Course, semester["daa"])
+        assert (c.prompt, c.prompt_replaces) == ("Use C, never Python.", False)
+
+    screen = say(bot, "0", pick(course, "System prompt"))
+    assert text(say(bot, pick(screen, "Show my prompt"))) == "Use C, never Python."
+    say(bot, pick(screen, "Replace the built-in prompt"))
+    assert "Now: yours, replacing the built-in one." in text(say(bot, "Only this."))
+    with sessions() as s:
+        c = s.get(Course, semester["daa"])
+        assert (c.prompt, c.prompt_replaces) == ("Only this.", True)
+
+    screen = say(bot, "0", pick(course, "System prompt"))
+    assert text(say(bot, pick(screen, "Remove my prompt"))).startswith("Removed. DAA uses the built-in prompt only.")
+    with sessions() as s:
+        assert s.get(Course, semester["daa"]).prompt is None
+
+
 def test_files_are_sent_as_documents(bot, semester):
     say(bot, "menu", "1", "1", "1")
     (q,) = say(bot, "1")

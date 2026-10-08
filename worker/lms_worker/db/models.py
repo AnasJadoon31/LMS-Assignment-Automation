@@ -54,6 +54,10 @@ class Course(Base):
     semester_name: Mapped[str] = mapped_column(String(64), default="")
     mode: Mapped[str] = mapped_column(String(16), default=CourseMode.APPROVE)
     sandbox_profile: Mapped[str] = mapped_column(String(64), default="python-jupyter")
+    # Your own system prompt for this course's solver runs, set in the chat: added to the
+    # built-in one, or used instead of it
+    prompt: Mapped[str | None] = mapped_column(Text)
+    prompt_replaces: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     first_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
 
