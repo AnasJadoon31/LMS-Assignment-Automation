@@ -36,7 +36,7 @@ from typing import Callable, Protocol
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..actions import MODEL_KEY
+from ..actions import EFFORT_KEY, MODEL_KEY
 from ..db.models import Artifact, Assignment, Course, CourseMode, Event, Job, JobState, utcnow
 from ..kv import KeyValue
 from ..lms.bahria_pages import LMS_TZ
@@ -248,6 +248,9 @@ class Solver:
         model = (self.kv.get(MODEL_KEY) or "").strip() or self.model  # the chat's choice, else SOLVER_MODEL
         if model:
             spec["model"] = model
+        effort = (self.kv.get(EFFORT_KEY) or "").strip()
+        if effort:
+            spec["effort"] = effort
         if resume:
             spec["resume"] = resume
         (work / "job.json").write_text(json.dumps(spec))

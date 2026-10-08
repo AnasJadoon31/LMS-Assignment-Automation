@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from . import actions
+from .solver.prompt import system_prompt
 from .db.models import TERMINAL_STATES, Artifact, Assignment, ChatSession, Course, CourseMode, Event, Job, JobState, utcnow
 from .kv import KeyValue
 from .lms.bahria_pages import LMS_TZ
@@ -192,6 +193,24 @@ class Bot:
             course = s.get(Course, option["course"])
             course.prompt, course.prompt_replaces = None, False
             return [Reply(f"Removed. {course.name} uses the built-in prompt only."), self._render(s, stack)]
+        if kind == "effort":
+            if option["effort"]:
+                self.kv.set(actions.EFFORT_KEY, option["effort"])
+                said = f"The solver now uses {option['effort']} effort, from the next solve or redo."
+            else:
+                self.kv.delete(actions.EFFORT_KEY)
+                said = "The solver uses the default effort again."
+            return [Reply(said), self._render(s, stack)]
+        if kind == "cap":
+            if option["lift"]:
+                self.kv.set(actions.CAP_LIFTED_KEY, self.now().astimezone(LMS_TZ).date().isoformat())
+                said = "The daily limit is lifted for today. Waiting work is picked up within a minute."
+            else:
+                self.kv.delete(actions.CAP_LIFTED_KEY)
+                said = "The daily limit is back on."
+            return [Reply(said), self._render(s, stack)]
+        if kind == "prompt_builtin":
+            return [Reply(system_prompt())]
         if kind == "model":
             return [Reply(self._set_model(option["model"])), self._render(s, stack)]
         if kind == "model_text":
@@ -233,6 +252,10 @@ class Bot:
         action = c["action"]
         if action == "mode":
             return actions.set_mode(s.get(Course, c["course"]), c["mode"])[1]
+        if action == "password":
+            password = actions.reset_password(self.kv)
+            where = self.setup_url.removesuffix("/setup") + "/login" if self.setup_url else "the web page"
+            return f"The new web page password is:\n{password}\nSign in at {where}. Every browser was signed out; ADMIN_PASSWORD no longer works."
         if action == "delete":
             a = s.get(Assignment, c["assignment"])
             if a is None:
@@ -283,16 +306,36 @@ class Bot:
             ("Check the LMS now", {"do": "check"}),
             ("System status", {"do": "status"}),
             (f"Solver model: {self.kv.get(actions.MODEL_KEY) or 'default'} (change)", _open({"name": "model"})),
+            (f"Solver effort: {self.kv.get(actions.EFFORT_KEY) or 'default'} (change)", _open({"name": "effort"})),
+            (f"Daily solve limit: {'lifted for today' if self._cap_lifted() else 'on'} (change)", _open({"name": "cap"})),
+            ("Reset the web page password", {"do": "confirm", "action": "password"}),
         ]
         return "LMS BOT", [], options
+
+    def _cap_lifted(self) -> bool:
+        return self.kv.get(actions.CAP_LIFTED_KEY) == self.now().astimezone(LMS_TZ).date().isoformat()
 
     def _screen_model(self, s: Session, screen: dict):
         now = self.kv.get(actions.MODEL_KEY)
         lines = [f"Now: {now or 'default (SOLVER_MODEL, else your plan’s)'}.", "The Claude model that solves your work, from the next solve or redo."]
-        options = [(label, {"do": "model", "model": m}) for label, m in (
-            ("Default", ""), ("Opus", "opus"), ("Sonnet", "sonnet"), ("Haiku", "haiku"))]
+        options = [("Default", {"do": "model", "model": ""})]
+        options += [(f"{label} ({m})", {"do": "model", "model": m}) for label, m in actions.MODELS]
         options.append(("Type a model name", {"do": "model_text"}))
         return "Solver model", lines, options
+
+    def _screen_effort(self, s: Session, screen: dict):
+        now = self.kv.get(actions.EFFORT_KEY)
+        lines = [f"Now: {now or 'default'}.", "How hard the model thinks, from the next solve or redo. Higher uses more of your plan."]
+        options = [("Default", {"do": "effort", "effort": ""})] + [(e, {"do": "effort", "effort": e}) for e in actions.EFFORTS]
+        return "Solver effort", lines, options
+
+    def _screen_cap(self, s: Session, screen: dict):
+        lifted = self._cap_lifted()
+        lines = [f"Now: {'lifted for today' if lifted else 'on'}.",
+                 "The limit on solver runs per day. Lifting it lets more be solved today; your Claude plan's own limits still apply.",
+                 "It is back on by itself tomorrow."]
+        options = [("Put the limit back", {"do": "cap", "lift": False})] if lifted else [("Lift the limit for today", {"do": "cap", "lift": True})]
+        return "Daily solve limit", lines, options
 
     def _screen_section(self, s: Session, screen: dict):
         kind, course_id = screen["kind"], screen.get("course")
@@ -402,6 +445,7 @@ class Bot:
             ("Add my instructions to the built-in prompt", {"do": "prompt_text", "course": c.id, "replace": False}),
             ("Replace the built-in prompt with mine", {"do": "prompt_text", "course": c.id, "replace": True}),
         ]
+        options.append(("Show the built-in prompt", {"do": "prompt_builtin"}))
         if c.prompt:
             options += [("Show my prompt", {"do": "prompt_show", "course": c.id}),
                         ("Remove my prompt (built-in only)", {"do": "prompt_clear", "course": c.id})]
@@ -426,6 +470,8 @@ class Bot:
         if action == "mode":
             c = s.get(Course, screen["course"])
             question = [f"Switch {c.name} to auto?", "Work will be uploaded under your name without you reading it first."]
+        elif action == "password":
+            question = ["Reset the web page password?", "A new one is made and sent here; the old one stops working and every browser is signed out."]
         elif action == "delete":
             a = s.get(Assignment, screen["assignment"])
             if a is None:

@@ -102,6 +102,22 @@ def test_the_page_needs_the_password(tmp_path):
     assert c.get("/api/setup/status").status_code == 403  # no X-LMS header: a form on another site cannot call it
 
 
+def test_a_password_reset_from_the_chat_replaces_the_variable_and_signs_browsers_out(tmp_path):
+    from lms_worker import actions
+    from lms_worker.web import Auth
+
+    kv = FileKV(tmp_path / "kv")
+    app = FastAPI()
+    app.include_router(setup_router(password=PASSWORD, secret_key=KEY, login=None, admin=StubAdmin(), auth=Auth(PASSWORD, KEY, kv=kv)))
+    c = signed_in(TestClient(app, base_url="https://lms.example.com"))
+    assert c.get("/setup", follow_redirects=False).status_code == 200
+    new = actions.reset_password(kv)
+    assert c.get("/setup", follow_redirects=False).headers["location"] == "/login"  # signed out
+    assert c.post("/login", data={"password": PASSWORD}).status_code == 401  # the old one is dead
+    assert c.post("/login", data={"password": new}, follow_redirects=False).status_code == 303
+    assert c.get("/setup", follow_redirects=False).status_code == 200
+
+
 def test_wrong_passwords_lock_out(tmp_path):
     c = client(tmp_path)
     for _ in range(5):

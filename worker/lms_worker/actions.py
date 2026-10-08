@@ -9,7 +9,10 @@ the LMS shows a file; the worker follows the link at once and reports what happe
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import secrets
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -19,6 +22,18 @@ from .kv import KeyValue
 
 POLL_NOW_KEY = "poll_requested"  # the watcher's
 MODEL_KEY = "solver_model"  # the model picked in the chat; wins over SOLVER_MODEL
+EFFORT_KEY = "solver_effort"  # the effort picked in the chat; the CLI's own default without it
+CAP_LIFTED_KEY = "solver_cap_lifted"  # the day (Pakistan time) the daily run limit is lifted for
+PASSWORD_KEY = "admin_password"  # the page password as reset from the chat (salted hash); wins over ADMIN_PASSWORD
+# What Claude Code 2.1.290 (the pinned CLI) knows; whether your plan offers each one is the plan's business
+MODELS = (
+    ("Fable 5.1", "claude-fable-5-1"), ("Opus 5.5", "claude-opus-5-5"), ("Opus 5", "claude-opus-5"),
+    ("Opus 4.8", "claude-opus-4-8"), ("Opus 4.7", "claude-opus-4-7"), ("Opus 4.6", "claude-opus-4-6"),
+    ("Opus 4.5", "claude-opus-4-5"), ("Opus 4.1", "claude-opus-4-1"),
+    ("Sonnet 5.5", "claude-sonnet-5-5"), ("Sonnet 5", "claude-sonnet-5"), ("Sonnet 4.6", "claude-sonnet-4-6"),
+    ("Sonnet 4.5", "claude-sonnet-4-5"), ("Haiku 4.5", "claude-haiku-4-5"),
+)
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 REDO_STATES = {JobState.AWAITING_APPROVAL, JobState.NEEDS_HUMAN, JobState.CONFIRMED, JobState.HANDWRITTEN}
 
 JOB_WORDS = {
@@ -42,6 +57,30 @@ MODE_WORDS = {
     CourseMode.AUTO: "upload after the checks, without asking",
     CourseMode.NOTIFY: "only send me the question",
 }
+
+
+def _hash(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 200_000).hex()
+
+
+def reset_password(kv: KeyValue) -> str:
+    """A new page password, kept as a salted hash. Returns it, to be shown once."""
+    password, salt = secrets.token_urlsafe(12), secrets.token_hex(16)
+    kv.set(PASSWORD_KEY, json.dumps({"salt": salt, "hash": _hash(password, salt)}))
+    return password
+
+
+def stored_password(kv: KeyValue | None) -> dict | None:
+    raw = kv.get(PASSWORD_KEY) if kv is not None else None
+    return json.loads(raw) if raw else None
+
+
+def password_matches(kv: KeyValue | None, env_password: str | None, given: str) -> bool:
+    """Against the password reset from the chat when there is one, else ADMIN_PASSWORD."""
+    stored = stored_password(kv)
+    if stored:
+        return hmac.compare_digest(_hash(given, stored["salt"]), stored["hash"])
+    return bool(env_password) and hmac.compare_digest(given.encode(), env_password.encode())
 
 
 def move(s: Session, job: Job, to: JobState, detail: str) -> None:

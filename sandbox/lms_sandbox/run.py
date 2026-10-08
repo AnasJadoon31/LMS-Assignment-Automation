@@ -53,6 +53,8 @@ def claude_args(job: dict) -> list[str]:
         args += ["--json-schema", json.dumps(job["schema"])]
     if job.get("model"):
         args += ["--model", job["model"]]
+    if job.get("effort"):
+        args += ["--effort", job["effort"]]
     if job.get("resume"):
         args += ["--resume", job["resume"]]
     return args

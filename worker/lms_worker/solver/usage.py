@@ -23,6 +23,7 @@ from .claude import RateLimit
 USAGE_KEY = "claude_usage"
 PAUSE_KEY = "claude_paused"
 RUNS_KEY = "solver_runs"
+CAP_LIFTED_KEY = "solver_cap_lifted"  # set from the chat: the day the daily run limit does not apply
 MARGIN = timedelta(minutes=3)
 WINDOW_NAMES = {"five_hour": "5-hour", "seven_day": "weekly", "seven_day_opus": "weekly Opus", "seven_day_sonnet": "weekly Sonnet"}
 
@@ -89,7 +90,7 @@ class UsageGuard:
             if until > now:
                 return Pause(until, d["reason"])
             self.kv.delete(PAUSE_KEY)
-        if self.runs_today(now) >= self.daily_cap:
+        if self.runs_today(now) >= self.daily_cap and self.kv.get(CAP_LIFTED_KEY) != _day(now):
             midnight = (now.astimezone(LMS_TZ) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             return Pause(midnight.astimezone(timezone.utc), "daily cap")
         return None

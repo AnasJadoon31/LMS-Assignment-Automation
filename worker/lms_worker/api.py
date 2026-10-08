@@ -89,7 +89,7 @@ def create_app(
         stop.set()
 
     app = FastAPI(title="LMS Assignment Automation", lifespan=lifespan, docs_url=None, redoc_url=None)
-    auth = Auth(settings.admin_password, settings.app_secret_key or "")
+    auth = Auth(settings.admin_password, settings.app_secret_key or "", kv=kv)
     app.include_router(setup_router(password=settings.admin_password, secret_key=settings.app_secret_key or "",
                                     login=login, admin=admin, drive=drive, discord=discord,
                                     whatsapp=whatsapp, sender=sender,

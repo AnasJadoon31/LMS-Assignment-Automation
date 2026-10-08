@@ -275,9 +275,25 @@ def test_a_course_prompt_is_added_to_or_replaces_the_built_in_one(solver, sandbo
 def test_the_model_picked_in_the_chat_is_the_one_the_run_uses(solver, sandbox, sessions, tmp_path):
     add_job(sessions, tmp_path)
     DbKV(sessions).set("solver_model", "sonnet")
+    DbKV(sessions).set("solver_effort", "xhigh")
     sandbox.script = play(stream(SUMMARY))
     solver.run_once()
-    assert sandbox.runs[0]["job"]["model"] == "sonnet"
+    assert (sandbox.runs[0]["job"]["model"], sandbox.runs[0]["job"]["effort"]) == ("sonnet", "xhigh")
+
+
+def test_the_daily_limit_can_be_lifted_for_today():
+    from lms_worker.kv import FileKV
+    import tempfile
+
+    kv = FileKV(Path(tempfile.mkdtemp()))
+    guard = UsageGuard(kv, daily_cap=1)
+    guard.count_run(NOW)
+    assert guard.paused(NOW).reason == "daily cap"
+    kv.set("solver_cap_lifted", NOW.astimezone(LMS_TZ).date().isoformat())
+    assert guard.paused(NOW) is None
+    assert guard.paused(NOW + timedelta(days=1)) is None  # a new day: the count starts again
+    guard.count_run(NOW + timedelta(days=1))
+    assert guard.paused(NOW + timedelta(days=1)).reason == "daily cap"  # and yesterday's lift is over
 
 
 def test_handwritten_work_waits_for_approval_even_in_auto_mode(solver, sandbox, channel, sessions, tmp_path):

@@ -37,6 +37,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
+from . import actions
 from .claude_login import ClaudeLogin, LoginError
 from .gdrive import CALLBACK, DriveError, GoogleDrive
 from .notify import DiscordSetting, Notifier, NotifyError, WhatsAppNumber, masked
@@ -67,11 +68,25 @@ def session_valid(key: str, cookie: str | None, now: float) -> bool:
 class Auth:
     """The page password and the signed session cookie, shared by every page."""
 
-    def __init__(self, password: str | None, secret_key: str, clock=time.time) -> None:
-        self.password, self.secret_key, self.clock = password, secret_key, clock
+    def __init__(self, password: str | None, secret_key: str, clock=time.time, kv=None) -> None:
+        self.password, self.secret_key, self.clock, self.kv = password, secret_key, clock, kv
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.password) or actions.stored_password(self.kv) is not None
+
+    def check(self, given: str) -> bool:
+        """The password reset from the chat when there is one, else ADMIN_PASSWORD."""
+        return actions.password_matches(self.kv, self.password, given)
+
+    @property
+    def session_key(self) -> str:
+        """Sessions are signed with the password's hash too, so a reset signs every browser out."""
+        stored = actions.stored_password(self.kv)
+        return self.secret_key + (stored["hash"] if stored else "")
 
     def signed_in(self, request: Request) -> bool:
-        return bool(self.password) and session_valid(self.secret_key, request.cookies.get(COOKIE), self.clock())
+        return self.configured and session_valid(self.session_key, request.cookies.get(COOKIE), self.clock())
 
     def guard(self, request: Request) -> None:
         """For JSON calls: the cookie, and the X-LMS header a form on another site cannot send."""
@@ -117,7 +132,7 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
 
     @router.get("/login", response_class=HTMLResponse)
     def login_page(error: str = "") -> HTMLResponse:
-        return HTMLResponse(_login_html(error, configured=bool(password)))
+        return HTMLResponse(_login_html(error, configured=auth.configured))
 
     @router.post("/login")
     def login_post(request: Request, password_field: str = Form(alias="password")):
@@ -126,13 +141,13 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
         failures[ip] = [t for t in failures[ip] if now - t < LOCKOUT_SECONDS]
         if len(failures[ip]) >= MAX_FAILURES:
             return HTMLResponse(_login_html("Too many wrong passwords. Try again in 15 minutes.", True), status_code=429)
-        if not password or not hmac.compare_digest(password_field.encode(), password.encode()):
+        if not auth.check(password_field):
             failures[ip].append(now)
-            return HTMLResponse(_login_html("Wrong password.", bool(password)), status_code=401)
+            return HTMLResponse(_login_html("Wrong password.", auth.configured), status_code=401)
         failures.pop(ip, None)
         resp = RedirectResponse("/courses", status_code=303)
         https = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
-        resp.set_cookie(COOKIE, session_cookie(secret_key, now), max_age=SESSION_SECONDS, httponly=True,
+        resp.set_cookie(COOKIE, session_cookie(auth.session_key, now), max_age=SESSION_SECONDS, httponly=True,
                         secure=https, samesite="strict")
         return resp
 

@@ -225,9 +225,11 @@ def test_the_solver_model_is_picked_in_the_chat(bot, semester, sessions):
     assert "9. Solver model: default (change)" in text(menu)
     screen = say(bot, "9")
     assert "Now: default" in text(screen)
-    out = text(say(bot, pick(screen, "Sonnet")))
-    assert out.startswith("The solver now uses sonnet, from the next solve or redo.") and "Now: sonnet." in out
-    assert DbKV(sessions).get("solver_model") == "sonnet"
+    for label in ("Fable 5.1", "Opus 5.5", "Opus 4.8", "Opus 4.5", "Sonnet 5.5", "Sonnet 4.5", "Haiku 4.5"):
+        assert f". {label} (claude-" in text(screen), label
+    out = text(say(bot, pick(screen, "Opus 4.8")))
+    assert out.startswith("The solver now uses claude-opus-4-8, from the next solve or redo.") and "Now: claude-opus-4-8." in out
+    assert DbKV(sessions).get("solver_model") == "claude-opus-4-8"
     say(bot, pick(screen, "Type a model name"))
     assert text(say(bot, "claude-opus-5-5")).startswith("The solver now uses claude-opus-5-5")
     say(bot, pick(screen, "Type a model name"))
@@ -235,6 +237,46 @@ def test_the_solver_model_is_picked_in_the_chat(bot, semester, sessions):
     assert DbKV(sessions).get("solver_model") == "claude-opus-5-5"
     assert text(say(bot, pick(screen, "Default"))).startswith("The solver uses the default model again.")
     assert DbKV(sessions).get("solver_model") is None
+
+
+def test_effort_the_daily_limit_and_the_built_in_prompt_from_the_chat(bot, semester, sessions):
+    kv = DbKV(sessions)
+    menu = say(bot, "menu")
+    assert "Solver effort: default (change)" in text(menu) and "Daily solve limit: on (change)" in text(menu)
+    screen = say(bot, pick(menu, "Solver effort"))
+    assert [l.split(". ")[1] for l in text(screen).splitlines() if l[:1].isdigit()] == ["Default", "low", "medium", "high", "xhigh", "max"]
+    assert text(say(bot, pick(screen, "xhigh"))).startswith("The solver now uses xhigh effort")
+    assert kv.get("solver_effort") == "xhigh"
+    assert text(say(bot, pick(screen, "Default"))).startswith("The solver uses the default effort again.")
+    assert kv.get("solver_effort") is None
+
+    menu = say(bot, "menu")
+    out = text(say(bot, pick(menu, "Daily solve limit"), "1"))
+    assert out.startswith("The daily limit is lifted for today.") and "Now: lifted for today." in out
+    assert kv.get("solver_cap_lifted") == "2026-10-10"
+    assert text(say(bot, "1")).startswith("The daily limit is back on.") and kv.get("solver_cap_lifted") is None
+
+    courses = say(bot, "menu", pick(say(bot, "menu"), "By course"))
+    course = say(bot, pick(courses, "DAA"))
+    screen = say(bot, pick(course, "System prompt"))
+    shown = text(say(bot, pick(screen, "Show the built-in prompt")))
+    assert shown.startswith("You solve a university assignment") and "anas@server" in shown
+
+
+def test_the_web_page_password_is_reset_from_the_chat(bot, semester, sessions):
+    from lms_worker import actions
+
+    kv = DbKV(sessions)
+    assert actions.password_matches(kv, "from-env", "from-env")
+    menu = say(bot, "menu")
+    confirm = text(say(bot, pick(menu, "Reset the web page password")))
+    assert "Reset the web page password?" in confirm and "1. Yes" in confirm
+    out = text(say(bot, "1"))
+    new = out.splitlines()[1]
+    assert out.startswith("The new web page password is:") and len(new) >= 12
+    assert actions.password_matches(kv, "from-env", new)
+    assert not actions.password_matches(kv, "from-env", "from-env")  # the variable no longer opens the page
+    assert new not in kv.get("admin_password")  # only a hash is kept
 
 
 def test_files_are_sent_as_documents(bot, semester):
