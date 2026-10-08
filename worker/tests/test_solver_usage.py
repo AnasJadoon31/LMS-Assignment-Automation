@@ -85,8 +85,9 @@ def test_status_line(tmp_path):
 def test_lifting_the_limits_for_a_day_takes_away_the_cap_and_the_early_stop_only(tmp_path):
     kv = FileKV(tmp_path)
     guard = UsageGuard(kv, pause_at=0.8, daily_cap=1)
-    guard.count_run(NOW)
     assert guard.record(StreamReader().feed(limit_line(five=0.85)), NOW).reason == "headroom"
+    guard.count_run(NOW)
+    assert guard.paused(NOW).reason == "headroom" and guard.paused(NOW + timedelta(hours=3)).reason == "daily cap"
     kv.set("solver_cap_lifted", NOW.astimezone(LMS_TZ).date().isoformat())
     assert guard.paused(NOW) is None  # neither the cap nor the pause already recorded holds today
     assert guard.record(StreamReader().feed(limit_line(five=0.95)), NOW) is None and guard.paused(NOW) is None
