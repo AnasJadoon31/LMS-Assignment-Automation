@@ -381,7 +381,7 @@ class Bot:
                 said = f"The solver now uses {option['effort']} effort, from the next solve or redo."
             else:
                 self.kv.delete(actions.EFFORT_KEY)
-                said = "The effort is picked per job again."
+                said = "The solver uses the default effort again."
             return [Reply(said), self._render(s, stack)]
         if kind == "cap":
             if option["lift"]:
@@ -464,14 +464,14 @@ class Bot:
         actions.summarize(s, course, lectures)
         weeks = ", ".join(dict.fromkeys(week for week, _, _ in picked))
         return [Reply(f"Queued: notes for {course.name}, week{'s' * (',' in weeks)} {weeks} ({len(lectures)} "
-                      f"file{'s' * (len(lectures) != 1)}). Haiku first picks the model that writes them; the PDF comes here when "
-                      "it is ready, after any assignment that is waiting to be solved."), self._render(s, stack)]
+                      f"file{'s' * (len(lectures) != 1)}). The PDF comes here when it is ready, after any assignment that is "
+                      "waiting to be solved."), self._render(s, stack)]
 
     def _set_model(self, model: str) -> str:
         model = model.strip()
         if not model:
             self.kv.delete(actions.MODEL_KEY)
-            return "Haiku now picks the model for each job (Sonnet, or Opus for hard work)."
+            return "The solver uses the default model again."
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,79}", model):
             return "That does not look like a model name. Nothing changed."
         self.kv.set(actions.MODEL_KEY, model)
@@ -550,8 +550,8 @@ class Bot:
 
     def _screen_settings(self, s: Session, screen: dict):
         options = [
-            (f"Solver model: {self.kv.get(actions.MODEL_KEY) or 'auto, picked by Haiku'} (change)", _open({"name": "model"})),
-            (f"Solver effort: {self.kv.get(actions.EFFORT_KEY) or 'auto'} (change)", _open({"name": "effort"})),
+            (f"Solver model: {self.kv.get(actions.MODEL_KEY) or 'default'} (change)", _open({"name": "model"})),
+            (f"Solver effort: {self.kv.get(actions.EFFORT_KEY) or 'default'} (change)", _open({"name": "effort"})),
             (f"Daily solve limit: {'lifted for today' if self._cap_lifted() else 'on'} (change)", _open({"name": "cap"})),
             ("Course settings: solving, uploading, safe mode, prompt, theme", _open({"name": "modes"})),
             ("Reset the web page password", {"do": "confirm", "action": "password"}),
@@ -563,19 +563,17 @@ class Bot:
 
     def _screen_model(self, s: Session, screen: dict):
         now = self.kv.get(actions.MODEL_KEY)
-        lines = [f"Now: {now or 'auto'}.",
-                 "Auto: Haiku reads each sheet first and sends it to Sonnet, or to Opus when it is hard, which saves usage. "
-                 "A model picked here is used for everything instead. From the next solve or redo."]
-        options = [("Auto: Haiku picks per job", {"do": "model", "model": ""})]
+        lines = [f"Now: {now or 'default (SOLVER_MODEL, else your plan’s)'}.",
+                 "The Claude model that solves your work and writes lecture notes, from the next run."]
+        options = [("Default", {"do": "model", "model": ""})]
         options += [(f"{label} ({m})", {"do": "model", "model": m}) for label, m in actions.MODELS]
         options.append(("Type a model name", {"do": "model_text"}))
         return "Solver model", lines, options
 
     def _screen_effort(self, s: Session, screen: dict):
         now = self.kv.get(actions.EFFORT_KEY)
-        lines = [f"Now: {now or 'auto'}.", "How hard the model thinks, from the next solve or redo. Higher uses more of your plan. "
-                                           "Auto: Haiku picks low, medium or high per job."]
-        options = [("Auto", {"do": "effort", "effort": ""})] + [(e, {"do": "effort", "effort": e}) for e in actions.EFFORTS]
+        lines = [f"Now: {now or 'default'}.", "How hard the model thinks, from the next solve or redo. Higher uses more of your plan."]
+        options = [("Default", {"do": "effort", "effort": ""})] + [(e, {"do": "effort", "effort": e}) for e in actions.EFFORTS]
         return "Solver effort", lines, options
 
     def _screen_cap(self, s: Session, screen: dict):
@@ -892,8 +890,6 @@ class Bot:
         summaries = s.scalars(select(Summary.state).where(Summary.state.in_([SummaryState.QUEUED, SummaryState.RUNNING]))).all()
         if summaries:
             lines.append(f"Lecture summaries: {len(summaries)} being written or waiting")
-        lines.append("Model: " + (f"fixed to {self.kv.get(actions.MODEL_KEY)}" if self.kv.get(actions.MODEL_KEY)
-                                  else "picked per job by Haiku (Sonnet, or Opus for hard work)"))
         month = (self.now().year, self.now().month)
         lines.append(f"Tokens used this month: {sum(j.cost_tokens for j in jobs if (j.created_at.year, j.created_at.month) == month):,}")
         return "\n".join(lines)
@@ -1068,19 +1064,17 @@ def _theme_words(c: Course, data_dir: Path | None) -> str:
 
 
 def _triage_lines(job: Job) -> list[str]:
-    """What Haiku decided for this job, for the item's screen."""
+    """The lecture notes put at hand for this job, and a redo with Opus, for the item's screen."""
     try:
         triage = json.loads(job.triage or "{}")
     except ValueError:
         return []
     lines = []
-    if triage.get("model"):
-        lines.append(f"Sorted by Haiku: {triage['model']}, {triage.get('effort')} effort ({triage.get('reason')})")
     redo = triage.get("redo") or {}
-    if redo.get("model") and redo.get("note") == job.note:
-        lines.append(f"The redo: {redo['model']}, {redo.get('effort')} effort ({redo.get('reason')})")
-    if triage.get("lectures"):
-        lines.append("Lecture notes read: " + ", ".join(_short(n) for n in triage["lectures"]))
+    if redo.get("forced") and redo.get("note") == job.note:
+        lines.append("The last redo was solved again by Opus, as you asked.")
+    if triage.get("lectures") and job.assignment.course.lectures != "off":
+        lines.append("Lecture notes at hand: " + ", ".join(_short(n) for n in triage["lectures"]))
     return lines
 
 

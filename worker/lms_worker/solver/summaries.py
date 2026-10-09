@@ -3,11 +3,9 @@ that explains what the slides only list, so the lectures can be learnt from it a
 
 The lecture files are already on the server (the chat fetched them when you asked). One job:
 
-1. Haiku skims the slides' text and decides which model writes the notes (Sonnet, or Opus for
-   hard material), with what effort, and whether the notes need the slides' diagrams. Skipped
-   when you fixed a model in Settings.
-2. That model reads the text (and the figures only when they matter), writes the notes in
-   Markdown and builds the PDF with lms-notes, which holds the one fixed layout.
+1. The slides' text is extracted in the sandbox, so they are read as text and not as pictures.
+2. Claude reads the text (and a slide's picture only where a figure matters), writes the notes
+   in Markdown and builds the PDF with lms-notes, which holds the one fixed layout.
 3. The PDF comes to you, and goes to "University Assignments/<semester>/<course>/Lecture
    summaries" on Google Drive when it is connected.
 
@@ -30,7 +28,7 @@ from sqlalchemy.orm import Session
 from .. import files
 from ..actions import EFFORT_KEY
 from ..db.models import Event, Summary, SummaryState
-from .prompt import NOTES_SCHEMA, NOTES_TRIAGE_SCHEMA, notes_prompt, notes_system, notes_triage_prompt
+from .prompt import NOTES_SCHEMA, notes_prompt, notes_system
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +41,7 @@ CONTINUE = "Continue where you stopped: finish notes.md, build the PDF with lms-
 
 class Summarizer:
     def __init__(self, solver) -> None:
-        self.solver = solver  # the Solver: its sandbox, usage guard, outbox, Drive and Haiku runs
+        self.solver = solver  # the Solver: its sandbox, usage guard, outbox and Drive
 
     @staticmethod
     def _ready(now: datetime):
@@ -69,7 +67,7 @@ class Summarizer:
             course = sm.course
             lectures = json.loads(sm.lectures)
             sm.state, sm.attempts = SummaryState.RUNNING, sm.attempts + 1
-            sm_id, session, triage = sm.id, sm.claude_session, json.loads(sm.triage) if sm.triage else None
+            sm_id, session = sm.id, sm.claude_session
             base = files.course_dir(v.data_dir, course)
             name, semester = course.name, course.semester_name or course.semester
             s.commit()
@@ -86,25 +84,12 @@ class Summarizer:
                 shutil.copy2(p, work / "in" / p.name)
         where = v.sandbox.work_path(work)
         tokens = 0
-
-        if triage is None and v.routed():  # Haiku skims the text; its run also makes in/text and in/pages
-            answer, o, trouble, overage = v.ask_haiku(work, notes_triage_prompt(name, [p.name for p in sources], where),
-                                                      NOTES_TRIAGE_SCHEMA, text=True)
-            tokens = o.tokens
-            if answer is None and (SIGNED_OUT.search(trouble) or o.usage_limited or overage):
-                return self._wait(sm_id, now, tokens, signed_out=trouble if SIGNED_OUT.search(trouble) else None)
-            triage = ({k: answer[k] for k in ("model", "effort", "reason", "diagrams")} if answer
-                      else {"failed": trouble[:200]})
-            with v.sessions.begin() as s:
-                s.get(Summary, sm_id).triage = json.dumps(triage)
-        triage = triage or {}
-
         spec = {"prompt": CONTINUE if resume else notes_prompt(name, lectures),
-                "system": notes_system(where, diagrams=triage.get("diagrams")),
+                "system": notes_system(where),
                 "schema": NOTES_SCHEMA, "max_turns": MAX_TURNS, "text": True, "plain": True,
                 "prepared": (work / "in" / "text").is_dir()}
-        model = v.fixed_model() or triage.get("model")
-        effort = (v.kv.get(EFFORT_KEY) or "").strip() or triage.get("effort")
+        model = v.fixed_model()
+        effort = (v.kv.get(EFFORT_KEY) or "").strip()
         spec |= {k: val for k, val in (("model", model), ("effort", effort), ("resume", resume)) if val}
         (work / "out").mkdir(exist_ok=True)
         for stale in ("notes.pdf", "stderr.txt"):
@@ -147,7 +132,7 @@ class Summarizer:
             s.add(Event(detail=f"lecture summary {sm_id} written: {dest.name}"))
             lines = [f"Lecture notes summary: {name}", _weeks(lectures) + (f", {result.get('pages')} page(s)" if result.get("pages") else "")]
             if model:
-                lines.append(f"Written by {model}" + (f", {effort} effort" if effort else "") + (f": {triage['reason']}" if triage.get("reason") else ""))
+                lines.append(f"Written by {model}" + (f", {effort} effort" if effort else ""))
             if saved:
                 lines.append(f"Saved to Google Drive: {DRIVE_ROOT} › {semester} › {name} › Lecture summaries")
             elif drive_error:

@@ -225,9 +225,9 @@ def test_a_course_gets_its_own_system_prompt_from_the_chat(bot, semester, sessio
 
 def test_the_solver_model_is_picked_in_the_chat(bot, semester, sessions):
     menu = say(bot, "menu", "6")
-    assert "1. Solver model: auto, picked by Haiku (change)" in text(menu)
+    assert "1. Solver model: default (change)" in text(menu)
     screen = say(bot, "1")
-    assert "Now: auto." in text(screen)
+    assert "Now: default" in text(screen)
     for label in ("Fable 5.1", "Opus 5.5", "Opus 4.8", "Opus 4.5", "Sonnet 5.5", "Sonnet 4.5", "Haiku 4.5"):
         assert f". {label} (claude-" in text(screen), label
     out = text(say(bot, pick(screen, "Opus 4.8")))
@@ -238,19 +238,19 @@ def test_the_solver_model_is_picked_in_the_chat(bot, semester, sessions):
     say(bot, pick(screen, "Type a model name"))
     assert text(say(bot, "rm -rf /; x")).startswith("That does not look like a model name. Nothing changed.")
     assert DbKV(sessions).get("solver_model") == "claude-opus-5-5"
-    assert text(say(bot, pick(screen, "Auto"))).startswith("Haiku now picks the model for each job")
+    assert text(say(bot, pick(screen, "Default"))).startswith("The solver uses the default model again.")
     assert DbKV(sessions).get("solver_model") is None
 
 
 def test_effort_the_daily_limit_and_the_built_in_prompt_from_the_chat(bot, semester, sessions):
     kv = DbKV(sessions)
     menu = say(bot, "menu", "6")
-    assert "Solver effort: auto (change)" in text(menu) and "Daily solve limit: on (change)" in text(menu)
+    assert "Solver effort: default (change)" in text(menu) and "Daily solve limit: on (change)" in text(menu)
     screen = say(bot, pick(menu, "Solver effort"))
-    assert [l.split(". ")[1] for l in text(screen).splitlines() if l[:1].isdigit()] == ["Auto", "low", "medium", "high", "xhigh", "max"]
+    assert [l.split(". ")[1] for l in text(screen).splitlines() if l[:1].isdigit()] == ["Default", "low", "medium", "high", "xhigh", "max"]
     assert text(say(bot, pick(screen, "xhigh"))).startswith("The solver now uses xhigh effort")
     assert kv.get("solver_effort") == "xhigh"
-    assert text(say(bot, pick(screen, "Auto"))).startswith("The effort is picked per job again.")
+    assert text(say(bot, pick(screen, "Default"))).startswith("The solver uses the default effort again.")
     assert kv.get("solver_effort") is None
 
     menu = say(bot, "menu", "6")
@@ -631,7 +631,7 @@ def test_lecture_notes_for_solving_are_set_per_course(bot, semester, sessions):
     settings = say(bot, "menu", "6", "4", "1")
     assert "4. Lecture notes for solving: off (change)" in text(settings)
     picks = text(say(bot, "4"))
-    assert "1. auto: Haiku decides per assignment" in picks and "2. always:" in picks and "3. off:" in picks
+    assert "1. auto: the lecture notes are at hand and Claude decides" in picks and "2. always:" in picks and "3. off:" in picks
     assert text(say(bot, "1")).startswith("DAA: lecture notes for solving are now auto")
     with sessions() as s:
         assert (s.get(Course, semester["daa"]).lectures, s.get(Course, semester["lab"]).lectures) == ("auto", "off")

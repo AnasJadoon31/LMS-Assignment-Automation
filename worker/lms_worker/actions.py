@@ -21,7 +21,7 @@ from .db.models import Assignment, Course, CourseMode, Event, Job, JobState, Lec
 from .kv import KeyValue
 
 POLL_NOW_KEY = "poll_requested"  # the watcher's
-MODEL_KEY = "solver_model"  # a model fixed in the chat; wins over SOLVER_MODEL. Without either, Haiku routes each job
+MODEL_KEY = "solver_model"  # the model picked in the chat; wins over SOLVER_MODEL
 EFFORT_KEY = "solver_effort"  # the effort picked in the chat; the CLI's own default without it
 CAP_LIFTED_KEY = "solver_cap_lifted"  # the day (Pakistan time) the daily run limit is lifted for
 PASSWORD_KEY = "admin_password"  # the page password as reset from the chat (salted hash); wins over ADMIN_PASSWORD
@@ -64,8 +64,8 @@ SOLVE_WORDS = {
     SolveMode.AUTO: "Claude solves, or asks me first when it needs something",
 }
 LECTURE_WORDS = {
-    LectureMode.AUTO: "Haiku decides per assignment whether the lecture notes are needed, and which",
-    LectureMode.ALWAYS: "every assignment is solved with the lecture notes at hand",
+    LectureMode.AUTO: "the lecture notes are at hand and Claude decides per assignment whether to read them",
+    LectureMode.ALWAYS: "Claude always reads the lecture notes the assignment builds on before solving",
     LectureMode.OFF: "the lecture notes are not used",
 }
 UPLOAD_TYPES = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip")  # what the LMS takes
@@ -138,7 +138,7 @@ def reject(s: Session, job: Job, via: str) -> tuple[bool, str]:
 
 
 def redo(s: Session, job: Job, note: str, via: str, *, strong: bool = False) -> tuple[bool, str]:
-    """strong: solve it again from the sheet with Opus, whatever model Haiku or Settings would pick."""
+    """strong: solve it again from the sheet with Opus, whatever model is set in Settings."""
     a = job.assignment
     note = (note or "").strip()[:1000]
     if not note:
@@ -147,7 +147,7 @@ def redo(s: Session, job: Job, note: str, via: str, *, strong: bool = False) -> 
         return False, f"Nothing changed: {a.title} is {JOB_WORDS.get(job.state, job.state)} now."
     job.note = note
     job.attempts = 0
-    if strong:  # Haiku's place in the triage is taken: this redo is already sorted
+    if strong:
         triage = json.loads(job.triage) if job.triage else {}
         triage["redo"] = {"note": note, "model": "opus", "effort": "high", "reason": "you asked for Opus", "forced": True}
         job.triage = json.dumps(triage)

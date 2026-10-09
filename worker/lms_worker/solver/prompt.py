@@ -96,10 +96,10 @@ def with_extras(system: str, work: str, *, ask: bool, theme_files: list[str], re
     and the teacher's lecture notes for this assignment."""
     lines = [system, "", ASK_FIRST if ask else NEVER_ASK]
     if lectures:
-        how = ("Read the ones this assignment builds on before solving" if lectures_must
-               else "They were picked as the ones this assignment builds on: read them before solving")
-        lines.append(f"The teacher's lecture notes for this course are in {work}/in/lectures: {', '.join(lectures)}. {how}, "
-                     "and solve it the way the lectures teach it: their methods, notation and terms.")
+        how = ("Read the ones this assignment builds on before solving, and solve it" if lectures_must else
+               "Decide from the sheet whether it builds on any of them: read those before solving, none if it stands on its own. Solve it")
+        lines.append(f"The teacher's lecture notes for this course are in {work}/in/lectures: {', '.join(lectures)}. {how} "
+                     "the way the lectures teach it: their methods, notation and terms.")
     if theme_files:
         lines.append(f"The student also sent theme reference files for this course, in {work}/in/theme-reference: "
                      f"{', '.join(theme_files)}. Read them. The report still follows the theme artifact; where these files "
@@ -151,86 +151,7 @@ def task_prompt(b: Brief) -> str:
     return "\n".join(lines)
 
 
-# --- routing: Haiku looks first, then the work goes to the model it needs ---
-
-TRIAGE_MODEL = "haiku"
-ROUTE_MODELS = ("sonnet", "opus")
-ROUTE_EFFORTS = ("low", "medium", "high")
-TRIAGE_SYSTEM = ("You sort work before a stronger model does it. You never do the work yourself: you read what you are "
-                 "pointed to, decide, and answer in the output format. Be quick: a few tool calls at most.")
-_MODEL_RULE = ("model: 'opus' only when the work needs the strongest reasoning: long proofs or derivations, hard algorithm design, "
-               "a large or intricate program, many-step numerical work where one slip ruins the answer, or complex diagrams. "
-               "Everything else, which is most coursework, is 'sonnet'.\n"
-               "effort: 'low' for short routine work, 'medium' normally, 'high' only for hard work.")
-_ROUTE = {
-    "model": {"type": "string", "enum": list(ROUTE_MODELS)},
-    "effort": {"type": "string", "enum": list(ROUTE_EFFORTS)},
-    "reason": {"type": "string", "description": "Why, in one short sentence."},
-}
-TRIAGE_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["model", "effort", "reason", "handwritten", "lectures", "questions"],
-    "properties": {
-        **_ROUTE,
-        "handwritten": {"type": "boolean", "description": "The sheet or the teacher's note says the work must be handwritten."},
-        "lectures": {"type": "array", "items": {"type": "string"},
-                     "description": "File names, from the list given, of the lecture notes the solver should read. Empty when none are needed or no list was given."},
-        "questions": {"type": "array", "items": {"type": "string"},
-                      "description": "Only when told you may ask: what must be asked of the student before solving. Empty otherwise."},
-    },
-}
-REDO_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["model", "effort", "reason"], "properties": _ROUTE}
-NOTES_TRIAGE_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["model", "effort", "reason", "diagrams"],
-    "properties": {**_ROUTE, "diagrams": {"type": "boolean",
-                                          "description": "The lectures cannot be understood without their figures, so the notes need diagrams."}},
-}
-
-
-def triage_prompt(b: Brief, work: str, *, lectures: list[tuple[str, str, str]] | None, ask: bool) -> str:
-    """lectures: (week, title, file name) of what the teacher posted, when Haiku is to pick from them."""
-    lines = [
-        f"A university assignment is in {work}/in; each page is an image in {work}/in/pages. Look at the pages. Do not solve anything.",
-        f"Course: {b.course}. Listed as: {b.title}. Teacher's note: {b.remarks or 'none'}.",
-        "Files: " + (", ".join(b.files) if b.files else "none; the task is in the title and the note"),
-        "", "Decide:", _MODEL_RULE,
-        "handwritten: true only if the sheet or the teacher's note says the work must be written by hand.",
-    ]
-    if lectures:
-        lines.append("lectures: the teacher's lecture notes are listed below. Give the file names of the ones this assignment "
-                     "builds on (the topics it tests), at most 4. Give none when the sheet is self-contained or no lecture matches.")
-        lines += [f"- week {week}: {title} [{name}]" for week, title, name in lectures]
-    else:
-        lines.append("lectures: leave empty.")
-    lines.append("questions: " + (
-        "if something only the student can give is missing (a file or data the sheet points to but is not here, a choice "
-        "the sheet leaves to the student, a format announced in class), list what to ask, one thing each. "
-        "Leave empty when the sheet can be solved as it is, which is the usual case." if ask else "leave empty."))
-    return "\n".join(lines)
-
-
-def redo_triage_prompt(b: Brief, first: dict) -> str:
-    return "\n".join([
-        f"A report for this university assignment is already built: {b.course}, {b.title}.",
-        f"It was first sorted as: model {first.get('model') or 'unknown'}, {first.get('reason') or 'no reason kept'}.",
-        f"The student now asks for this change: {b.note}",
-        "Decide which model should make the change. 'sonnet' for changes to wording, layout, formatting, screenshots, "
-        "length, or adding and removing parts. 'opus' only if the answers themselves must be worked out again and that is hard.",
-        "effort: 'low' for small edits, 'medium' normally, 'high' only when it is solved again and is hard.",
-    ])
-
-
-def notes_triage_prompt(course: str, files: list[str], work: str) -> str:
-    return "\n".join([
-        f"Lecture slides for the course {course} are in {work}/in; their text is in {work}/in/text, one .txt per file "
-        f"({', '.join(files)}). Read the text only; skim, do not study it. Study notes will be written from these lectures.",
-        "", "Decide:",
-        "model: 'opus' only if the material is hard to explain correctly (heavy proofs, dense mathematics, subtle algorithms). "
-        "Ordinary lecture material is 'sonnet'.",
-        "effort: 'low' for one short lecture, 'medium' normally, 'high' for a lot of hard material.",
-        "diagrams: true if the slides lean on figures (automata, circuits, trees, graphs, architecture or process diagrams, "
-        "plots) that the notes need to redraw or include; false if text, tables and formulas carry the content.",
-    ])
-
+# --- lecture notes ---
 
 NOTES_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["status", "title", "pages"],
@@ -243,15 +164,11 @@ NOTES_SCHEMA = {
 }
 
 
-def notes_system(work: str, *, diagrams: bool | None) -> str:
-    figures = {
-        True: f"The slides lean on their figures. Look at the page images in {work}/in/pages for the slides that have figures, and put "
-              f"the important ones in the notes: redraw them in {work}/figures with matplotlib or graphviz "
-              "(`from lms_sandbox.figures import draw_graph` draws graphs), never by copying the slide image.",
-        False: f"The slides' text carries the content: work from {work}/in/text and do not open the page images.",
-        None: f"Work from {work}/in/text. Open a page image in {work}/in/pages only where the text shows a figure you need, "
-              f"and redraw the few that matter in {work}/figures with matplotlib or graphviz.",
-    }[diagrams]
+def notes_system(work: str) -> str:
+    figures = (f"Work from {work}/in/text. Open a page image in {work}/in/pages only where the text shows that a slide's figure "
+               f"carries the point (an automaton, a tree, a graph, a circuit, a plot), and put the ones that matter in the notes: "
+               f"redraw them in {work}/figures with matplotlib or graphviz (`from lms_sandbox.figures import draw_graph` draws "
+               "graphs), never by copying the slide image.")
     return f"""You write a student's study notes from the lecture slides their teacher posted.
 
 The aim: one document from which the lectures can be learnt without opening the slides. Slides are fragments a teacher talks over: keywords, half sentences, lists without the reasoning. Turn them into a clear, connected explanation:

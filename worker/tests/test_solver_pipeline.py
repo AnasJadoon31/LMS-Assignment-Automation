@@ -140,8 +140,7 @@ def drive():
 @pytest.fixture
 def solver(sessions, channel, sandbox, drive, clock, tmp_path):
     return Solver(sessions, DbKV(sessions), Outbox({"whatsapp": channel}), sandbox, tmp_path / "data", drive=drive,
-                  now=clock, public_url="https://lms.example.com", env={"HTTPS_PROXY": "http://proxy.example:3128"},
-                  route=False)  # routing has its own tests below
+                  now=clock, public_url="https://lms.example.com", env={"HTTPS_PROXY": "http://proxy.example:3128"})
 
 
 def add_job(sessions, tmp_path, *, mode="approve", title="Recurrence Relations", deadline=DUE, kind="assignment",
@@ -746,28 +745,7 @@ def test_a_redo_after_a_blocked_run_starts_a_new_session(solver, sandbox, sessio
     assert "resume" not in job and "The student asked for a redo with this note: Try again" in job["prompt"]
 
 
-# --- routing: Haiku looks first ---
-
-TRIAGE = {"model": "sonnet", "effort": "medium", "reason": "routine recurrences", "handwritten": False, "lectures": [], "questions": []}
-
-
-def routed_script(answers, summary=SUMMARY):
-    """Haiku runs get the next of answers (a dict, or None for a failed run); other runs solve."""
-    answers = list(answers)
-
-    def script(work, on_line):
-        job = json.loads((work / "job.json").read_text())
-        if job.get("model") == "haiku":
-            answer = answers.pop(0)
-            lines = stream(answer, session="triage") if answer else stream(error="API Error: overloaded", session="triage")
-            return play(lines, files=False)(work, on_line)
-        return play(stream(summary))(work, on_line)
-    return script
-
-
-@pytest.fixture
-def router(sessions, channel, sandbox, drive, clock, tmp_path):
-    return Solver(sessions, DbKV(sessions), Outbox({"whatsapp": channel}), sandbox, tmp_path / "data", drive=drive, now=clock)
+# --- lecture notes as a reference, Redo with Opus ---
 
 
 def details(sessions, job_id):
@@ -775,61 +753,19 @@ def details(sessions, job_id):
         return list(s.scalars(select(Event.detail).where(Event.job_id == job_id).order_by(Event.id)))
 
 
-def test_haiku_reads_the_sheet_and_routes_the_solve(router, sandbox, channel, sessions, tmp_path):
-    job_id = add_job(sessions, tmp_path)
-    sandbox.script = routed_script([{**TRIAGE, "handwritten": True}])
-    assert router.run_once().status == "solved"
-    look, solve = sandbox.runs
-    assert look["job"]["model"] == "haiku" and look["files"] == ["DAA-Assignment-01.pdf"] and "resume" not in look["job"]
-    assert look["job"]["lean"] is True and "lean" not in solve["job"]  # only Haiku's look runs without connectors and skills
-    assert "Do not solve anything" in look["job"]["prompt"] and "lectures: leave empty." in look["job"]["prompt"]
-    assert (solve["job"]["model"], solve["job"]["effort"]) == ("sonnet", "medium")
-    log = details(sessions, job_id)
-    assert "Haiku sorted it: sonnet, medium effort; routine recurrences" in log
-    assert "solving with sonnet, medium effort" in log
-    assert any(t.startswith("Handwritten work: Design & Analysis of Algorithms · Recurrence Relations") for t, _ in channel.sent)
-    assert UsageGuard(DbKV(sessions)).runs_today(NOW) == 1  # Haiku's look is not a solver run
-    with sessions() as s:
-        assert s.get(Job, job_id).cost_tokens == 2800  # both runs are counted in the job's tokens
-
-
-def test_a_fixed_model_or_effort_switches_routing_off(router, sandbox, sessions, tmp_path):
+def test_the_model_and_effort_are_the_ones_you_set_and_nothing_runs_before_the_solve(solver, sandbox, sessions, tmp_path):
     add_job(sessions, tmp_path)
-    DbKV(sessions).set("solver_model", "claude-opus-5-5")
-    sandbox.script = routed_script([])
-    assert router.run_once().status == "solved"
-    (solve,) = sandbox.runs
-    assert solve["job"]["model"] == "claude-opus-5-5" and "effort" not in solve["job"]
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    (solve,) = sandbox.runs  # one run: no model is asked first which model should solve it
+    assert "model" not in solve["job"] and "effort" not in solve["job"]  # the CLI's default
 
-    DbKV(sessions).delete("solver_model")
-    DbKV(sessions).set("solver_effort", "max")  # your effort wins over Haiku's, the model is still routed
+    DbKV(sessions).set("solver_model", "claude-sonnet-5-5")
+    DbKV(sessions).set("solver_effort", "high")
     add_job(sessions, tmp_path, ref="155150:2", title="Sorting")
-    sandbox.script = routed_script([{**TRIAGE, "model": "opus", "effort": "high"}])
-    router.run_once()
-    assert (sandbox.runs[-1]["job"]["model"], sandbox.runs[-1]["job"]["effort"]) == ("opus", "max")
-
-
-def test_when_haiku_fails_the_solve_goes_on_with_the_default_model(router, sandbox, sessions, tmp_path):
-    job_id = add_job(sessions, tmp_path)
-    sandbox.script = routed_script([None])
-    assert router.run_once().status == "solved"
-    assert "model" not in sandbox.runs[1]["job"]
-    assert any(d.startswith("Haiku could not sort it") for d in details(sessions, job_id))
-
-
-def test_a_redo_is_sorted_again_by_its_note(router, sandbox, sessions, tmp_path):
-    job_id = add_job(sessions, tmp_path)
-    sandbox.script = routed_script([{**TRIAGE, "model": "opus", "effort": "high"},
-                                    {"model": "sonnet", "effort": "low", "reason": "a formatting change"}])
-    router.run_once()
-    with sessions.begin() as s:
-        actions.redo(s, s.get(Job, job_id), "make the headings bigger", "WhatsApp")
-    assert router.run_once().status == "solved"
-    look, solve = sandbox.runs[2:]
-    assert look["job"]["model"] == "haiku" and "The student now asks for this change: make the headings bigger" in look["job"]["prompt"]
-    assert look["files"] == []  # the note is enough: the sheet is not read again
-    assert (solve["job"]["model"], solve["job"]["effort"], solve["job"]["resume"]) == ("sonnet", "low", "sess-1")
-    assert "Haiku sorted the redo: sonnet, low effort; a formatting change" in details(sessions, job_id)
+    solver.run_once()
+    assert len(sandbox.runs) == 2
+    assert (sandbox.runs[1]["job"]["model"], sandbox.runs[1]["job"]["effort"]) == ("claude-sonnet-5-5", "high")
 
 
 class FakeLectures:
@@ -855,71 +791,65 @@ def lecture_files(solver, sessions, job_id):
         return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []
 
 
-def test_lecture_notes_are_a_reference_when_haiku_says_so(router, sandbox, sessions, tmp_path):
-    router.materials = FakeLectures(router.data_dir)
-    job_id = add_job(sessions, tmp_path)
-    with sessions.begin() as s:
-        s.get(Job, job_id).assignment.course.lectures = "auto"
-    sandbox.script = routed_script([{**TRIAGE, "lectures": ["week-2.pptx", "made-up.pptx"]}])
-    router.run_once()
-    look, solve = sandbox.runs
-    assert "- week 2: Topic 2 [week-2.pptx]" in look["job"]["prompt"] and "at most 4" in look["job"]["prompt"]
-    assert lecture_files(router, sessions, job_id) == ["week-2.pptx"] and router.materials.fetched == ["week-2.pptx"]
-    assert "/work/in/lectures: week-2.pptx. They were picked as the ones this assignment builds on" in solve["job"]["system"]
-    assert "lecture notes to read: week-2.pptx" in details(sessions, job_id)
-
-
-def test_always_gives_every_lecture_and_off_gives_none(solver, sandbox, sessions, tmp_path):
-    solver.materials = FakeLectures(solver.data_dir)  # this solver does not route: no Haiku run is needed for "always"
+def test_lecture_notes_are_a_reference_in_auto_and_always_and_left_out_when_off(solver, sandbox, sessions, tmp_path):
+    solver.materials = FakeLectures(solver.data_dir)
+    every = ["week-1.pptx", "week-2.pptx", "week-3.pptx"]
     job_id = add_job(sessions, tmp_path)
     sandbox.script = play(stream(SUMMARY))
     solver.run_once()
     assert lecture_files(solver, sessions, job_id) == [] and "in/lectures" not in sandbox.runs[0]["job"]["system"]
+    assert solver.materials.fetched == []  # off: the LMS is not even asked
 
-    other = add_job(sessions, tmp_path, ref="155150:2", title="Sorting")
+    auto = add_job(sessions, tmp_path, ref="155150:2", title="Sorting")
     with sessions.begin() as s:
-        s.get(Job, other).assignment.course.lectures = "always"
+        s.get(Job, auto).assignment.course.lectures = "auto"
     solver.run_once()
-    assert len(sandbox.runs) == 2 and lecture_files(solver, sessions, other) == ["week-1.pptx", "week-2.pptx", "week-3.pptx"]
-    assert "Read the ones this assignment builds on before solving" in sandbox.runs[1]["job"]["system"]
+    assert len(sandbox.runs) == 2 and lecture_files(solver, sessions, auto) == every  # still one run per solve
+    system = sandbox.runs[1]["job"]["system"]
+    assert "/work/in/lectures: week-1.pptx, week-2.pptx, week-3.pptx." in system
+    assert "Decide from the sheet whether it builds on any of them" in system
+    assert "lecture notes at hand: week-1.pptx, week-2.pptx, week-3.pptx" in details(sessions, auto)
+
+    always = add_job(sessions, tmp_path, ref="155150:3", title="Graphs")
+    with sessions.begin() as s:
+        s.get(Job, always).assignment.course.lectures = "always"
+    solver.run_once()
+    assert lecture_files(solver, sessions, always) == every
+    assert "Read the ones this assignment builds on before solving" in sandbox.runs[2]["job"]["system"]
 
     solver.materials.fail = True  # lecture notes that cannot be read never hold a solve up
-    third = add_job(sessions, tmp_path, ref="155150:3", title="Graphs")
+    fourth = add_job(sessions, tmp_path, ref="155150:4", title="Trees")
     assert solver.run_once().status == "solved"
-    assert any(d.startswith("the lecture notes could not be read") for d in details(sessions, third))
+    assert any(d.startswith("the lecture notes could not be read") for d in details(sessions, fourth))
 
 
-def test_in_auto_solving_haiku_asks_before_a_stronger_model_is_started(router, sandbox, channel, sessions, tmp_path):
+def test_redo_with_opus_starts_again_on_opus_whatever_else_is_set(solver, sandbox, sessions, tmp_path):
     job_id = add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    DbKV(sessions).set("solver_model", "claude-sonnet-5-5")  # even over a model fixed in Settings
     with sessions.begin() as s:
-        s.get(Job, job_id).assignment.course.solve = "auto"
-    sandbox.script = routed_script([{**TRIAGE, "questions": ["Which dataset does Q2 mean?"]}])
-    assert router.run_once().status == "asked" and state(sessions, job_id) == "NEEDS_INPUT"
-    assert len(sandbox.runs) == 1 and "list what to ask" in sandbox.runs[0]["job"]["prompt"]
-    assert channel.sent[-1][0].startswith("Something is needed before solving: Design & Analysis of Algorithms · Recurrence Relations\n"
-                                          "1. Which dataset does Q2 mean?")
-    with sessions.begin() as s:
-        actions.answer(s, s.get(Job, job_id), "The iris one.", "the chat")
-    assert router.run_once().status == "solved"
-    solve = sandbox.runs[1]["job"]  # no second look by Haiku
-    assert solve["model"] == "sonnet" and "resume" not in solve
-    assert "Before solving, the student was asked: Which dataset does Q2 mean?\nThe student answered: The iris one." in solve["prompt"]
-    assert "Do not ask the student anything" in solve["system"]
+        actions.redo(s, s.get(Job, job_id), "Q2 is wrong", "WhatsApp", strong=True)
+    assert solver.run_once().status == "solved"
+    again = sandbox.runs[-1]["job"]
+    assert len(sandbox.runs) == 2
+    assert (again["model"], again["effort"]) == ("opus", "high") and "resume" not in again
+    assert "The student asked for a redo with this note: Q2 is wrong" in again["prompt"]
+    assert "solving (a fresh run, as you asked) with opus, high effort" in details(sessions, job_id)
+
+    with sessions.begin() as s:  # a normal redo afterwards goes back to the fixed model
+        actions.redo(s, s.get(Job, job_id), "bigger headings", "WhatsApp")
+    solver.run_once()
+    assert sandbox.runs[-1]["job"]["model"] == "claude-sonnet-5-5" and sandbox.runs[-1]["job"]["resume"] == "sess-1"
 
 
 # --- lecture summaries ---
 
 NOTES = {"status": "done", "title": "DAA: weeks 1 to 2", "pages": 3}
-NOTES_TRIAGE = {"model": "sonnet", "effort": "low", "reason": "plain definitions", "diagrams": True}
 
 
-def notes_script(answers, result=NOTES, pdf=True):
-    answers = list(answers)
-
+def notes_script(result=NOTES, pdf=True):
     def script(work, on_line):
-        job = json.loads((work / "job.json").read_text())
-        if job.get("model") == "haiku":
-            return play(stream(answers.pop(0), session="triage"), files=False)(work, on_line)
         if pdf:
             (work / "out" / "notes.pdf").write_bytes(b"%PDF notes")
             (work / "notes.md").write_text("# notes")
@@ -928,8 +858,6 @@ def notes_script(answers, result=NOTES, pdf=True):
 
 
 def queue_summary(solver, sessions):
-    from lms_worker.db import Summary
-
     with sessions.begin() as s:
         course = s.scalar(select(Course).where(Course.code == "155150"))
         if course is None:
@@ -943,19 +871,20 @@ def queue_summary(solver, sessions):
         return actions.summarize(s, course, lectures).id
 
 
-def test_a_lecture_summary_is_routed_written_and_sent(router, sandbox, drive, channel, sessions, tmp_path):
+def test_a_lecture_summary_is_written_in_one_run_and_sent(solver, sandbox, drive, channel, sessions, tmp_path):
     from lms_worker.db import Summary
 
-    sm_id = queue_summary(router, sessions)
-    sandbox.script = notes_script([NOTES_TRIAGE])
-    assert router.run_once().status == "solved"
-    look, write = sandbox.runs
-    assert look["job"]["model"] == "haiku" and look["job"]["text"] is True and look["files"] == ["week-1.pptx", "week-2.pdf"]
-    assert "Read the text only" in look["job"]["prompt"]
-    assert (write["job"]["model"], write["job"]["effort"], write["job"]["text"]) == ("sonnet", "low", True)
-    assert write["job"]["plain"] is True and "lean" not in write["job"]
+    DbKV(sessions).set("solver_model", "claude-sonnet-5-5")
+    sm_id = queue_summary(solver, sessions)
+    sandbox.script = notes_script()
+    assert solver.run_once().status == "solved"
+    (write,) = sandbox.runs  # one run: nothing is asked first
+    assert write["files"] == ["week-1.pptx", "week-2.pdf"]
+    assert (write["job"]["model"], write["job"]["text"], write["job"]["plain"]) == ("claude-sonnet-5-5", True, True)
+    assert "effort" not in write["job"] and write["job"]["prepared"] is False
     assert "one document from which the lectures can be learnt without opening the slides" in write["job"]["system"]
-    assert "Leave nothing out to save space" in write["job"]["system"] and "The slides lean on their figures" in write["job"]["system"]
+    assert "Leave nothing out to save space" in write["job"]["system"]
+    assert "Open a page image in /work/in/pages only where the text shows that a slide's figure carries the point" in write["job"]["system"]
     assert "lms-notes /work/notes.md /work/out/notes.pdf" in write["job"]["system"]
     assert "week 1: Intro (week-1.pptx); week 2: Recurrences (week-2.pdf)" in write["job"]["prompt"]
     with sessions() as s:
@@ -963,50 +892,28 @@ def test_a_lecture_summary_is_routed_written_and_sent(router, sandbox, drive, ch
         assert sm.state == "DONE" and Path(sm.path).name == "DAA weeks 1 to 2.pdf" and Path(sm.path).read_bytes() == b"%PDF notes"
     text, file = channel.sent[-1]
     assert file == "DAA weeks 1 to 2.pdf"
-    assert text.startswith("Lecture notes summary: Design & Analysis of Algorithms\nweeks 1, 2, 3 page(s)\nWritten by sonnet, low effort: plain definitions")
+    assert text.startswith("Lecture notes summary: Design & Analysis of Algorithms\nweeks 1, 2, 3 page(s)\nWritten by claude-sonnet-5-5")
     assert drive.saved[-1] == (["University Assignments", "Fall-2026", "Design & Analysis of Algorithms", "Lecture summaries"],
                                ["DAA weeks 1 to 2.pdf"])
-    assert router.run_once().status == "idle"
+    assert solver.run_once().status == "idle"
 
 
-def test_assignments_go_before_summaries_and_a_failed_summary_is_retried_once(router, sandbox, channel, sessions, tmp_path, clock):
+def test_assignments_go_before_summaries_and_a_failed_summary_is_retried_once(solver, sandbox, channel, sessions, tmp_path, clock):
     from lms_worker.db import Summary
 
-    sm_id = queue_summary(router, sessions)
+    sm_id = queue_summary(solver, sessions)
     job_id = add_job(sessions, tmp_path)
-    sandbox.script = routed_script([TRIAGE])
-    assert router.run_once().job_id == job_id  # the assignment first
+    sandbox.script = play(stream(SUMMARY))
+    assert solver.run_once().job_id == job_id  # the assignment first
     with sessions() as s:
         assert s.get(Summary, sm_id).state == "QUEUED"
 
-    sandbox.script = notes_script([{**NOTES_TRIAGE, "diagrams": False}], pdf=False)
-    assert router.run_once().status == "retry"
-    assert "do not open the page images" in sandbox.runs[-1]["job"]["system"]
-    assert router.run_once().status == "idle"  # not before ten minutes have passed
+    sandbox.script = notes_script(pdf=False)
+    assert solver.run_once().status == "retry"
+    assert solver.run_once().status == "idle"  # not before ten minutes have passed
     clock.at = NOW + timedelta(minutes=11)
-    assert router.run_once().status == "failed"
-    assert sandbox.runs[-1]["job"]["model"] == "sonnet" and len([r for r in sandbox.runs if r["job"].get("model") == "haiku"]) == 2
+    assert solver.run_once().status == "failed" and len(sandbox.runs) == 3
     with sessions() as s:
         assert s.get(Summary, sm_id).state == "FAILED"
     assert channel.sent[-1][0].startswith("The lecture summary could not be written: Design & Analysis of Algorithms, weeks 1, 2\n"
                                           "the run ended without notes.pdf")
-
-
-def test_redo_with_opus_starts_again_on_opus_whatever_else_is_set(router, sandbox, sessions, tmp_path):
-    job_id = add_job(sessions, tmp_path)
-    sandbox.script = routed_script([TRIAGE])
-    router.run_once()
-    DbKV(sessions).set("solver_model", "claude-sonnet-5-5")  # even a model fixed in Settings
-    with sessions.begin() as s:
-        actions.redo(s, s.get(Job, job_id), "Q2 is wrong", "WhatsApp", strong=True)
-    assert router.run_once().status == "solved"
-    again = sandbox.runs[-1]["job"]
-    assert len(sandbox.runs) == 3  # Haiku is not asked: you already chose
-    assert (again["model"], again["effort"]) == ("opus", "high") and "resume" not in again
-    assert "The student asked for a redo with this note: Q2 is wrong" in again["prompt"]
-    assert "solving (a fresh run, as you asked) with opus, high effort" in details(sessions, job_id)
-
-    with sessions.begin() as s:  # a normal redo afterwards goes back to the fixed model
-        actions.redo(s, s.get(Job, job_id), "bigger headings", "WhatsApp")
-    router.run_once()
-    assert sandbox.runs[-1]["job"]["model"] == "claude-sonnet-5-5" and sandbox.runs[-1]["job"]["resume"] == "sess-1"

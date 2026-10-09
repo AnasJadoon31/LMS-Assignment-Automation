@@ -33,7 +33,7 @@ class SolveMode(StrEnum):
 
 
 class LectureMode(StrEnum):
-    """The teacher's lecture notes as a reference for solving: Haiku decides, always, or never."""
+    """The teacher's lecture notes as a reference for solving: Claude decides, always, or never."""
 
     AUTO = "auto"
     ALWAYS = "always"
@@ -158,8 +158,7 @@ class Job(Base):
     claude_session: Mapped[str | None] = mapped_column(String(64))
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     summary: Mapped[str | None] = mapped_column(Text)
-    # What Haiku decided before the solve (JSON): the model and effort, handwritten or not, the
-    # lecture files to read, and the same again for a redo
+    # Notes for the solve (JSON): the lecture files put at hand, and a "Redo with Opus" you asked for
     triage: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
@@ -199,7 +198,7 @@ class Summary(Base):
     lectures: Mapped[str] = mapped_column(Text)  # JSON: [{week, title, file}]
     style: Mapped[str] = mapped_column(String(16), default="notes")  # one kind now; older rows say short or detailed
     state: Mapped[str] = mapped_column(String(16), default=SummaryState.QUEUED, index=True)
-    triage: Mapped[str | None] = mapped_column(Text)  # Haiku's choice: model, effort, diagrams
+    triage: Mapped[str | None] = mapped_column(Text)  # unused now; older rows hold a model choice
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     not_before: Mapped[datetime | None]
     claude_session: Mapped[str | None] = mapped_column(String(64))
