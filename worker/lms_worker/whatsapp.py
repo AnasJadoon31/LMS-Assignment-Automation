@@ -95,16 +95,6 @@ class EvolutionAdmin:
 
     # --- linking ---
 
-
-    def fetch_groups(self) -> list[dict]:
-        r = self._request("GET", f"/group/fetchAllGroups/{self.cfg.instance}", params={"getParticipants": "false"}, missing_ok=True)
-        if r is None:
-            return []
-        try:
-            return r.json()
-        except Exception:
-            return []
-
     def start_link(self, number: str | None = None, *, wait_seconds: float = 20) -> LinkChallenge:
         """Begin linking. With a number, returns a pairing code; without, a QR code."""
         number = _digits(number) if number else None
