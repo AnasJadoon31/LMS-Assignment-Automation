@@ -40,7 +40,7 @@ from .gdrive import GoogleDrive
 from .config import Settings
 from .db.models import InboundMessage
 from .kv import KeyValue, SecretBox
-from .notify import DiscordSetting, EvolutionNotifier, Notifier, NotifyError, WhatsAppNumber
+from .notify import DiscordSetting, EvolutionNotifier, Notifier, NotifyError, WhatsAppNumber, WhatsAppForwardGroup
 from .watcher import HEARTBEAT_KEY
 from .dashboard import dashboard_router
 from .web import Auth, setup_router
@@ -110,7 +110,7 @@ def create_app(
     app.include_router(setup_router(password=settings.admin_password, secret_key=settings.app_secret_key or "",
                                     login=login, admin=admin, drive=drive, discord=discord,
                                     whatsapp=whatsapp, sender=sender, discord_bot=discord_bot,
-                                    public_url=settings.public_url, auth=auth))
+                                    public_url=settings.public_url, auth=auth, forward_group=WhatsAppForwardGroup(kv)))
     app.include_router(dashboard_router(auth, sessions, kv))
 
     @app.get("/api/health")
