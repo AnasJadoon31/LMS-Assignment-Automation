@@ -40,7 +40,7 @@ from pydantic import BaseModel
 from . import actions
 from .claude_login import ClaudeLogin, LoginError
 from .gdrive import CALLBACK, DriveError, GoogleDrive
-from .notify import DiscordSetting, Notifier, NotifyError, WhatsAppNumber, WhatsAppForwardGroup, masked
+from .notify import DiscordSetting, Notifier, NotifyError, WhatsAppNumber, masked
 from .whatsapp import EvolutionAdmin, WhatsAppError
 
 COOKIE = "lms_session"
@@ -115,7 +115,7 @@ class Number(BaseModel):
 def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | None, admin: EvolutionAdmin | None,
                  drive: GoogleDrive | None = None, discord: DiscordSetting | None = None, public_url: str | None = None,
                  clock=time.time, auth: Auth | None = None, whatsapp: WhatsAppNumber | None = None,
-                 sender: Notifier | None = None, discord_bot=None, forward_group: WhatsAppForwardGroup | None = None) -> APIRouter:
+                 sender: Notifier | None = None, discord_bot=None) -> APIRouter:
     router = APIRouter()
     auth = auth or Auth(password, secret_key, clock)
     failures: dict[str, list[float]] = defaultdict(list)
@@ -186,12 +186,8 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
                                    "name": st.name}
             except WhatsAppError as e:
                 out["whatsapp"] = {"available": True, "state": "unreachable", "linked": False, "detail": str(e)}
-
         if whatsapp is not None:
             out["whatsapp"].update(send_to=whatsapp.get(), send_to_source=whatsapp.source())
-        if forward_group is not None:
-            out["whatsapp"]["forward_group"] = forward_group.get()
-
         if drive is None:
             out["drive"] = {"available": False, "detail": "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET"}
         else:
@@ -378,31 +374,6 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
             raise HTTPException(status_code=502, detail=str(e))
         return {"ok": True}
 
-
-    class ForwardGroup(BaseModel):
-        group_id: str
-
-    @router.get("/api/setup/whatsapp/groups")
-    def whatsapp_groups(request: Request) -> dict:
-        guard(request)
-        if admin is None:
-            raise HTTPException(status_code=503, detail="WhatsApp is not configured")
-        return {"groups": admin.fetch_groups()}
-
-    @router.post("/api/setup/whatsapp/forward")
-    def whatsapp_forward(request: Request, body: ForwardGroup) -> dict:
-        guard(request)
-        if forward_group is not None:
-            forward_group.save(body.group_id)
-        return {"ok": True}
-
-    @router.post("/api/setup/whatsapp/forward/remove")
-    def whatsapp_forward_remove(request: Request) -> dict:
-        guard(request)
-        if forward_group is not None:
-            forward_group.remove()
-        return {"ok": True}
-
     return router
 
 
@@ -532,23 +503,9 @@ SETUP_BODY = """
     <div>Messages go to: <span class="state" id="t-state">checking…</span></div>
     <div class="muted" id="t-detail"></div>
     <div class="row"><input id="t-number" inputmode="numeric" autocomplete="off" placeholder="Your own number, e.g. 923001234567"><button id="t-save">Save</button></div>
-
     <div class="row"><button class="secondary" id="t-test" hidden>Send a test message</button><button class="secondary" id="t-remove" hidden>Remove</button></div>
     <div class="err" id="t-err"></div>
   </div>
-  <div class="step">
-    <div>Forward remaining assignments at 08:00 and 22:00:</div>
-    <div class="muted" id="f-detail"></div>
-    <div class="row">
-      <select id="f-group" style="flex:1; padding:9px 10px; border-radius:8px; border:1px solid var(--rule); background:var(--card); color:var(--ink);">
-        <option value="">Select a group...</option>
-      </select>
-      <button id="f-save">Save</button>
-    </div>
-    <div class="row"><button class="secondary" id="f-remove" hidden>Turn off</button></div>
-    <div class="err" id="f-err"></div>
-  </div>
-
 </div>
 <div class="card" id="drive">
   <h2>Google Drive</h2>
@@ -601,29 +558,8 @@ async function refresh() {
   $("t-state").className = "state " + (w.send_to ? "ok" : "bad");
   $("t-detail").textContent = w.send_to ? (w.send_to_source === "env" ? "From WHATSAPP_NUMBER" : "Saved here") + " · the bot answers only this number"
     : "Your own WhatsApp number, country code first. The bot sends to it and answers only it.";
-
   $("t-test").hidden = !w.send_to || !w.linked; $("t-remove").hidden = w.send_to_source !== "page";
   $("t-save").textContent = w.send_to ? "Replace" : "Save";
-
-  if (w.linked && !window.groupsLoaded) {
-    call("/api/setup/whatsapp/groups").then(g => {
-      window.groupsLoaded = true;
-      const sel = $("f-group");
-      sel.innerHTML = '<option value="">Select a group...</option>';
-      (g.groups || []).forEach(group => {
-        const opt = document.createElement("option");
-        opt.value = group.id;
-        opt.textContent = group.subject || group.id;
-        sel.appendChild(opt);
-      });
-      if (w.forward_group) sel.value = w.forward_group;
-    }).catch(e => $("f-err").textContent = e.message);
-  }
-
-  $("f-detail").textContent = w.forward_group ? "Currently forwarding to: " + w.forward_group : "Not forwarding";
-  $("f-remove").hidden = !w.forward_group;
-  $("f-save").textContent = w.forward_group ? "Replace" : "Save";
-
   const g = s.drive || {};
   $("g-state").textContent = !g.available ? "not configured" : g.connected ? "connected" : "not connected";
   $("g-state").className = "state " + (g.connected ? "ok" : "bad");
@@ -699,22 +635,8 @@ $("t-test").onclick = async () => {
   catch (e) { $("t-err").textContent = e.message; }
   busy($("t-test"), false);
 };
-
 $("t-remove").onclick = async () => { if (!confirm("Stop sending WhatsApp messages to this number?")) return;
   try { await call("/api/setup/whatsapp/number/remove", {}); await refresh(); } catch (e) { $("t-err").textContent = e.message; } };
-
-$("f-save").onclick = async () => {
-  $("f-err").textContent = ""; busy($("f-save"), true);
-  try { await call("/api/setup/whatsapp/forward", { group_id: $("f-group").value }); await refresh(); }
-  catch (e) { $("f-err").textContent = e.message; }
-  busy($("f-save"), false);
-};
-$("f-remove").onclick = async () => {
-  if (!confirm("Stop forwarding assignments?")) return;
-  try { await call("/api/setup/whatsapp/forward/remove", {}); $("f-group").value = ""; await refresh(); }
-  catch (e) { $("f-err").textContent = e.message; }
-};
-
 $("d-save").onclick = async () => {
   $("d-err").textContent = ""; busy($("d-save"), true);
   try { await call("/api/setup/discord", { url: $("d-url").value }); $("d-url").value = "";

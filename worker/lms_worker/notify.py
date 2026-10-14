@@ -39,8 +39,6 @@ log = logging.getLogger(__name__)
 MAX_ATTEMPTS = 20
 DISCORD_KEY = "discord_webhook"
 WHATSAPP_KEY = "whatsapp_number"
-WHATSAPP_FORWARD_GROUP_KEY = "whatsapp_forward_group"
-
 
 
 class NotifyError(Exception):
@@ -48,10 +46,6 @@ class NotifyError(Exception):
 
 
 class Notifier(Protocol):
-
-    def send_to_group(self, group_id: str, message: str) -> None:
-        self._post("sendText", {"number": group_id, "text": message})
-
     def text(self, message: str) -> None: ...
     def document(self, path: Path, caption: str) -> None: ...
 
@@ -87,10 +81,6 @@ class EvolutionNotifier:
         if not number:
             raise NotifyError("WhatsApp has no number to send to; save one on the setup page")
         return number
-
-
-    def send_to_group(self, group_id: str, message: str) -> None:
-        self._post("sendText", {"number": group_id, "text": message})
 
     def text(self, message: str) -> None:
         self._post("sendText", {"number": self._to(), "text": message})
@@ -136,10 +126,6 @@ class DiscordNotifier:
         self.url = webhook_url
         self.client = httpx.Client(timeout=60, transport=transport)
         self.sleep = sleep
-
-
-    def send_to_group(self, group_id: str, message: str) -> None:
-        self._post("sendText", {"number": group_id, "text": message})
 
     def text(self, message: str) -> None:
         self._send(json_body=self._payload(message))
@@ -241,22 +227,6 @@ class DiscordSetting:
         return DiscordNotifier(url, transport=self.transport)
 
 
-class WhatsAppForwardGroup:
-    def __init__(self, kv: KeyValue | None) -> None:
-        self.kv = kv
-
-    def get(self) -> str | None:
-        return self.kv.get(WHATSAPP_FORWARD_GROUP_KEY) if self.kv else None
-
-    def save(self, group_id: str) -> None:
-        if self.kv:
-            self.kv.set(WHATSAPP_FORWARD_GROUP_KEY, group_id)
-
-    def remove(self) -> None:
-        if self.kv:
-            self.kv.delete(WHATSAPP_FORWARD_GROUP_KEY)
-
-
 class WhatsAppNumber:
     """Where WhatsApp messages go, and the only number the bot answers: your own number,
     saved on the setup page, else WHATSAPP_NUMBER."""
@@ -315,10 +285,6 @@ class LiveDiscord:
     def active(self) -> bool:
         return self.setting.url() is not None
 
-
-    def send_to_group(self, group_id: str, message: str) -> None:
-        self._post("sendText", {"number": group_id, "text": message})
-
     def text(self, message: str) -> None:
         self.setting.notifier().text(message)
 
@@ -334,10 +300,6 @@ class ConsoleNotifier:
 
     def active(self) -> bool:
         return self._when() if self._when else True
-
-
-    def send_to_group(self, group_id: str, message: str) -> None:
-        self._post("sendText", {"number": group_id, "text": message})
 
     def text(self, message: str) -> None:
         log.info("notification: %s", message)
