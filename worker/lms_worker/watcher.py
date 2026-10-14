@@ -39,6 +39,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
+from .notify import WHATSAPP_FORWARD_GROUP_KEY, WhatsAppForwardGroup
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+from .db.models import Course, Assignment
+from .lms.bahria_pages import LMS_TZ
+
 import httpx
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -125,7 +131,49 @@ class Watcher:
 
     # --- the cycle ---
 
+
+    def _forward_assignments_if_time(self) -> None:
+        try:
+            group_id = WhatsAppForwardGroup(self.kv).get()
+            if not group_id:
+                return
+
+            now = self.now().astimezone(LMS_TZ)
+            # We want to send at 08:00 and 22:00
+            # Since poller runs every 10 mins, we check if hour is 8 or 22
+            hour = now.hour
+            if hour not in (8, 22):
+                return
+
+            slot_key = f"whatsapp_forward_sent_{now.strftime('%Y-%m-%d')}_{hour}"
+            if self.kv.get(slot_key):
+                return
+
+            with self.sessions() as s:
+                semester = s.scalar(select(Course.semester).order_by(Course.last_seen_at.desc()).limit(1))
+                assignments = s.scalars(select(Assignment).join(Course).where(Course.semester == semester).options(selectinload(Assignment.jobs))).all()
+                remaining = [a for a in assignments if a.kind == "assignment" and _in(a, "remaining", self.now())]
+
+                if not remaining:
+                    text = "No remaining assignments to forward."
+                else:
+                    lines = ["*Remaining Assignments:*"]
+                    for a in remaining:
+                        dl = a.deadline.astimezone(LMS_TZ).strftime("%a %d %b, %I:%M %p") if a.deadline else "No deadline"
+                        lines.append(f"• {a.course.name} - {a.title} (Due: {dl})")
+                    text = "\n".join(lines)
+
+                if hasattr(self.sender, "send_to_group"):
+                    self.sender.send_to_group(group_id, text)
+                else:
+                    self.sender.text(f"To Group {group_id}:\n{text}")
+
+            self.kv.set(slot_key, "1")
+        except Exception as e:
+            log.warning("Failed to forward assignments: %s", e)
+
     def poll_once(self) -> PollResult:
+        self._forward_assignments_if_time()
         result = PollResult()
         self.kv.delete(POLL_NOW_KEY)
         paused = self.kv.get(POLL_PAUSE_KEY)
