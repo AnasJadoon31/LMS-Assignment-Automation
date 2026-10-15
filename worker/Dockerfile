@@ -19,11 +19,18 @@ ENV PYTHONUNBUFFERED=1 \
 
 COPY --from=claude /claude /usr/local/bin/claude
 WORKDIR /app
+# Dependencies first, from pyproject.toml alone: a deploy that only changes code reuses this
+# layer instead of downloading and installing every package again
 COPY pyproject.toml ./
-COPY lms_worker ./lms_worker
-# /claude-home holds the claude.ai login; the sandbox's solver user has the same uid
-RUN pip install --break-system-packages . && useradd --create-home --uid 10001 worker \
+RUN python3 -c "import tomllib; print('\\n'.join(tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']))" \
+        > /tmp/requirements.txt \
+    && pip install --break-system-packages -r /tmp/requirements.txt \
+    && useradd --create-home --uid 10001 worker \
     && mkdir -p /data /claude-home && chown worker /data /claude-home
+# Then the code, which changes on most deploys; /claude-home holds the claude.ai login, and the
+# sandbox's solver user has the same uid
+COPY lms_worker ./lms_worker
+RUN pip install --break-system-packages --no-deps .
 
 USER worker
 VOLUME ["/data"]
