@@ -25,6 +25,7 @@ import logging
 import base64
 import shutil
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -45,7 +46,8 @@ from .notify import DiscordSetting, EvolutionNotifier, Notifier, NotifyError, Wh
 from .watcher import HEARTBEAT_KEY
 from .dashboard import dashboard_router
 from .web import Auth, setup_router
-from .public_bot import Directory, PublicBot, PublicSender, addressed, parse as parse_public
+from .public_bot import Directory, PublicBot, PublicSender, addressed, unwrap
+from .public_bot import describe as describe_public, parse as parse_public
 from .db.models import BotUser
 from .whatsapp import EvolutionAdmin, WhatsAppError
 
@@ -54,6 +56,7 @@ log = logging.getLogger(__name__)
 SECRET_HEADER = "x-webhook-secret"
 DEFAULT_INTERNAL_URL = "http://api:8000"
 REGISTER_RETRY_SECONDS = 30
+UNREADABLE_WAIT_SECONDS = 20  # how long a message WhatsApp could not decrypt gets to arrive readable
 
 
 def webhook_secret(app_secret_key: str) -> str:
@@ -125,6 +128,8 @@ def create_app(
     async def _public(body: dict, background: BackgroundTasks) -> dict:
         m = parse_public(body)
         if m is None or directory is None or public_sender is None:
+            if m is None and "from a group" not in (what := describe_public(body)):
+                log.info("Ignored a private WhatsApp message: %s", what)
             return {"handled": False, "reason": "not a text message to the bot"}
         if not await run_in_threadpool(addressed, m, directory):
             if m.group:
@@ -134,11 +139,23 @@ def create_app(
             else:
                 log.info("Private message from %s, who is not in a ticked group", m.ids)
             return {"handled": False, "reason": "not for the bot"}
+        if m.unreadable:
+            # WhatsApp usually re-sends it readable a few seconds later, with the same id; answer
+            # only if that never comes
+            log.info("Private message from %s arrived unreadable: %s", m.ids, describe_public(body))
+            background.add_task(_answer_unreadable, m)
+            return {"handled": True, "replies": 0, "public": True, "unreadable": True}
         if not _first_time(sessions, m.message_id):
             return {"handled": False, "reason": "duplicate"}
         replies = await run_in_threadpool(public.handle, m.chat, m.ids[0], m.name, m.text, group=m.group)
         background.add_task(public_sender.send, m, replies)
         return {"handled": True, "replies": len(replies), "public": True}
+
+    def _answer_unreadable(m) -> None:
+        time.sleep(UNREADABLE_WAIT_SECONDS)  # a background task, in a worker thread
+        if not _first_time(sessions, m.message_id):
+            return  # the readable copy came and was answered
+        public_sender.send(m, public.handle(m.chat, m.ids[0], m.name, "", group=False, unreadable=True))
 
     def bot_users() -> list[dict]:
         names = {g.id: g.name for g in group_setting.get()}
@@ -232,7 +249,7 @@ def _incoming(body: dict) -> tuple[str, str, str, dict | None] | None:
     )
     if jid is None:  # groups, broadcasts, unresolved anonymous ids
         return None
-    msg = data.get("message") or {}
+    msg = unwrap(data.get("message") or {})
     text = msg.get("conversation") or (msg.get("extendedTextMessage") or {}).get("text") or ""
     media = None
     found = _media(msg)

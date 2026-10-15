@@ -47,6 +47,7 @@ IDLE = timedelta(minutes=30)
 PAGE = 10
 PRIVATE = "private"
 SAFE_DIRS = ("lectures", "outline", "plan")  # what Materials downloads from the LMS
+UNREADABLE = "⚠️ WhatsApp did not pass your last message on to me. Please send it again, or reply with a number."
 
 
 # --- the message as WhatsApp sent it ---
@@ -69,6 +70,33 @@ class Incoming:
     mentions: list[str] = field(default_factory=list)  # bare ids tagged in the message
     replied_to: str | None = None  # bare id of the author of the quoted message
     key: dict = field(default_factory=dict)  # for quoting the message in replies
+    unreadable: bool = False  # a private message WhatsApp delivered without its text (see parse)
+
+
+# Envelopes WhatsApp puts around a message: disappearing messages, view once, edits
+WRAPPERS = ("ephemeralMessage", "viewOnceMessage", "viewOnceMessageV2", "viewOnceMessageV2Extension",
+            "documentWithCaptionMessage", "editedMessage")
+
+
+def unwrap(msg: dict) -> dict:
+    """The message inside any envelopes."""
+    for _ in range(4):
+        inner = next((msg[w].get("message") for w in WRAPPERS if isinstance(msg.get(w), dict)
+                      and isinstance(msg[w].get("message"), dict)), None)
+        if inner is None:
+            return msg
+        msg = inner
+    return msg
+
+
+def describe(body: dict) -> str:
+    """What a webhook carried, for the log, without the text: chat kind, message kinds, stub."""
+    data = body.get("data")
+    data = (data[0] if data else {}) if isinstance(data, list) else data if isinstance(data, dict) else {}
+    chat = str((data.get("key") or {}).get("remoteJid") or "")
+    msg = data.get("message") if isinstance(data.get("message"), dict) else {}
+    return (f"{body.get('event')} from {'a group' if chat.endswith('@g.us') else chat or 'nowhere'}: "
+            f"message {sorted(unwrap(msg)) or 'empty'}, type {data.get('messageType')}, stub {data.get('messageStubType')}")
 
 
 def parse(body: dict) -> Incoming | None:
@@ -98,7 +126,7 @@ def parse(body: dict) -> Incoming | None:
     jids.sort(key=lambda j: not j.endswith("@s.whatsapp.net"))  # the phone first, when known
     if not jids:
         return None
-    msg = data.get("message") or {}
+    msg = unwrap(data.get("message") or {})
     ext = msg.get("extendedTextMessage") or {}
     text = msg.get("conversation") or ext.get("text") or ""
     # Evolution API v2 lifts contextInfo (who is tagged, which message is quoted) to the top of the
@@ -110,7 +138,11 @@ def parse(body: dict) -> Incoming | None:
             inner = part["contextInfo"]
     for k, v in inner.items():
         ctx.setdefault(k, v)
-    if not text:
+    # WhatsApp sometimes hands over a message it could not decrypt yet, often the first one a
+    # person sends ("Waiting for this message"): no text at all. In a private chat it is answered
+    # later if the readable copy never comes (see api._unreadable)
+    unreadable = not text and not group and not any(isinstance(v, dict) for k, v in msg.items() if k != "messageContextInfo")
+    if not text and not unreadable:
         return None
     return Incoming(
         chat=chat, group=group, ids=[_user(j) for j in jids], jids=jids, name=str(data.get("pushName") or ""),
@@ -118,6 +150,7 @@ def parse(body: dict) -> Incoming | None:
         mentions=[_user(j) for j in ctx.get("mentionedJid") or [] if j],
         replied_to=_user(ctx.get("participant")) or None,
         key={"remoteJid": chat, "fromMe": False, "id": key.get("id"), **({"participant": key.get("participant")} if group else {})},
+        unreadable=unreadable,
     )
 
 
@@ -210,7 +243,7 @@ class PublicBot:
                  now: Callable[[], datetime] = utcnow) -> None:
         self.sessions, self.data_dir, self.materials, self.now = sessions, data_dir, materials, now
 
-    def handle(self, chat: str, person: str, name: str, text: str, *, group: bool) -> list[Reply]:
+    def handle(self, chat: str, person: str, name: str, text: str, *, group: bool, unreadable: bool = False) -> list[Reply]:
         text = strip_tags(text)
         where = chat if group else PRIVATE
         key = "pub:" + hashlib.sha1(f"{where}|{person}".encode()).hexdigest()[:40]
@@ -222,7 +255,10 @@ class PublicBot:
             stack = json.loads(row.state or "{}").get("stack") or []
             if not stack or (row.updated_at and self.now() - row.updated_at > IDLE):
                 stack = [{"name": "main"}]
-            replies, picked = self._dispatch(s, stack, text, group=group, chat=where)
+            if unreadable:  # keep their place; ask for the message again
+                replies, picked = [self._render(s, stack, group=group, chat=where, hint=UNREADABLE)], None
+            else:
+                replies, picked = self._dispatch(s, stack, text, group=group, chat=where)
             row.state = json.dumps({"stack": stack})
             row.updated_at = self.now()
             self._count(s, where, person, name, picked)

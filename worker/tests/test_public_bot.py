@@ -221,3 +221,46 @@ def test_evolution_is_told_to_pass_group_messages_on():
     assert admin.hear_groups() is True
     assert sent == [{"rejectCall": True, "msgCall": "busy", "alwaysOnline": False, "readMessages": False, "readStatus": False,
                      "syncFullHistory": False, "groupsIgnore": False}]
+
+
+def private_msg(message, *, msg_id="p1", **extra):
+    return {"event": "messages.upsert", "data": {"key": {"remoteJid": f"{ALI_LID}@lid", "remoteJidAlt": f"{ALI}@s.whatsapp.net",
+                                                          "fromMe": False, "id": msg_id},
+                                                  "pushName": "Ali", "message": message, **extra}}
+
+
+def test_private_words_are_read_inside_whatsapps_envelopes(directory):
+    """Disappearing messages and edits wrap the text; it is read all the same."""
+    for message in ({"conversation": "hello"},
+                    {"ephemeralMessage": {"message": {"extendedTextMessage": {"text": "hello"}}}},
+                    {"editedMessage": {"message": {"conversation": "hello"}}}):
+        m = parse(private_msg(message))
+        assert m.text == "hello" and not m.unreadable and addressed(m, directory)
+
+
+def test_a_message_whatsapp_could_not_decrypt_is_asked_for_again(sessions, monkeypatch):
+    """WhatsApp sometimes delivers a message without its text (often someone's first one). If
+    the readable copy does not follow, the person is asked to send it again."""
+    from fastapi.testclient import TestClient
+
+    from lms_worker import api
+    from lms_worker.api import SECRET_HEADER, create_app, webhook_secret
+
+    from .test_api import SECRET_KEY, SETTINGS
+
+    stub = private_msg({}, msg_id="p9", messageStubType=2, messageStubParameters=["No session record"])
+    assert parse(stub).unreadable and parse(private_msg({"imageMessage": {}})) is None  # a bare picture is not
+
+    sent = []
+    monkeypatch.setattr(api, "UNREADABLE_WAIT_SECONDS", 0)
+    monkeypatch.setattr(api.PublicSender, "send", lambda self, m, replies: sent.append((m.text, replies)))
+    WhatsAppGroups(DbKV(sessions)).save([Group(GROUP, "BSCS 5-A")])
+    app = create_app(SETTINGS, sessions, DbKV(sessions), sender=None, admin=Admin(), register_webhook=False)
+    h = {SECRET_HEADER: webhook_secret(SECRET_KEY)}
+    with TestClient(app) as c:
+        assert c.post("/api/webhooks/evolution", json=stub, headers=h).json()["unreadable"] is True
+        assert "send it again" in sent[0][1][0].text and "📚 *LMS Bot*" in sent[0][1][0].text
+        # the readable copy came first: answered once, the late unreadable one is dropped
+        assert c.post("/api/webhooks/evolution", json=private_msg({"conversation": "hi"}, msg_id="p10"), headers=h).json()["handled"]
+        c.post("/api/webhooks/evolution", json=private_msg({}, msg_id="p10", messageStubType=2), headers=h)
+    assert [t for t, _ in sent] == ["", "hi"]
