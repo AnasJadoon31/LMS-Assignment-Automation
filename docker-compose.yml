@@ -13,7 +13,11 @@
 
 services:
   worker:
-    build: ./worker
+    build:
+      context: ./worker
+      # no provenance or SBOM attestations: exporting them hangs on multi-GB images
+      provenance: false
+      sbom: false
     restart: unless-stopped
     environment:
       - DATABASE_URL=${DATABASE_URL:?set DATABASE_URL}
@@ -51,7 +55,11 @@ services:
 
   # Answers WhatsApp messages through the numbered menu; same image as the worker
   api:
-    build: ./worker
+    build:
+      context: ./worker
+      # no provenance or SBOM attestations: exporting them hangs on multi-GB images
+      provenance: false
+      sbom: false
     restart: unless-stopped
     command: ["sh", "-c", "lms-worker db-upgrade && exec lms-worker api"]
     environment:
@@ -101,7 +109,11 @@ services:
   # of its containers is on, which put the proxy next to the solver, and then no deploy could
   # change the network because the proxy was still on it.
   solver-image:
-    build: ./sandbox
+    build:
+      context: ./sandbox
+      # no provenance or SBOM attestations: exporting them hangs on multi-GB images
+      provenance: false
+      sbom: false
     image: lms-solver:latest
     restart: unless-stopped
     command: ["sleep", "infinity"]
