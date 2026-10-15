@@ -44,6 +44,10 @@ class Runtime:
         channels["discord"] = LiveDiscord(self.discord())
         others = dict(channels)
         channels["console"] = ConsoleNotifier(when=lambda: not any(active(n) for n in others.values()))
+        if evo:  # WhatsApp groups chosen on the setup page: assignment notices only
+            from .groups import CHANNEL, GroupNotifier, WhatsAppGroups
+
+            channels[CHANNEL] = GroupNotifier(evo, WhatsAppGroups(self.kv if self.sessions is not None else None))
         return Outbox(channels)
 
     def drive(self):
@@ -89,7 +93,11 @@ class Runtime:
     def watcher(self) -> Watcher:
         if self.sessions is None:
             raise ConfigError("Polling needs DATABASE_URL")
-        return Watcher(self.adapter, self.sessions, self.kv, self.outbox(), self.settings.data_dir)
+        from .groups import GroupNotices, WhatsAppGroups
+
+        outbox = self.outbox()
+        groups = GroupNotices(self.sessions, self.kv, outbox, WhatsAppGroups(self.kv))
+        return Watcher(self.adapter, self.sessions, self.kv, outbox, self.settings.data_dir, groups=groups)
 
 
 def build(settings: Settings, *, headless: bool = True, require_db: bool = False) -> Runtime:

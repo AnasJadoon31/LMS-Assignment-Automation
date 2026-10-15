@@ -100,6 +100,15 @@ class Code(BaseModel):
     code: str
 
 
+class GroupPick(BaseModel):
+    id: str
+    name: str = ""
+
+
+class GroupList(BaseModel):
+    groups: list[GroupPick]
+
+
 class Webhook(BaseModel):
     url: str
 
@@ -115,7 +124,10 @@ class Number(BaseModel):
 def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | None, admin: EvolutionAdmin | None,
                  drive: GoogleDrive | None = None, discord: DiscordSetting | None = None, public_url: str | None = None,
                  clock=time.time, auth: Auth | None = None, whatsapp: WhatsAppNumber | None = None,
-                 sender: Notifier | None = None, discord_bot=None) -> APIRouter:
+                 sender: Notifier | None = None, discord_bot=None, groups=None, group_sender: Notifier | None = None,
+                 group_summary=None) -> APIRouter:
+    """`groups`: groups.WhatsAppGroups; `group_sender` posts to them; `group_summary()` gives the
+    summary text as it would go out now."""
     router = APIRouter()
     auth = auth or Auth(password, secret_key, clock)
     failures: dict[str, list[float]] = defaultdict(list)
@@ -188,6 +200,8 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
                 out["whatsapp"] = {"available": True, "state": "unreachable", "linked": False, "detail": str(e)}
         if whatsapp is not None:
             out["whatsapp"].update(send_to=whatsapp.get(), send_to_source=whatsapp.source())
+        if groups is not None and "whatsapp" in out:
+            out["whatsapp"]["groups"] = [{"id": g.id, "name": g.name} for g in groups.get()]
         if drive is None:
             out["drive"] = {"available": False, "detail": "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET"}
         else:
@@ -343,6 +357,55 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
         except WhatsAppError as e:
             raise HTTPException(status_code=502, detail=str(e))
         return {"ok": True}
+
+    @router.get("/api/setup/whatsapp/groups")
+    def whatsapp_groups(request: Request) -> dict:
+        guard(request)
+        if admin is None or groups is None:
+            raise HTTPException(status_code=503, detail="WhatsApp is not configured")
+        try:
+            found = admin.groups()
+        except WhatsAppError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        chosen = {g.id for g in groups.get()}
+        return {"groups": [{**g, "chosen": g["id"] in chosen} for g in found]}
+
+    @router.post("/api/setup/whatsapp/groups")
+    def whatsapp_groups_save(request: Request, body: GroupList) -> dict:
+        guard(request)
+        if groups is None:
+            raise HTTPException(status_code=503, detail="WhatsApp is not configured")
+        from .groups import Group
+
+        try:
+            groups.save([Group(g.id, g.name or g.id) for g in body.groups])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"ok": True, "count": len(body.groups)}
+
+    def _group_send(text: str) -> dict:
+        if group_sender is None or groups is None:
+            raise HTTPException(status_code=503, detail="WhatsApp is not configured")
+        if not groups.get():
+            raise HTTPException(status_code=400, detail="Choose a group first")
+        try:
+            group_sender.text(text)
+        except NotifyError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        return {"ok": True}
+
+    @router.post("/api/setup/whatsapp/groups/test")
+    def whatsapp_groups_test(request: Request) -> dict:
+        guard(request)
+        return _group_send("✅ *LMS bot connected*\nThis group will get new assignments, deadline reminders "
+                           "and a summary at 8:00 AM and 9:00 PM.")
+
+    @router.post("/api/setup/whatsapp/groups/summary")
+    def whatsapp_groups_summary(request: Request) -> dict:
+        guard(request)
+        if group_summary is None:
+            raise HTTPException(status_code=503, detail="Summaries need DATABASE_URL")
+        return _group_send(group_summary())
 
     def _whatsapp() -> WhatsAppNumber:
         if whatsapp is None:
@@ -506,6 +569,16 @@ SETUP_BODY = """
     <div class="row"><button class="secondary" id="t-test" hidden>Send a test message</button><button class="secondary" id="t-remove" hidden>Remove</button></div>
     <div class="err" id="t-err"></div>
   </div>
+  <div class="step" id="gr-step" hidden>
+    <div>Groups: <span class="state" id="gr-state">none</span></div>
+    <div class="muted">Add the bot's number to a WhatsApp group, then tick it here. Ticked groups get every new
+      assignment with its file, reminders 24 h and 2 h before each deadline (submitted or not), and a summary at
+      8:00 AM and 9:00 PM. Nothing else goes to groups.</div>
+    <div id="gr-list" class="muted" style="margin-top:8px"></div>
+    <div class="row"><button class="secondary" id="gr-load">Show the bot's groups</button><button id="gr-save" hidden>Save</button></div>
+    <div class="row"><button class="secondary" id="gr-test" hidden>Send a test message</button><button class="secondary" id="gr-summary" hidden>Send the summary now</button></div>
+    <div class="err" id="gr-err"></div>
+  </div>
 </div>
 <div class="card" id="drive">
   <h2>Google Drive</h2>
@@ -560,6 +633,11 @@ async function refresh() {
     : "Your own WhatsApp number, country code first. The bot sends to it and answers only it.";
   $("t-test").hidden = !w.send_to || !w.linked; $("t-remove").hidden = w.send_to_source !== "page";
   $("t-save").textContent = w.send_to ? "Replace" : "Save";
+  $("gr-step").hidden = !w.linked || w.groups === undefined;
+  const chosen = w.groups || [];
+  $("gr-state").textContent = chosen.length ? chosen.map((g) => g.name).join(", ") : "none";
+  $("gr-state").className = "state " + (chosen.length ? "ok" : "");
+  $("gr-test").hidden = $("gr-summary").hidden = !chosen.length;
   const g = s.drive || {};
   $("g-state").textContent = !g.available ? "not configured" : g.connected ? "connected" : "not connected";
   $("g-state").className = "state " + (g.connected ? "ok" : "bad");
@@ -651,5 +729,35 @@ $("d-test").onclick = async () => {
 };
 $("d-off").onclick = async () => { if (!confirm("Stop sending messages to Discord?")) return;
   try { await call("/api/setup/discord/off", {}); await refresh(); } catch (e) { $("d-err").textContent = e.message; } };
+$("gr-load").onclick = async () => {
+  $("gr-err").textContent = ""; busy($("gr-load"), true);
+  try {
+    const r = await call("/api/setup/whatsapp/groups");
+    $("gr-list").innerHTML = r.groups.length ? r.groups.map((g) =>
+      '<label style="display:block;margin:6px 0;color:var(--ink)"><input type="checkbox" style="width:auto;margin-right:8px" data-id="' +
+      esc(g.id) + '" data-name="' + esc(g.name) + '"' + (g.chosen ? " checked" : "") + ">" + esc(g.name) +
+      (g.size ? ' <span class="muted">(' + g.size + " members)</span>" : "") + "</label>").join("")
+      : "The bot's number is in no groups yet. Add it to a group, then press the button again.";
+    $("gr-save").hidden = !r.groups.length;
+  } catch (e) { $("gr-err").textContent = e.message; }
+  busy($("gr-load"), false);
+};
+$("gr-save").onclick = async () => {
+  $("gr-err").textContent = ""; busy($("gr-save"), true);
+  const picked = [...document.querySelectorAll("#gr-list input:checked")].map((i) => ({ id: i.dataset.id, name: i.dataset.name }));
+  try { await call("/api/setup/whatsapp/groups", { groups: picked }); await refresh(); }
+  catch (e) { $("gr-err").textContent = e.message; }
+  busy($("gr-save"), false);
+};
+$("gr-test").onclick = async () => {
+  $("gr-err").textContent = "";
+  try { await call("/api/setup/whatsapp/groups/test", {}); $("gr-err").textContent = ""; alert("Test message sent to the groups."); }
+  catch (e) { $("gr-err").textContent = e.message; }
+};
+$("gr-summary").onclick = async () => {
+  $("gr-err").textContent = "";
+  try { await call("/api/setup/whatsapp/groups/summary", {}); alert("Summary sent to the groups."); }
+  catch (e) { $("gr-err").textContent = e.message; }
+};
 refresh(); setInterval(refresh, 15000);
 """

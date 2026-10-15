@@ -325,13 +325,20 @@ def send_test(channels: dict[str, Notifier], message: str) -> dict[str, str | No
 
 
 class Outbox:
+    # Channels that get only the messages addressed to them (WhatsApp groups get assignment notices)
+    OPT_IN = frozenset({"group"})
+
     def __init__(self, channels: dict[str, Notifier]) -> None:
         if not channels:
             raise ValueError("Outbox needs at least one channel")
         self.channels = channels
 
-    def queue(self, session: Session, kind: str, text: str, *, file: Path | None = None, job_id: int | None = None) -> None:
+    def queue(self, session: Session, kind: str, text: str, *, file: Path | None = None, job_id: int | None = None,
+              to: tuple[str, ...] | None = None) -> None:
+        """One row per active channel; `to` picks channels, else every channel but the opt-in ones."""
         for channel, notifier in self.channels.items():
+            if (channel not in to) if to is not None else (channel in self.OPT_IN):
+                continue
             if not active(notifier):
                 continue
             session.add(

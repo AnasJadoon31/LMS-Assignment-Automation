@@ -114,7 +114,9 @@ class Watcher:
         data_dir: Path,
         *,
         now: Callable[[], datetime] = utcnow,
+        groups=None,  # groups.GroupNotices: assignment notices for WhatsApp groups
     ) -> None:
+        self.groups = groups
         self.adapter = adapter
         self.sessions = sessions
         self.kv = kv
@@ -163,6 +165,11 @@ class Watcher:
                 result.status = "lms_down"
                 result.errors.append(f"{type(e).__name__}: {e}")
                 self._lms_down(e)
+        if self.groups is not None:
+            try:  # the summary comes from the database, so it goes out even while the LMS is down
+                self.groups.summary_if_due()
+            except Exception:
+                log.exception("Group summary failed")
         result.sent, _ = self.outbox.flush(self.sessions)
         self.kv.set(HEARTBEAT_KEY, json.dumps({"at": self.now().isoformat(), **asdict(result)}))
         return result
@@ -204,6 +211,8 @@ class Watcher:
         self._submit_pending(result)
         self._announce_papers(result)
         self._remind(result)
+        if self.groups is not None:
+            self.groups.remind()
 
     @staticmethod
     def _list(course: lms.Course, fetch: Callable, what: str, result: PollResult) -> list | None:
@@ -429,6 +438,8 @@ class Watcher:
                 if manual:
                     text += "\nSolving is manual for this course. To have it solved, reply menu, then Needs your action."
                 self.outbox.queue(s, "assignment", text, file=paths[0] if paths else None, job_id=job.id)
+                if self.groups is not None:
+                    self.groups.announce(s, a, revision=job.revision, file=paths[0] if paths else None, job_id=job.id)
                 s.commit()
                 done += 1
         return done
@@ -447,6 +458,8 @@ class Watcher:
         text = _announce(a, job, self._detected_detail(s, job)) + f"\nThe question file could not be downloaded yet{why}; it will follow."
         s.add(Event(job_id=job.id, detail=f"{ANNOUNCED_EARLY}: {reason or 'the LMS did not answer'}"))
         self.outbox.queue(s, "assignment", text, job_id=job.id)
+        if self.groups is not None:
+            self.groups.announce(s, a, revision=job.revision, file=None, job_id=job.id, early=True)
 
     # --- deletes, on your request ---
 

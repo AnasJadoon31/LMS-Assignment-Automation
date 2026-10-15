@@ -151,6 +151,15 @@ class EvolutionAdmin:
             raise WhatsAppError("Evolution API returned no file for that message")
         return base64.b64decode(encoded)
 
+    def groups(self) -> list[dict]:
+        """The WhatsApp groups the bot's number is in: [{id, name, size}], by name."""
+        r = self._request("GET", f"/group/fetchAllGroups/{self.cfg.instance}", params={"getParticipants": "false"})
+        out = []
+        for g in r.json() or []:
+            if isinstance(g, dict) and str(g.get("id", "")).endswith("@g.us"):
+                out.append({"id": g["id"], "name": g.get("subject") or g["id"], "size": g.get("size")})
+        return sorted(out, key=lambda g: g["name"].lower())
+
     def unlink(self) -> None:
         if self.state().state in ("open", "connecting"):
             self._request("DELETE", f"/instance/logout/{self.cfg.instance}")

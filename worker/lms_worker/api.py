@@ -105,11 +105,22 @@ def create_app(
         yield
         stop.set()
 
+    from .db.models import utcnow
+    from .groups import GroupNotifier, WhatsAppGroups, open_assignments, summary_text
+
+    group_setting = WhatsAppGroups(kv)
+    group_sender = GroupNotifier(settings.evolution, group_setting) if settings.evolution else None
+
+    def group_summary() -> str:
+        with sessions() as s:
+            return summary_text(open_assignments(s, utcnow()), utcnow())
+
     app = FastAPI(title="LMS Assignment Automation", lifespan=lifespan, docs_url=None, redoc_url=None)
     auth = Auth(settings.admin_password, settings.app_secret_key or "", kv=kv)
     app.include_router(setup_router(password=settings.admin_password, secret_key=settings.app_secret_key or "",
                                     login=login, admin=admin, drive=drive, discord=discord,
                                     whatsapp=whatsapp, sender=sender, discord_bot=discord_bot,
+                                    groups=group_setting, group_sender=group_sender, group_summary=group_summary,
                                     public_url=settings.public_url, auth=auth))
     app.include_router(dashboard_router(auth, sessions, kv))
 

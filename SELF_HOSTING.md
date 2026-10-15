@@ -84,6 +84,19 @@ The commands below run in the worker's terminal: `docker compose exec worker <co
 or the **Terminal** tab of the worker container in Coolify. You need them only without the
 setup page.
 
+## Assignment notices in WhatsApp groups
+
+Add the bot's number to a WhatsApp group, then on the setup page under **WhatsApp**, press
+**Show the bot's groups**, tick the groups and **Save**. Each ticked group gets:
+
+- every new or changed assignment, with its question file;
+- a reminder 24 hours and 2 hours before each deadline, whether or not you have submitted;
+- a summary at 8:00 AM and 9:00 PM of every assignment whose deadline has not passed
+  (🔴 under 24 hours, 🟠 under 3 days, 🟢 later).
+
+Groups get only these notices; your alerts, solved reports and the menu stay in your own chat.
+**Send a test message** and **Send the summary now** check it straight away.
+
 ## Save reports to Google Drive
 
 Every solved report (the .docx, the .pdf and the question file) is saved to
