@@ -58,7 +58,7 @@ class EvolutionConfig:
     base_url: str
     api_key: str = field(repr=False)
     instance: str = "lms"
-    number: str | None = None  # where messages go: your own number, digits with country code
+    number: str | None = None  # WHATSAPP_NUMBER: where messages go, unless the setup page saved one
 
 
 @dataclass(frozen=True)

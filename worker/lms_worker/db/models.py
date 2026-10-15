@@ -18,9 +18,26 @@ class Base(DeclarativeBase):
 
 
 class CourseMode(StrEnum):
-    NOTIFY = "notify"
+    """Uploading: wait for your yes, or upload by itself."""
+
     APPROVE = "approve"
     AUTO = "auto"
+
+
+class SolveMode(StrEnum):
+    """Solving: always, only when you say so, or Claude asks you first when it needs something."""
+
+    BYPASS = "bypass"
+    MANUAL = "manual"
+    AUTO = "auto"
+
+
+class LectureMode(StrEnum):
+    """The teacher's lecture notes as a reference for solving: Claude decides, always, or never."""
+
+    AUTO = "auto"
+    ALWAYS = "always"
+    OFF = "off"
 
 
 class JobState(StrEnum):
@@ -35,8 +52,10 @@ class JobState(StrEnum):
     CONFIRMED = "CONFIRMED"
     NEEDS_HUMAN = "NEEDS_HUMAN"
     REJECTED = "REJECTED"
+    WAITING_GO = "WAITING_GO"  # manual solving: the question is here, solving waits for your go-ahead
+    NEEDS_INPUT = "NEEDS_INPUT"  # Claude asked you something before solving
     SUPERSEDED = "SUPERSEDED"  # the teacher changed the assignment; a newer revision took over
-    HANDWRITTEN = "HANDWRITTEN"  # solved and sent to you to copy by hand; never uploaded
+    HANDWRITTEN = "HANDWRITTEN"  # older jobs only; handwritten work now waits in AWAITING_APPROVAL
 
 
 TERMINAL_STATES = {JobState.CONFIRMED, JobState.NEEDS_HUMAN, JobState.REJECTED, JobState.SUPERSEDED, JobState.HANDWRITTEN}
@@ -53,7 +72,17 @@ class Course(Base):
     semester: Mapped[str] = mapped_column(String(64))
     semester_name: Mapped[str] = mapped_column(String(64), default="")
     mode: Mapped[str] = mapped_column(String(16), default=CourseMode.APPROVE)
+    solve: Mapped[str] = mapped_column(String(16), default=SolveMode.BYPASS, server_default="bypass")
+    # Safe mode: a report still waiting for your approval is uploaded when one hour is left
+    safe: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    lectures: Mapped[str] = mapped_column(String(16), default=LectureMode.OFF, server_default="off")
     sandbox_profile: Mapped[str] = mapped_column(String(64), default="python-jupyter")
+    # Your own system prompt for this course's solver runs, set in the chat: added to the
+    # built-in one, or used instead of it
+    prompt: Mapped[str | None] = mapped_column(Text)
+    # This course's own report theme: a design system artifact link, set in the chat. The default one without it
+    theme: Mapped[str | None] = mapped_column(String(255))
+    prompt_replaces: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     first_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
 
@@ -95,6 +124,11 @@ class Assignment(Base):
     announced_at: Mapped[datetime | None]
     # Deadline reminders already sent for the current deadline, e.g. "24h,2h"
     reminders: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    # You asked for the LMS submission to be deleted; the worker does it at its next poll
+    delete_requested_at: Mapped[datetime | None]
+    # Your own file, sent in the chat, and when you asked for it to be uploaded
+    own_file: Mapped[str | None] = mapped_column(String(1024))
+    upload_requested_at: Mapped[datetime | None]
     first_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
 
@@ -124,6 +158,8 @@ class Job(Base):
     claude_session: Mapped[str | None] = mapped_column(String(64))
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     summary: Mapped[str | None] = mapped_column(Text)
+    # Notes for the solve (JSON): the lecture files put at hand, and a "Redo with Opus" you asked for
+    triage: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
@@ -143,6 +179,36 @@ class Artifact(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
     job: Mapped[Job] = relationship(back_populates="artifacts")
+
+
+class SummaryState(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    DONE = "DONE"
+    FAILED = "FAILED"
+
+
+class Summary(Base):
+    """Summarized notes of the lectures you picked, asked for in the chat. Its own small queue."""
+
+    __tablename__ = "summaries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), index=True)
+    lectures: Mapped[str] = mapped_column(Text)  # JSON: [{week, title, file}]
+    style: Mapped[str] = mapped_column(String(16), default="notes")  # one kind now; older rows say short or detailed
+    state: Mapped[str] = mapped_column(String(16), default=SummaryState.QUEUED, index=True)
+    triage: Mapped[str | None] = mapped_column(Text)  # unused now; older rows hold a model choice
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    not_before: Mapped[datetime | None]
+    claude_session: Mapped[str | None] = mapped_column(String(64))
+    cost_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    path: Mapped[str | None] = mapped_column(String(1024))  # the finished PDF
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+    course: Mapped[Course] = relationship()
 
 
 class Event(Base):
@@ -182,6 +248,23 @@ class Setting(Base):
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+
+class BotUser(Base):
+    """Someone in a group (or a private chat) who uses the public menu: how often, and the last
+    thing they picked. One row per person per chat; chat_id is the group JID or "private"."""
+
+    __tablename__ = "bot_users"
+    __table_args__ = (UniqueConstraint("chat_id", "person"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[str] = mapped_column(String(64), index=True)
+    person: Mapped[str] = mapped_column(String(64))  # phone digits, or the WhatsApp LID when the phone is hidden
+    name: Mapped[str] = mapped_column(String(128), default="")
+    requests: Mapped[int] = mapped_column(Integer, default=0)
+    last_option: Mapped[str] = mapped_column(String(256), default="")
+    first_at: Mapped[datetime] = mapped_column(default=utcnow)
+    last_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
 class ChatSession(Base):

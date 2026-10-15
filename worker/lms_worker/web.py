@@ -8,6 +8,9 @@ POST /api/setup/claude/code         {code}: the code the sign-in page shows
 POST /api/setup/whatsapp/link       {number?}: a QR code, or a pairing code for that number
 GET  /api/setup/whatsapp/qr         the current QR code (they rotate)
 POST /api/setup/whatsapp/unlink
+POST /api/setup/whatsapp/number     {number}: your own number, which messages go to
+POST /api/setup/whatsapp/number/remove
+POST /api/setup/whatsapp/test       a test message to that number
 GET  /setup/google/start            go to Google to connect Drive (drive.file only)
 GET  /setup/google/callback         Google comes back here
 POST /api/setup/google/disconnect
@@ -34,9 +37,10 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
+from . import actions
 from .claude_login import ClaudeLogin, LoginError
 from .gdrive import CALLBACK, DriveError, GoogleDrive
-from .notify import DiscordSetting, NotifyError, masked
+from .notify import DiscordSetting, Notifier, NotifyError, WhatsAppNumber, masked
 from .whatsapp import EvolutionAdmin, WhatsAppError
 
 COOKIE = "lms_session"
@@ -64,11 +68,25 @@ def session_valid(key: str, cookie: str | None, now: float) -> bool:
 class Auth:
     """The page password and the signed session cookie, shared by every page."""
 
-    def __init__(self, password: str | None, secret_key: str, clock=time.time) -> None:
-        self.password, self.secret_key, self.clock = password, secret_key, clock
+    def __init__(self, password: str | None, secret_key: str, clock=time.time, kv=None) -> None:
+        self.password, self.secret_key, self.clock, self.kv = password, secret_key, clock, kv
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.password) or actions.stored_password(self.kv) is not None
+
+    def check(self, given: str) -> bool:
+        """The password reset from the chat when there is one, else ADMIN_PASSWORD."""
+        return actions.password_matches(self.kv, self.password, given)
+
+    @property
+    def session_key(self) -> str:
+        """Sessions are signed with the password's hash too, so a reset signs every browser out."""
+        stored = actions.stored_password(self.kv)
+        return self.secret_key + (stored["hash"] if stored else "")
 
     def signed_in(self, request: Request) -> bool:
-        return bool(self.password) and session_valid(self.secret_key, request.cookies.get(COOKIE), self.clock())
+        return self.configured and session_valid(self.session_key, request.cookies.get(COOKIE), self.clock())
 
     def guard(self, request: Request) -> None:
         """For JSON calls: the cookie, and the X-LMS header a form on another site cannot send."""
@@ -82,8 +100,21 @@ class Code(BaseModel):
     code: str
 
 
+class GroupPick(BaseModel):
+    id: str
+    name: str = ""
+
+
+class GroupList(BaseModel):
+    groups: list[GroupPick]
+
+
 class Webhook(BaseModel):
     url: str
+
+
+class Token(BaseModel):
+    token: str
 
 
 class Number(BaseModel):
@@ -92,7 +123,11 @@ class Number(BaseModel):
 
 def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | None, admin: EvolutionAdmin | None,
                  drive: GoogleDrive | None = None, discord: DiscordSetting | None = None, public_url: str | None = None,
-                 clock=time.time, auth: Auth | None = None) -> APIRouter:
+                 clock=time.time, auth: Auth | None = None, whatsapp: WhatsAppNumber | None = None,
+                 sender: Notifier | None = None, discord_bot=None, groups=None, group_sender: Notifier | None = None,
+                 group_summary=None, bot_users=None) -> APIRouter:
+    """`groups`: groups.WhatsAppGroups; `group_sender` posts to them; `group_summary()` gives the
+    summary text as it would go out now."""
     router = APIRouter()
     auth = auth or Auth(password, secret_key, clock)
     failures: dict[str, list[float]] = defaultdict(list)
@@ -113,7 +148,7 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
 
     @router.get("/login", response_class=HTMLResponse)
     def login_page(error: str = "") -> HTMLResponse:
-        return HTMLResponse(_login_html(error, configured=bool(password)))
+        return HTMLResponse(_login_html(error, configured=auth.configured))
 
     @router.post("/login")
     def login_post(request: Request, password_field: str = Form(alias="password")):
@@ -122,13 +157,13 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
         failures[ip] = [t for t in failures[ip] if now - t < LOCKOUT_SECONDS]
         if len(failures[ip]) >= MAX_FAILURES:
             return HTMLResponse(_login_html("Too many wrong passwords. Try again in 15 minutes.", True), status_code=429)
-        if not password or not hmac.compare_digest(password_field.encode(), password.encode()):
+        if not auth.check(password_field):
             failures[ip].append(now)
-            return HTMLResponse(_login_html("Wrong password.", bool(password)), status_code=401)
+            return HTMLResponse(_login_html("Wrong password.", auth.configured), status_code=401)
         failures.pop(ip, None)
         resp = RedirectResponse("/courses", status_code=303)
         https = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
-        resp.set_cookie(COOKIE, session_cookie(secret_key, now), max_age=SESSION_SECONDS, httponly=True,
+        resp.set_cookie(COOKIE, session_cookie(auth.session_key, now), max_age=SESSION_SECONDS, httponly=True,
                         secure=https, samesite="strict")
         return resp
 
@@ -163,6 +198,10 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
                                    "name": st.name}
             except WhatsAppError as e:
                 out["whatsapp"] = {"available": True, "state": "unreachable", "linked": False, "detail": str(e)}
+        if whatsapp is not None:
+            out["whatsapp"].update(send_to=whatsapp.get(), send_to_source=whatsapp.source())
+        if groups is not None and "whatsapp" in out:
+            out["whatsapp"]["groups"] = [{"id": g.id, "name": g.name} for g in groups.get()]
         if drive is None:
             out["drive"] = {"available": False, "detail": "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET"}
         else:
@@ -175,7 +214,28 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
             url = discord.url()
             out["discord"] = {"available": True, "on": bool(url), "source": discord.source(), "masked": masked(url),
                               "editable": discord.editable}
+        out["discord_bot"] = {"available": discord_bot is not None, **(discord_bot.status() if discord_bot else {})}
         return out
+
+    @router.post("/api/setup/discord-bot")
+    def discord_bot_save(request: Request, body: Token) -> dict:
+        from .discord_bot import DiscordBotError
+
+        guard(request)
+        if discord_bot is None:
+            raise HTTPException(status_code=503, detail="Discord chat needs APP_SECRET_KEY")
+        try:
+            discord_bot.save(body.token)
+        except DiscordBotError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {"ok": True}
+
+    @router.post("/api/setup/discord-bot/off")
+    def discord_bot_off(request: Request) -> dict:
+        guard(request)
+        if discord_bot is not None:
+            discord_bot.off()
+        return {"ok": True}
 
     def _discord() -> DiscordSetting:
         if discord is None:
@@ -295,6 +355,90 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
         try:
             admin.unlink()
         except WhatsAppError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        return {"ok": True}
+
+    @router.get("/api/setup/whatsapp/groups")
+    def whatsapp_groups(request: Request) -> dict:
+        guard(request)
+        if admin is None or groups is None:
+            raise HTTPException(status_code=503, detail="WhatsApp is not configured")
+        try:
+            found = admin.groups()
+        except WhatsAppError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        chosen = {g.id for g in groups.get()}
+        return {"groups": [{**g, "chosen": g["id"] in chosen} for g in found]}
+
+    @router.post("/api/setup/whatsapp/groups")
+    def whatsapp_groups_save(request: Request, body: GroupList) -> dict:
+        guard(request)
+        if groups is None:
+            raise HTTPException(status_code=503, detail="WhatsApp is not configured")
+        from .groups import Group
+
+        try:
+            groups.save([Group(g.id, g.name or g.id) for g in body.groups])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"ok": True, "count": len(body.groups)}
+
+    def _group_send(text: str) -> dict:
+        if group_sender is None or groups is None:
+            raise HTTPException(status_code=503, detail="WhatsApp is not configured")
+        if not groups.get():
+            raise HTTPException(status_code=400, detail="Choose a group first")
+        try:
+            group_sender.text(text)
+        except NotifyError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        return {"ok": True}
+
+    @router.post("/api/setup/whatsapp/groups/test")
+    def whatsapp_groups_test(request: Request) -> dict:
+        guard(request)
+        return _group_send("✅ *LMS bot connected*\nThis group will get new assignments, deadline reminders "
+                           "and a summary at 8:00 AM and 9:00 PM.")
+
+    @router.get("/api/setup/bot-users")
+    def bot_users_list(request: Request) -> dict:
+        guard(request)
+        return {"users": bot_users() if bot_users is not None else []}
+
+    @router.post("/api/setup/whatsapp/groups/summary")
+    def whatsapp_groups_summary(request: Request) -> dict:
+        guard(request)
+        if group_summary is None:
+            raise HTTPException(status_code=503, detail="Summaries need DATABASE_URL")
+        return _group_send(group_summary())
+
+    def _whatsapp() -> WhatsAppNumber:
+        if whatsapp is None:
+            raise HTTPException(status_code=503, detail="WhatsApp is not available here")
+        return whatsapp
+
+    @router.post("/api/setup/whatsapp/number")
+    def whatsapp_number_save(request: Request, body: Number) -> dict:
+        guard(request)
+        try:
+            return {"ok": True, "number": _whatsapp().save(body.number or "")}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @router.post("/api/setup/whatsapp/number/remove")
+    def whatsapp_number_remove(request: Request) -> dict:
+        guard(request)
+        _whatsapp().remove()
+        return {"ok": True}
+
+    @router.post("/api/setup/whatsapp/test")
+    def whatsapp_test(request: Request) -> dict:
+        guard(request)
+        if sender is None:
+            raise HTTPException(status_code=503, detail="WhatsApp is not configured")
+        try:
+            sender.text("Test message from LMS Assignment Automation. WhatsApp notifications work.")
+        except NotifyError as e:
             raise HTTPException(status_code=502, detail=str(e))
         return {"ok": True}
 
@@ -423,6 +567,28 @@ SETUP_BODY = """
   </div>
   <div class="row"><button class="secondary" id="w-unlink" hidden>Unlink</button></div>
   <div class="err" id="w-err"></div>
+  <div class="step">
+    <div>Messages go to: <span class="state" id="t-state">checking…</span></div>
+    <div class="muted" id="t-detail"></div>
+    <div class="row"><input id="t-number" inputmode="numeric" autocomplete="off" placeholder="Your own number, e.g. 923001234567"><button id="t-save">Save</button></div>
+    <div class="row"><button class="secondary" id="t-test" hidden>Send a test message</button><button class="secondary" id="t-remove" hidden>Remove</button></div>
+    <div class="err" id="t-err"></div>
+  </div>
+  <div class="step" id="gr-step" hidden>
+    <div>Groups: <span class="state" id="gr-state">none</span></div>
+    <div class="muted">Add the bot's number to a WhatsApp group, then tick it here. Ticked groups get every new
+      assignment with its file, reminders 24 h and 2 h before each deadline (submitted or not), and a summary at
+      8:00 AM and 9:00 PM. Nothing else goes to groups.</div>
+    <div id="gr-list" class="muted" style="margin-top:8px"></div>
+    <div class="row"><button class="secondary" id="gr-load">Show the bot's groups</button><button id="gr-save" hidden>Save</button></div>
+    <div class="row"><button class="secondary" id="gr-test" hidden>Send a test message</button><button class="secondary" id="gr-summary" hidden>Send the summary now</button></div>
+    <div class="err" id="gr-err"></div>
+    <div style="margin-top:14px"><b>Classmates using the bot</b></div>
+    <div class="muted">In a ticked group, anyone who tags the bot (or replies to it) gets the public menu: question
+      files, lectures, deadlines, outline and plan, and a leaderboard. Members of those groups can also message the
+      bot privately. Your own files (solved reports, receipts, uploads) are never sent there.</div>
+    <div id="bu-list" class="muted" style="margin-top:8px;overflow-x:auto">No one yet.</div>
+  </div>
 </div>
 <div class="card" id="drive">
   <h2>Google Drive</h2>
@@ -438,8 +604,18 @@ SETUP_BODY = """
   <div class="muted" id="d-detail"></div>
   <div class="row"><input id="d-url" autocomplete="off" placeholder="https://discord.com/api/webhooks/…"><button id="d-save">Save</button></div>
   <div class="row"><button class="secondary" id="d-test" hidden>Send a test message</button><button class="secondary" id="d-off" hidden>Turn off</button></div>
-  <p class="muted">Discord gets the same alerts and files as WhatsApp; approvals stay on WhatsApp and this page. In Discord: channel settings, Integrations, Webhooks, New Webhook, Copy Webhook URL.</p>
+  <p class="muted">The webhook gets the same alerts and files as WhatsApp. In Discord: channel settings, Integrations, Webhooks, New Webhook, Copy Webhook URL. To use the menu from Discord, set up Discord chat below.</p>
   <div class="err" id="d-err"></div>
+</div>
+<div class="card" id="discord-bot">
+  <h2>Discord chat</h2>
+  <div>Bot: <span class="state" id="b-state">checking…</span></div>
+  <div class="muted" id="b-detail"></div>
+  <div class="code" id="b-code" hidden></div>
+  <div class="row"><input id="b-token" type="password" autocomplete="off" placeholder="Bot token"><button id="b-save">Save</button></div>
+  <div class="row"><button class="secondary" id="b-off" hidden>Turn off</button></div>
+  <p class="muted">Use the same menu in a Discord direct message, files included. At discord.com/developers/applications: New Application, then Bot, Reset Token and paste it here. Under Installation choose Guild Install with the bot scope, open the install link and add the bot to a server you are in. Then open a direct message with the bot and send it the code shown here. It answers only the person who sent the code.</p>
+  <div class="err" id="b-err"></div>
 </div>
 """
 
@@ -461,6 +637,17 @@ async function refresh() {
   $("w-detail").textContent = w.linked ? [w.name, w.number].filter(Boolean).join(" · ") : (w.detail || "");
   $("w-unlink").hidden = !w.linked;
   if (w.linked) { $("w-step").hidden = true; clearInterval(qrTimer); }
+  $("t-state").textContent = w.send_to ? "+" + w.send_to : "not set";
+  $("t-state").className = "state " + (w.send_to ? "ok" : "bad");
+  $("t-detail").textContent = w.send_to ? (w.send_to_source === "env" ? "From WHATSAPP_NUMBER" : "Saved here") + " · the bot answers only this number"
+    : "Your own WhatsApp number, country code first. The bot sends to it and answers only it.";
+  $("t-test").hidden = !w.send_to || !w.linked; $("t-remove").hidden = w.send_to_source !== "page";
+  $("t-save").textContent = w.send_to ? "Replace" : "Save";
+  $("gr-step").hidden = !w.linked || w.groups === undefined;
+  const chosen = w.groups || [];
+  $("gr-state").textContent = chosen.length ? chosen.map((g) => g.name).join(", ") : "none";
+  $("gr-state").className = "state " + (chosen.length ? "ok" : "");
+  $("gr-test").hidden = $("gr-summary").hidden = !chosen.length;
   const g = s.drive || {};
   $("g-state").textContent = !g.available ? "not configured" : g.connected ? "connected" : "not connected";
   $("g-state").className = "state " + (g.connected ? "ok" : "bad");
@@ -473,7 +660,23 @@ async function refresh() {
   $("d-detail").textContent = d.on ? d.masked + (d.source === "env" ? " · from DISCORD_WEBHOOK_URL" : " · saved here") : "Messages go to WhatsApp only.";
   $("d-test").hidden = !d.on; $("d-off").hidden = !d.on || !d.editable;
   $("d-save").textContent = d.on ? "Replace" : "Save";
+  const b = s.discord_bot || {};
+  $("b-state").textContent = !b.available ? "not available" : !b.on ? "off" : b.error ? "not connected" : b.linked ? "linked" : "waiting for your code";
+  $("b-state").className = "state " + (b.on && b.linked && !b.error ? "ok" : "bad");
+  $("b-detail").textContent = b.error ? b.error : !b.on ? "The menu answers on WhatsApp only."
+    : b.linked ? "Bot " + (b.name || "") + " answers " + (b.owner || "you") + " in direct messages."
+    : "Send this code to the bot " + (b.name || "") + " in a direct message:";
+  $("b-code").hidden = !b.code; $("b-code").textContent = b.code || "";
+  $("b-off").hidden = !b.on; $("b-save").textContent = b.on ? "Replace" : "Save";
 }
+$("b-save").onclick = async () => {
+  $("b-err").textContent = ""; busy($("b-save"), true);
+  try { await call("/api/setup/discord-bot", { token: $("b-token").value }); $("b-token").value = ""; await refresh(); }
+  catch (e) { $("b-err").textContent = e.message; }
+  busy($("b-save"), false);
+};
+$("b-off").onclick = async () => { if (!confirm("Turn Discord chat off and forget the bot token?")) return;
+  try { await call("/api/setup/discord-bot/off", {}); await refresh(); } catch (e) { $("b-err").textContent = e.message; } };
 $("g-connect").onclick = () => { location.href = "/setup/google/start"; };
 $("g-off").onclick = async () => { if (!confirm("Stop saving reports to Google Drive?")) return;
   try { await call("/api/setup/google/disconnect", {}); await refresh(); } catch (e) { $("g-err").textContent = e.message; } };
@@ -508,6 +711,20 @@ $("w-qr").onclick = () => link(null);
 $("w-pair").onclick = () => link($("w-number").value);
 $("w-unlink").onclick = async () => { if (!confirm("Unlink the bot's WhatsApp?")) return;
   try { await call("/api/setup/whatsapp/unlink", {}); await refresh(); } catch (e) { $("w-err").textContent = e.message; } };
+$("t-save").onclick = async () => {
+  $("t-err").textContent = ""; busy($("t-save"), true);
+  try { await call("/api/setup/whatsapp/number", { number: $("t-number").value }); $("t-number").value = ""; await refresh(); }
+  catch (e) { $("t-err").textContent = e.message; }
+  busy($("t-save"), false);
+};
+$("t-test").onclick = async () => {
+  $("t-err").textContent = ""; busy($("t-test"), true);
+  try { await call("/api/setup/whatsapp/test", {}); $("t-detail").textContent = $("t-detail").textContent.replace(/ · test message sent$/, "") + " · test message sent"; }
+  catch (e) { $("t-err").textContent = e.message; }
+  busy($("t-test"), false);
+};
+$("t-remove").onclick = async () => { if (!confirm("Stop sending WhatsApp messages to this number?")) return;
+  try { await call("/api/setup/whatsapp/number/remove", {}); await refresh(); } catch (e) { $("t-err").textContent = e.message; } };
 $("d-save").onclick = async () => {
   $("d-err").textContent = ""; busy($("d-save"), true);
   try { await call("/api/setup/discord", { url: $("d-url").value }); $("d-url").value = "";
@@ -522,5 +739,48 @@ $("d-test").onclick = async () => {
 };
 $("d-off").onclick = async () => { if (!confirm("Stop sending messages to Discord?")) return;
   try { await call("/api/setup/discord/off", {}); await refresh(); } catch (e) { $("d-err").textContent = e.message; } };
-refresh(); setInterval(refresh, 30000);
+async function loadUsers() {
+  try {
+    const r = await call("/api/setup/bot-users");
+    if (!r.users || !r.users.length) { $("bu-list").textContent = "No one yet."; return; }
+    const when = (t) => new Date(t).toLocaleString([], { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+    $("bu-list").innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:14px;color:var(--ink)">' +
+      '<tr style="text-align:left"><th>Name</th><th>Number</th><th>Where</th><th>Requests</th><th>Last pick</th><th>Last seen</th></tr>' +
+      r.users.map((u) => "<tr style='border-top:1px solid var(--rule)'><td>" + esc(u.name || "—") + "</td><td>" + esc(u.person) +
+        "</td><td>" + esc(u.where) + "</td><td>" + u.requests + "</td><td>" + esc(u.last_option || "—") + "</td><td>" + when(u.last_at) + "</td></tr>").join("") +
+      "</table>";
+  } catch (e) {}
+}
+loadUsers(); setInterval(loadUsers, 30000);
+$("gr-load").onclick = async () => {
+  $("gr-err").textContent = ""; busy($("gr-load"), true);
+  try {
+    const r = await call("/api/setup/whatsapp/groups");
+    $("gr-list").innerHTML = r.groups.length ? r.groups.map((g) =>
+      '<label style="display:block;margin:6px 0;color:var(--ink)"><input type="checkbox" style="width:auto;margin-right:8px" data-id="' +
+      esc(g.id) + '" data-name="' + esc(g.name) + '"' + (g.chosen ? " checked" : "") + ">" + esc(g.name) +
+      (g.size ? ' <span class="muted">(' + g.size + " members)</span>" : "") + "</label>").join("")
+      : "The bot's number is in no groups yet. Add it to a group, then press the button again.";
+    $("gr-save").hidden = !r.groups.length;
+  } catch (e) { $("gr-err").textContent = e.message; }
+  busy($("gr-load"), false);
+};
+$("gr-save").onclick = async () => {
+  $("gr-err").textContent = ""; busy($("gr-save"), true);
+  const picked = [...document.querySelectorAll("#gr-list input:checked")].map((i) => ({ id: i.dataset.id, name: i.dataset.name }));
+  try { await call("/api/setup/whatsapp/groups", { groups: picked }); await refresh(); }
+  catch (e) { $("gr-err").textContent = e.message; }
+  busy($("gr-save"), false);
+};
+$("gr-test").onclick = async () => {
+  $("gr-err").textContent = "";
+  try { await call("/api/setup/whatsapp/groups/test", {}); $("gr-err").textContent = ""; alert("Test message sent to the groups."); }
+  catch (e) { $("gr-err").textContent = e.message; }
+};
+$("gr-summary").onclick = async () => {
+  $("gr-err").textContent = "";
+  try { await call("/api/setup/whatsapp/groups/summary", {}); alert("Summary sent to the groups."); }
+  catch (e) { $("gr-err").textContent = e.message; }
+};
+refresh(); setInterval(refresh, 15000);
 """

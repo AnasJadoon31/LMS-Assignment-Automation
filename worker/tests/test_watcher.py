@@ -8,11 +8,12 @@ import httpx
 import pytest
 from sqlalchemy import func, select
 
+from lms_worker import actions
 from lms_worker.db import Artifact, Assignment, Course, Event, Job, JobState
 from lms_worker.kv import DbKV, FileKV, SecretBox
 from lms_worker.lms import models as lms
 from lms_worker.lms.bahria_pages import LMS_TZ
-from lms_worker.lms.errors import BadCredentials, ContractBroken, LMSError, ReloginPaused
+from lms_worker.lms.errors import AlreadySubmitted, BadCredentials, ContractBroken, LMSError, ReloginPaused
 from lms_worker.lms.session import SessionStore
 from lms_worker.notify import Outbox
 from lms_worker.schedule import next_delay
@@ -91,7 +92,9 @@ def channel():
 
 @pytest.fixture
 def watcher(lmsfake, sessions, channel, tmp_path):
-    return Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data")
+    # A fixed clock before DUE, so the tests do not depend on today's date
+    return Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data",
+                   now=lambda: datetime(2026, 10, 7, 12, 0, tzinfo=LMS_TZ))
 
 
 def jobs(sessions):
@@ -237,6 +240,49 @@ def test_downloads_retry_and_alert_on_the_third_failure(watcher, lmsfake, channe
     del lmsfake.download_error["155150:1"]
     watcher.poll_once()
     assert jobs(sessions) == [("Recurrence Relations", 1, "DOWNLOADED")]
+
+
+def test_a_new_assignment_is_announced_even_when_its_file_cannot_be_downloaded(watcher, lmsfake, channel, sessions):
+    lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations"))
+    lmsfake.download_error["155150:1"] = LMSError("404 from Download.php")
+
+    watcher.poll_once()
+    watcher.poll_once()
+
+    told = [(m, f) for m, f in channel.sent if "Recurrence Relations" in m]
+    assert told == [("New assignment\nDesign & Analysis of Algorithms\nRecurrence Relations\nDue Sun 11 Oct, 11:55 PM\n"
+                     "The question file could not be downloaded yet (404 from Download.php); it will follow.", None)]  # once
+
+    del lmsfake.download_error["155150:1"]
+    watcher.poll_once()
+    assert jobs(sessions) == [("Recurrence Relations", 1, "DOWNLOADED")]
+    assert channel.sent[-1] == ("Question file for the new assignment\nDesign & Analysis of Algorithms\nRecurrence Relations\n"
+                                "Due Sun 11 Oct, 11:55 PM", "Recurrence-Relations.pdf")
+    assert sum(m.startswith("New assignment") for m, _ in channel.sent) == 1
+
+
+def test_a_new_assignment_is_announced_even_when_the_lms_stops_answering_the_download(watcher, lmsfake, channel, sessions):
+    lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations"))
+    lmsfake.download_error["155150:1"] = httpx.ReadTimeout("timed out")
+
+    assert watcher.poll_once().status == "lms_down"
+    watcher.poll_once()
+    told = [m for m, _ in channel.sent if m.startswith("New assignment")]
+    assert told == ["New assignment\nDesign & Analysis of Algorithms\nRecurrence Relations\nDue Sun 11 Oct, 11:55 PM\n"
+                    "The question file could not be downloaded yet; it will follow."]
+    assert jobs(sessions) == [("Recurrence Relations", 1, "DETECTED")]
+
+
+def test_a_new_assignment_is_announced_in_every_course_mode(watcher, lmsfake, sessions, channel):
+    lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations"))
+    watcher.poll_once()
+    for number, mode in enumerate(("approve", "auto"), start=2):
+        with sessions.begin() as s:
+            s.scalar(select(Course)).mode = mode
+        lmsfake.set(DAA, *lmsfake.listing[DAA.lms_ref], meta(DAA, number, f"Sheet {number}"))
+        watcher.poll_once()
+        assert channel.sent[-1] == (f"New assignment\nDesign & Analysis of Algorithms\nSheet {number}\nDue Sun 11 Oct, 11:55 PM",
+                                    f"Sheet-{number}.pdf"), mode
 
 
 def test_a_changed_layout_pauses_polling_until_resume(watcher, lmsfake, channel, sessions):
@@ -610,3 +656,161 @@ def test_a_requested_check_ends_the_wait_early(watcher, lmsfake, sessions):
         stop.set()
     assert polls == ["ok", "ok"]  # the second poll came long before the 10-minute interval
     assert kv.get(POLL_NOW_KEY) is None
+
+
+# --- manual solving, safe mode, your own file, replacing an upload ---
+
+
+class Uploading(FakeLMS):
+    """An LMS with a Submit form and a Delete link: `shown` is the file each row shows."""
+
+    def __init__(self):
+        super().__init__()
+        self.shown: dict[str, str] = {}
+
+    def submit(self, a, file):
+        if a.lms_ref in self.shown:
+            raise AlreadySubmitted(self.shown[a.lms_ref])
+        self.calls.append(f"submit:{a.lms_ref}:{file.name}")
+        self.shown[a.lms_ref] = f"lms-{file.name}"
+        return lms.Receipt(filename=self.shown[a.lms_ref], submitted_at=NOW)
+
+    def delete_submission(self, a):
+        self.calls.append(f"delete:{a.lms_ref}")
+        return self.shown.pop(a.lms_ref)
+
+
+NOW = DUE - timedelta(days=2)
+
+
+def at(lmsfake, sessions, channel, tmp_path, when):
+    return Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data", now=lambda: when)
+
+
+def solved(sessions, tmp_path, state=JobState.AWAITING_APPROVAL):
+    """The first job gets a solved PDF and the given state."""
+    pdf = tmp_path / "Assignment 01.pdf"
+    pdf.write_bytes(b"%PDF solved")
+    with sessions.begin() as s:
+        job = s.scalar(select(Job).order_by(Job.id))
+        job.state = state
+        s.add(Artifact(job=job, kind="pdf", path=str(pdf), sha256="0" * 64, size=11))
+        return job.id
+
+
+def test_manual_solving_announces_and_waits_for_your_go_ahead(watcher, lmsfake, channel, sessions):
+    lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations"))
+    watcher.poll_once()
+    with sessions.begin() as s:
+        s.scalar(select(Course)).solve = "manual"
+    lmsfake.set(DAA, meta(DAA, 1, "Recurrence Relations"), meta(DAA, 2, "Sorting"))
+    watcher.poll_once()
+    assert jobs(sessions) == [("Recurrence Relations", 1, "DOWNLOADED"), ("Sorting", 1, "WAITING_GO")]
+    text, file = channel.sent[-1]
+    assert text.startswith("New assignment\nDesign & Analysis of Algorithms\nSorting") and file == "Sorting.pdf"
+    assert text.endswith("Solving is manual for this course. To have it solved, reply menu, then Needs your action.")
+
+
+def test_safe_mode_uploads_a_waiting_report_when_an_hour_is_left(sessions, channel, tmp_path):
+    fake = Uploading()
+    fake.set(DAA, meta(DAA, 1, "Recurrence Relations"))
+    at(fake, sessions, channel, tmp_path, NOW).poll_once()
+    job_id = solved(sessions, tmp_path)
+
+    early = at(fake, sessions, channel, tmp_path, DUE - timedelta(hours=3))
+    early.poll_once()
+    assert jobs(sessions)[0][2] == "AWAITING_APPROVAL"  # safe mode is off, and it is early anyway
+    with sessions.begin() as s:
+        s.scalar(select(Course)).safe = True
+    early.poll_once()
+    assert jobs(sessions)[0][2] == "AWAITING_APPROVAL" and not [c for c in fake.calls if c.startswith("submit")]
+    assert early.next_wake() == DUE - timedelta(hours=1) + timedelta(seconds=15)  # the poller comes back for it
+
+    r = at(fake, sessions, channel, tmp_path, DUE - timedelta(minutes=59)).poll_once()
+    assert r.uploaded == 1 and jobs(sessions)[0][2] == "CONFIRMED"
+    texts = [t for t, _ in channel.sent]
+    assert any(t.startswith("Safe mode: Design & Analysis of Algorithms · Recurrence Relations") for t in texts)
+    with sessions() as s:
+        a = s.get(Job, job_id).assignment
+        assert a.submitted_file == "lms-Assignment 01.pdf"  # the menu's counts follow at once, not a poll later
+
+
+def test_your_own_file_is_uploaded_and_the_services_work_stops(sessions, channel, tmp_path):
+    fake = Uploading()
+    fake.set(DAA, meta(DAA, 1, "Recurrence Relations"))
+    w = at(fake, sessions, channel, tmp_path, NOW)
+    w.poll_once()
+    solved(sessions, tmp_path)
+    mine = tmp_path / "mine.pdf"
+    mine.write_bytes(b"%PDF mine")
+    with sessions.begin() as s:
+        a = s.scalar(select(Assignment))
+        actions.upload_own(s, a, str(mine), DbKV(sessions), NOW, "the chat")
+
+    r = w.poll_once()
+    assert r.uploaded == 1 and "submit:155150:1:mine.pdf" in fake.calls
+    assert channel.sent[-1][0] == "Uploaded your file: Design & Analysis of Algorithms · Recurrence Relations\nThe LMS shows lms-mine.pdf."
+    with sessions() as s:
+        a = s.scalar(select(Assignment))
+        assert (a.submitted_file, a.upload_requested_at, a.jobs[-1].state) == ("lms-mine.pdf", None, "NEEDS_HUMAN")
+
+    # Deleting your file brings the solved report back for approval
+    fake.set(DAA, meta(DAA, 1, "Recurrence Relations", submitted_file="lms-mine.pdf"))
+    with sessions.begin() as s:
+        actions.delete_submission(s, s.scalar(select(Assignment)), DbKV(sessions), NOW, "the chat")
+    w.poll_once()
+    assert jobs(sessions)[0][2] == "AWAITING_APPROVAL"
+
+
+def test_an_own_file_is_refused_when_the_lms_already_shows_a_submission(sessions, channel, tmp_path):
+    fake = Uploading()
+    fake.set(DAA, meta(DAA, 1, "Recurrence Relations"))
+    w = at(fake, sessions, channel, tmp_path, NOW)
+    w.poll_once()
+    mine = tmp_path / "mine.pdf"
+    mine.write_bytes(b"%PDF mine")
+    with sessions.begin() as s:
+        actions.upload_own(s, s.scalar(select(Assignment)), str(mine), DbKV(sessions), NOW, "the chat")
+    fake.shown["155150:1"] = "other.pdf"
+    w.poll_once()
+    assert channel.sent[-1][0].startswith("Not uploaded: Design & Analysis of Algorithms · Recurrence Relations\n"
+                                          "The LMS already shows other.pdf. Delete it first")
+    with sessions() as s:
+        assert s.scalar(select(Assignment)).upload_requested_at is None
+
+
+def test_an_approved_redo_replaces_the_services_own_upload_but_never_yours(sessions, channel, tmp_path):
+    fake = Uploading()
+    fake.set(DAA, meta(DAA, 1, "Recurrence Relations"))
+    w = at(fake, sessions, channel, tmp_path, NOW)
+    w.poll_once()
+    job_id = solved(sessions, tmp_path, JobState.SUBMITTING)
+    w.poll_once()
+    assert jobs(sessions)[0][2] == "CONFIRMED" and fake.shown == {"155150:1": "lms-Assignment 01.pdf"}
+
+    fake.set(DAA, meta(DAA, 1, "Recurrence Relations", submitted_file="lms-Assignment 01.pdf"))
+    with sessions.begin() as s:  # redone and approved again
+        s.get(Job, job_id).state = JobState.SUBMITTING
+    fake.calls.clear()
+    w.poll_once()
+    assert fake.calls.count("delete:155150:1") == 1 and "submit:155150:1:Assignment 01.pdf" in fake.calls
+    assert jobs(sessions)[0][2] == "CONFIRMED"
+
+    fake.shown["155150:1"] = "yours.pdf"  # now the LMS shows a file the service did not upload
+    with sessions.begin() as s:
+        s.get(Job, job_id).state = JobState.SUBMITTING
+    fake.calls.clear()
+    w.poll_once()
+    assert "delete:155150:1" not in fake.calls and fake.shown == {"155150:1": "yours.pdf"}
+    with sessions() as s:
+        assert s.get(Job, job_id).last_error == "The LMS already shows a submission; the service never replaces one"
+
+
+def test_uploads_go_on_after_the_posted_time_until_the_end_of_that_day(sessions, channel, tmp_path):
+    fake = Uploading()
+    fake.set(DAA, meta(DAA, 1, "Recurrence Relations", deadline=DUE.replace(hour=9, minute=30)))
+    at(fake, sessions, channel, tmp_path, NOW).poll_once()
+    solved(sessions, tmp_path, JobState.SUBMITTING)
+    late = DUE.replace(hour=15, minute=0)  # hours after 9:30, the LMS still shows Submit
+    assert at(fake, sessions, channel, tmp_path, late).poll_once().uploaded == 1
+    assert jobs(sessions)[0][2] == "CONFIRMED"

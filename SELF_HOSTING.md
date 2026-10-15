@@ -27,7 +27,7 @@ whose name is on it. Run it only for your own account.
 | `evolution-api` | WhatsApp gateway. The worker creates and links its instance | inside the stack only |
 | `redis` | Evolution API's cache | inside the stack only |
 | `docker-proxy` | Lets the worker start solver containers; only container and image calls | inside the stack only |
-| `solver-image` | Builds the `lms-solver` image on every deploy, then idles | nothing |
+| `solver-image` | Builds the `lms-solver` image on every deploy, then idles, on no network | nothing |
 | solver containers | One per assignment, from the `lms-solver` image: Claude Code, with every tool and the internet, solves it and builds the report from your theme artifact, then the container is removed | nothing; they reach the internet but not the stack's services |
 
 Only the api gets a domain. Claude runs under your claude.ai login, kept in the
@@ -68,7 +68,8 @@ terminal (below). With one, use the setup page instead.
      paste the code that page shows back into the setup page.
    - **WhatsApp**: link the bot phone with the QR code, or type the bot phone's number for a
      pairing code (WhatsApp, **Linked devices**, **Link a device**, **Link with phone number
-     instead**).
+     instead**). Then, under **Messages go to**, save your own number (unless you set
+     `WHATSAPP_NUMBER`) and send a test message.
    - **Google Drive** (optional, see below): **Connect Google Drive**.
    - **Discord** (optional): paste a channel webhook URL.
 
@@ -82,6 +83,31 @@ The worker starts solver containers through Docker, so the stack mounts
 The commands below run in the worker's terminal: `docker compose exec worker <command>`,
 or the **Terminal** tab of the worker container in Coolify. You need them only without the
 setup page.
+
+## Assignment notices in WhatsApp groups
+
+Add the bot's number to a WhatsApp group, then on the setup page under **WhatsApp**, press
+**Show the bot's groups**, tick the groups and **Save**. Each ticked group gets:
+
+- every new or changed assignment, with its question file;
+- a reminder 24 hours and 2 hours before each deadline, whether or not you have submitted;
+- a summary at 8:00 AM and 9:00 PM of every assignment whose deadline has not passed
+  (🔴 under 24 hours, 🟠 under 3 days, 🟢 later).
+
+Groups get only these notices; your alerts, solved reports and the menu stay in your own chat.
+**Send a test message** and **Send the summary now** check it straight away.
+
+### The public menu for classmates
+
+In a ticked group, anyone who tags the bot (or replies to one of its messages) gets a menu:
+assignment question files, lecture files, deadlines, course outline and plan, and a
+leaderboard. Every reply tags them and quotes their message, and the bot remembers where each
+person is in the menu. Members of ticked groups can also message the bot privately, without
+tagging. Strangers and other groups get no answer, and your own number keeps your private menu.
+
+Only question files and the LMS's lecture, outline and plan files can be sent there: solved
+reports, receipts, your uploads and lab papers never are. The setup page lists who has used
+the bot, how often, and their last pick.
 
 ## Save reports to Google Drive
 
@@ -129,10 +155,11 @@ lms-worker whatsapp status    # Linked: <name> (+92...), and where messages go
 lms-worker notify-test        # sends a test message to each channel
 ```
 
-Now send `menu` to the bot's number from your own WhatsApp. It answers only `WHATSAPP_NUMBER`.
+Now send `menu` to the bot's number from your own WhatsApp. It answers only the number messages go to.
 If it stays silent, check `docker compose logs api` for "Evolution webhook points at".
 
-`WHATSAPP_NUMBER` is your own number: the bot sends to it. Open WhatsApp on the bot phone
+`WHATSAPP_NUMBER` is your own number: the bot sends to it. You can save it on the setup page
+instead (**Messages go to**); a number saved there wins, and takes effect at once. Open WhatsApp on the bot phone
 at least every two weeks; WhatsApp logs out linked devices when the phone has been away
 longer than that. `lms-worker whatsapp unlink` removes the link.
 

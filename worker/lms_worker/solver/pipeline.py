@@ -1,17 +1,28 @@
 """Solving downloaded assignments, one at a time, in the sandbox.
 
-A DOWNLOADED job is picked when its course is in approve or auto mode, it is an assignment
-(lab papers are never solved), its deadline has not passed and no pause holds it back; the
-nearest deadline goes first. One Claude run reads the theme artifact, solves the sheet, builds
+A DOWNLOADED job is picked when it is an assignment (lab papers are never solved), the LMS
+still takes it and no pause holds it back; the nearest deadline goes first. A course in manual
+solving keeps its jobs in WAITING_GO until you say go. In auto solving Claude may stop first
+and ask you for what it needs (NEEDS_INPUT); your answer resumes the same session. Reference
+files you sent for the assignment, and for the course's theme, are put in the work folder. One Claude run reads the theme artifact, solves the sheet, builds
 report.docx and report.pdf and checks every page (see prompt.py). Then, by Claude's summary:
 
 - done: the PDF comes to you. In approve mode it waits for your approval; in auto mode it
   goes to the upload.
-- handwritten: the PDF comes to you to copy by hand; nothing is ever uploaded.
+- handwritten: the PDF comes to you to copy by hand. It waits for your approval in every
+  mode, auto too: it is uploaded only if you approve it as it is.
 - blocked: the job stops with Claude's reason (NEEDS_HUMAN).
 
 Both formats are kept next to the question file and, with Google Drive connected, saved to
 "University Assignments/<semester>/<course>/<report name>" on your Drive with the question.
+
+The model is the one fixed in Settings, else SOLVER_MODEL, else the CLI's default, for every
+run; "Redo with Opus" alone picks its own. When a course uses the teacher's lecture notes as a
+reference, they are fetched before the solve and put in the work folder. Lecture summaries
+(see summaries.py) take their turn when no assignment is waiting.
+
+A redo resumes the Claude session, unless the course's prompt, theme or files changed since
+the last run: then it starts again from the sheet, so the new instructions are really read.
 
 A run stopped by the plan's limit, or about to draw paid extra usage, waits for the reset and
 then resumes the same Claude session. Any other failure is retried once, resuming too. When
@@ -35,13 +46,15 @@ from typing import Callable, Protocol
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..db.models import Artifact, Assignment, Course, CourseMode, Event, Job, JobState, utcnow
+from ..actions import EFFORT_KEY, MODEL_KEY
+from .. import files
+from ..db.models import Artifact, Assignment, Course, CourseMode, Event, Job, JobState, LectureMode, SolveMode, utcnow
 from ..kv import KeyValue
 from ..lms.bahria_pages import LMS_TZ
 from ..lms.models import PAPER
 from ..notify import Outbox
 from .claude import Outcome, StreamReader
-from .prompt import SUMMARY_SCHEMA, Brief, system_prompt, task_prompt
+from .prompt import SUMMARY_SCHEMA, THEME_ARTIFACT, Brief, course_prompt, system_prompt, task_prompt, with_extras
 from .sandbox import Sandbox, SandboxRun
 from .usage import Pause, UsageGuard
 
@@ -52,6 +65,7 @@ POLL_NOW_KEY = "poll_requested"  # the watcher's: an auto-mode upload should not
 RUN_TIMEOUT = 90 * 60
 MAX_TURNS = 250
 MAX_ATTEMPTS = 2  # a failed run is retried once
+MAX_LECTURES = 30  # this many lecture files at most go into the work folder
 RETRY_AFTER = timedelta(minutes=10)
 WARN_WITHIN = timedelta(hours=3)  # a pause ending this close to a deadline gets a warning
 IDLE_SECONDS = 60
@@ -100,6 +114,7 @@ class Solver:
         env: dict[str, str] | None = None,
         timeout: float = RUN_TIMEOUT,
         max_turns: int = MAX_TURNS,
+        materials=None,  # materials.Materials: the teacher's lecture notes, as a reference for solving
     ) -> None:
         self.sessions, self.kv, self.outbox, self.sandbox = sessions, kv, outbox, sandbox
         self.data_dir = data_dir
@@ -110,6 +125,10 @@ class Solver:
         self.model = model
         self.env = env or {}  # e.g. HTTPS_PROXY, the sandbox's way out
         self.timeout, self.max_turns = timeout, max_turns
+        self.materials = materials
+        from .summaries import Summarizer
+
+        self.summaries = Summarizer(self)
 
     # --- the loop ---
 
@@ -120,7 +139,8 @@ class Solver:
             for job in jobs:
                 job.attempts = max(0, job.attempts - 1)
                 _move(s, job, JobState.DOWNLOADED, "the worker restarted while solving; queued again")
-            return len(jobs)
+        self.summaries.recover()
+        return len(jobs)
 
     def run_forever(self, stop: threading.Event) -> None:
         self.recover()
@@ -142,7 +162,9 @@ class Solver:
     def _run_once(self) -> SolveResult:
         now = self.now()
         with self.sessions() as s:
-            if s.scalars(self._ready(now).limit(1)).first() is None:
+            job = s.scalars(self._ready(now).limit(1)).first()
+            prepare = job.id if job is not None and self._needs_prepare(job) else None
+            if job is None and not self.summaries.waiting(s, now):
                 return SolveResult("idle")
         if not self._signed_in():
             return SolveResult("signed_out")
@@ -150,13 +172,25 @@ class Solver:
         if pause:
             self._warn_deadlines(pause)
             return SolveResult("paused", detail=pause.describe())
+        if job is None:
+            return self.summaries.run_next(now)
+        if prepare is not None:
+            held = self._prepare(prepare)
+            if held is not None:
+                return held
         claimed = self._claim(now)
         if claimed is None:
             return SolveResult("idle")
-        job_id, work, prompt, resume = claimed
-        self._write_job(work, prompt, resume)
+        job_id, work, prompt, resume, system, route = claimed
+        self._write_job(work, prompt, resume, system, route)
         self.guard.count_run(now)
 
+        log.info("Solving job %s%s", job_id, " (resuming)" if resume else "")
+        run, outcome, pauses, overage = self.run_claude(work, self.timeout)
+        return self._finish(job_id, work, run, outcome, pauses, overage)
+
+    def run_claude(self, work: Path, timeout: float) -> tuple[SandboxRun, Outcome, list[Pause], bool]:
+        """One sandbox run on work/job.json, watching the plan's usage as it goes."""
         reader = StreamReader()
         pauses: list[Pause] = []
         overage = False
@@ -173,9 +207,52 @@ class Solver:
                     return False
             return True
 
-        log.info("Solving job %s%s", job_id, " (resuming)" if resume else "")
-        run = self.sandbox.run(work, self.env, on_line, self.timeout)
-        return self._finish(job_id, work, run, reader.outcome, pauses, overage)
+        run = self.sandbox.run(work, self.env, on_line, timeout)
+        return run, reader.outcome, pauses, overage
+
+    def fixed_model(self) -> str | None:
+        """The model you fixed in Settings, else SOLVER_MODEL; with neither, the CLI's default."""
+        return (self.kv.get(MODEL_KEY) or "").strip() or self.model
+
+    # --- lecture notes as a reference ---
+
+    def _needs_prepare(self, job: Job) -> bool:
+        """Before a first solve in a course that uses its lecture notes: they are fetched, once per revision."""
+        if job.assignment.course.lectures == LectureMode.OFF or self.materials is None or _is_redo(job):
+            return False
+        return "lectures" not in (json.loads(job.triage) if job.triage else {})
+
+    def _prepare(self, job_id: int) -> SolveResult | None:
+        """Fetch the course's lecture files and note them on the job. Never a reason to hold the solve."""
+        with self.sessions() as s:
+            job = s.get(Job, job_id)
+            course = job.assignment.course
+            s.expunge_all()
+        notes: list[str] = []
+        try:
+            listed = [(f.week, f.title, f.filename) for lec in self.materials.lectures(course) for f in lec.files]
+        except Exception as e:
+            listed = []
+            notes.append(f"the lecture notes could not be read: {e}")
+        names = self._fetch_lectures(course, listed[:MAX_LECTURES], notes)
+        with self.sessions.begin() as s:
+            job = s.get(Job, job_id, with_for_update=True)
+            job.triage = json.dumps({**(json.loads(job.triage) if job.triage else {}), "lectures": names})
+            if names:
+                s.add(Event(job_id=job.id, detail="lecture notes at hand: " + ", ".join(names)))
+            for note in notes:
+                s.add(Event(job_id=job.id, detail=note))
+        return None
+
+    def _fetch_lectures(self, course: Course, picked: list[tuple[str, str, str]], notes: list[str]) -> list[str]:
+        """Download what is not on the server yet; returns the file names that are there."""
+        names = []
+        for week, _, name in picked:
+            try:
+                names.append(self.materials.lecture(course, week, name).name)
+            except Exception as e:
+                notes.append(f"lecture file {name} could not be fetched: {e}")
+        return names
 
     # --- picking a job ---
 
@@ -188,25 +265,45 @@ class Solver:
             .where(
                 Job.state == JobState.DOWNLOADED,
                 Assignment.kind != PAPER,
-                Course.mode != CourseMode.NOTIFY,
                 Assignment.deadline_passed.is_(False),
-                or_(Assignment.deadline.is_(None), Assignment.deadline > now),
+                # The LMS takes uploads until the end of the deadline's day
+                or_(Assignment.deadline.is_(None), Assignment.deadline >= _day_start(now)),
                 or_(Job.not_before.is_(None), Job.not_before <= now),
             )
             .order_by(Assignment.deadline.asc().nulls_last(), Job.id)
         )
 
-    def _claim(self, now: datetime) -> tuple[int, Path, str, str | None] | None:
+    def _claim(self, now: datetime) -> tuple[int, Path, str, str | None, str, tuple] | None:
         with self.sessions() as s:
             job = s.scalars(self._ready(now).limit(1).with_for_update(of=Job, skip_locked=True)).first()
             if job is None:
                 return None
-            a = job.assignment
+            a, course = job.assignment, job.assignment.course
             work = self.job_dir(a, job) / "work"
-            redo = bool(job.note) and job.summary is not None
-            # A run that ended blocked starts over: its session has already concluded it cannot go on
-            blocked = job.summary is not None and json.loads(job.summary).get("status") == "blocked"
-            resume = job.claude_session if job.claude_session and (work / "job.json").exists() and not blocked else None
+            theme_files = files.listed(files.theme_dir(self.data_dir, course))
+            references = files.listed(files.refs_dir(self.data_dir, a))
+            system = course_prompt(system_prompt(self.sandbox.work_path(work), course.theme or THEME_ARTIFACT),
+                                   course.prompt, course.prompt_replaces)
+            last = json.loads(job.summary) if job.summary else {}
+            redo = _is_redo(job)
+            answered = last.get("status") == "needs_input"
+            triage = json.loads(job.triage) if job.triage else {}
+            lecture_dir = files.course_dir(self.data_dir, course) / "lectures"
+            lectures = [lecture_dir / n for n in triage.get("lectures") or [] if (lecture_dir / n).is_file()] \
+                if course.lectures != LectureMode.OFF else []
+            system = with_extras(system, self.sandbox.work_path(work), ask=course.solve == SolveMode.AUTO and not answered,
+                                 theme_files=[p.name for p in theme_files], references=[p.name for p in references],
+                                 lectures=[p.name for p in lectures], lectures_must=course.lectures == LectureMode.ALWAYS)
+            strong = triage.get("redo") or {}  # "Redo with Opus": its own model, over the one fixed in Settings
+            forced = redo and bool(strong.get("forced")) and strong.get("note") == job.note
+            route = (strong.get("model"), strong.get("effort"), True) if forced else (None, None, False)
+            # A run that ended blocked starts over: its session has already concluded it cannot go on.
+            # So does a redo after the course's prompt, theme or files changed: a resumed session
+            # would go on working from what it read the first time.
+            blocked = last.get("status") == "blocked"
+            changed = redo and (forced or _spec(work).get("system") != system)
+            resume = (job.claude_session if job.claude_session and (work / "job.json").exists() and not blocked and not changed
+                      else None)
             if not resume:
                 if work.exists():
                     shutil.rmtree(work)
@@ -214,33 +311,57 @@ class Solver:
                 for art in job.artifacts:
                     if art.kind == "question" and Path(art.path).is_file():
                         shutil.copy2(art.path, work / "in" / Path(art.path).name)
-            if resume and redo:
+            for folder, sent in (("theme-reference", theme_files), ("reference", references), ("lectures", lectures)):
+                shutil.rmtree(work / "in" / folder, ignore_errors=True)
+                if sent:
+                    (work / "in" / folder).mkdir(parents=True)
+                    for p in sent:
+                        shutil.copy2(p, work / "in" / folder / p.name)
+            if resume and answered:
+                said = f"The student answered: {job.note}" if job.note else "The student gave no answer: decide yourself."
+                prompt = (f"{said}\nFiles the student sent are listed in your instructions. Do not ask again: solve it now, "
+                          "build the report, check every page, and end with the summary.")
+            elif resume and redo:
                 prompt = (f"The student asked for changes: {job.note}\nMake them, rebuild report.docx and report.pdf, "
                           "check every page again, and end with the summary.")
             elif resume:
                 prompt = CONTINUE
             else:
-                files = sorted(p.name for p in (work / "in").iterdir() if p.is_file())
+                sheet = sorted(p.name for p in (work / "in").iterdir() if p.is_file())
                 prompt = task_prompt(Brief(course=a.course.name, semester=a.course.semester_name or a.course.semester,
                                            title=a.title, number=a.number, deadline=a.deadline, remarks=a.remarks,
-                                           files=files, on=now, note=job.note))
-            if redo:
-                job.summary = None  # a resumed redo continues as a plain run
+                                           files=sheet, on=now, note=job.note,
+                                           asked=tuple(last.get("questions") or ()) if answered else (),
+                                           answer=job.note if answered else None))
+            if redo or answered:
+                job.summary = None  # from here it continues as a plain run
             job.attempts += 1
             job.not_before = None
-            _move(s, job, JobState.SOLVING, "solving" + (" (resuming the Claude session)" if resume else ""))
+            how = (" (resuming the Claude session)" if resume else " (a fresh run, as you asked)" if forced
+                   else " (a fresh run: the course's prompt, theme or files changed)" if changed else "")
+            if route[0]:
+                how += f" with {route[0]}, {route[1]} effort"
+            _move(s, job, JobState.SOLVING, "solving" + how)
             s.commit()
-            return job.id, work, prompt, resume
+            return job.id, work, prompt, resume, system, route
 
     def job_dir(self, a: Assignment, job: Job) -> Path:
         return self.data_dir / _safe(a.course.code) / str(a.id) / str(job.revision)
 
-    def _write_job(self, work: Path, prompt: str, resume: str | None) -> None:
+    def _write_job(self, work: Path, prompt: str, resume: str | None, system: str | None = None,
+                   route: tuple = (None, None, False)) -> None:
         (work / "out").mkdir(parents=True, exist_ok=True)
-        spec = {"prompt": prompt, "system": system_prompt(self.sandbox.work_path(work)), "schema": SUMMARY_SCHEMA,
+        if system is None:
+            system = with_extras(system_prompt(self.sandbox.work_path(work)), self.sandbox.work_path(work),
+                                 ask=False, theme_files=[], references=[])
+        spec = {"prompt": prompt, "system": system, "schema": SUMMARY_SCHEMA,
                 "max_turns": self.max_turns}
-        if self.model:
-            spec["model"] = self.model
+        model = route[0] if route[2] else self.fixed_model()  # "Redo with Opus", else yours, else the CLI's default
+        if model:
+            spec["model"] = model
+        effort = (self.kv.get(EFFORT_KEY) or "").strip() or route[1]
+        if effort:
+            spec["effort"] = effort
         if resume:
             spec["resume"] = resume
         (work / "job.json").write_text(json.dumps(spec))
@@ -285,6 +406,15 @@ class Solver:
                 return self._give_up(s, job, reason)
 
             job.summary = json.dumps(summary)
+            if summary.get("status") == "needs_input":
+                asked = [str(q) for q in (summary.get("questions") or []) if str(q).strip()][:8] or ["It did not say what it needs."]
+                job.attempts = 0
+                _move(s, job, JobState.NEEDS_INPUT, "Claude asked before solving: " + " | ".join(asked))
+                self.outbox.queue(s, "question", f"Claude needs something before solving: {a.course.name} · {a.title}\n"
+                                  + "\n".join(f"{n}. {q}" for n, q in enumerate(asked, start=1))
+                                  + "\nTo answer or send a file, reply menu, then Needs your action.", job_id=job.id)
+                s.commit()
+                return SolveResult("asked", job.id)
             if summary.get("status") == "blocked":
                 reason = summary.get("blocked_reason") or "Claude could not do this one here"
                 return self._give_up(s, job, reason, blocked=True)
@@ -299,12 +429,10 @@ class Solver:
             job.last_error = None
             job.attempts = 0  # from here on, attempts count uploads
             handwritten = summary.get("status") == "handwritten"
-            if handwritten:
-                to, status = JobState.HANDWRITTEN, "handwritten"
-            elif a.course.mode == CourseMode.AUTO:
+            if a.course.mode == CourseMode.AUTO and not handwritten:
                 to, status = JobState.SUBMITTING, "solved"
-            else:
-                to, status = JobState.AWAITING_APPROVAL, "solved"
+            else:  # a typed report for a sheet that asks for handwriting is never uploaded unasked
+                to, status = JobState.AWAITING_APPROVAL, "handwritten" if handwritten else "solved"
             _move(s, job, to, f"solved: {len(summary.get('exercises') or [])} part(s), {summary.get('pages') or '?'} page(s)")
             questions = [Path(x.path) for x in job.artifacts if x.kind == "question" and Path(x.path).is_file()]
             folders = [DRIVE_ROOT, a.course.semester_name or a.course.semester, a.course.name, name]
@@ -418,6 +546,25 @@ def _move(s: Session, job: Job, to: JobState, detail: str) -> None:
     job.state = to
 
 
+def _is_redo(job: Job) -> bool:
+    """You asked for changes to a finished report (an answer to a question before solving is not a redo)."""
+    if not job.note or job.summary is None:
+        return False
+    return json.loads(job.summary).get("status") != "needs_input"
+
+
+def _day_start(now: datetime) -> datetime:
+    return now.astimezone(LMS_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _spec(work: Path) -> dict:
+    """The last run's job.json, if there was one."""
+    try:
+        return json.loads((work / "job.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
 def _held(s: Session, now: datetime, pause: Pause) -> str:
     waiting = s.scalars(Solver._ready(now)).all()
     return f"\n{len(waiting)} assignment(s) waiting to be solved." if waiting else ""
@@ -467,7 +614,8 @@ def _pkt(dt: datetime) -> str:
 
 def _solved_text(summary: dict, name: str, course: str, deadline: datetime | None, to: JobState,
                  folders: list[str] | None, drive_error: str | None) -> str:
-    head = "Solved, handwritten" if to == JobState.HANDWRITTEN else "Solved"
+    handwritten = summary.get("status") == "handwritten"
+    head = "Solved, handwritten" if handwritten else "Solved"
     lines = [f"{head}: {name}", course, f"Due {_pkt(deadline)}" if deadline else "No deadline shown"]
     parts = summary.get("exercises") or []
     pages = summary.get("pages")
@@ -480,10 +628,11 @@ def _solved_text(summary: dict, name: str, course: str, deadline: datetime | Non
         lines.append("Saved to Google Drive: " + " › ".join(folders))
     elif drive_error:
         lines.append(drive_error)
-    if to == JobState.HANDWRITTEN:
-        lines.append("The sheet asks for handwritten work: copy this by hand. Nothing will be uploaded.")
-    elif to == JobState.SUBMITTING:
+    if to == JobState.SUBMITTING:
         lines.append("Auto mode: uploading it now; the LMS receipt will follow.")
+    elif handwritten:
+        lines.append("The sheet asks for handwritten work, so it was not uploaded: copy this by hand. "
+                     "To upload this report as it is, reply menu, then Waiting for your approval.")
     else:
         lines.append("To upload it, reply menu, then Waiting for your approval.")
     return "\n".join(lines)

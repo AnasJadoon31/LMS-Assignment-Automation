@@ -5,7 +5,7 @@ GET  /courses                       every course this semester, with its mode
 GET  /courses/{id}                  one course: assignments, lab papers, files, approvals
 GET  /api/courses                   the list as JSON
 GET  /api/courses/{id}              one course as JSON
-POST /api/courses/{id}/mode         {mode}: approve, auto or notify
+POST /api/courses/{id}/mode         {mode}: approve or auto
 POST /api/jobs/{id}/approve         upload the solved PDF
 POST /api/jobs/{id}/reject
 POST /api/jobs/{id}/redo            {note}: solve again with this note
@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from . import actions
-from .actions import JOB_WORDS, MODE_WORDS
+from .actions import MODE_WORDS
 from .bot import _in, _paper_timing, _question_file, _relative, _status, _when, _window
 from .db.models import Artifact, Assignment, Course, Event, Job, JobState, utcnow
 from .kv import KeyValue
@@ -139,6 +139,18 @@ def dashboard_router(auth: Auth, sessions: sessionmaker[Session], kv: KeyValue, 
     def redo(request: Request, job_id: int, body: Note) -> dict:
         return job_action(request, job_id, lambda s, job: actions.redo(s, job, body.note, "the web page"))
 
+    @router.post("/api/assignments/{assignment_id}/delete-submission")
+    def delete_submission(request: Request, assignment_id: int) -> dict:
+        auth.guard(request)
+        with sessions.begin() as s:
+            a = s.get(Assignment, assignment_id)
+            if a is None:
+                raise HTTPException(status_code=404, detail="No such assignment")
+            ok, message = actions.delete_submission(s, a, kv, now(), "the web page")
+        if not ok:
+            raise HTTPException(status_code=409, detail=message)
+        return {"message": message}
+
     @router.get("/files/question/{assignment_id}")
     def question_file(request: Request, assignment_id: int):
         if not auth.signed_in(request):
@@ -200,6 +212,7 @@ def _item(s: Session, a: Assignment, now: datetime) -> dict:
     item = {
         "id": a.id, "kind": a.kind, "number": a.number, "title": a.title, "when": when, "status": status, "tone": tone,
         "marks": a.marks, "remarks": a.remarks, "skipped": a.skipped_reason, "files": files, "job": None,
+        "can_delete": actions.can_delete(a), "submitted_file": a.submitted_file,
     }
     if job and a.kind != PAPER:
         latest: dict[str, Artifact] = {}
@@ -208,7 +221,7 @@ def _item(s: Session, a: Assignment, now: datetime) -> dict:
                 latest[art.kind] = art
         files += [{"label": FILE_LABELS[k], "url": f"/files/{art.id}"} for k, art in sorted(latest.items(), key=lambda kv: list(FILE_LABELS).index(kv[0]))]
         events = s.scalars(select(Event).where(Event.job_id == job.id).order_by(Event.id.desc()).limit(8)).all()
-        words = JOB_WORDS.get(job.state, job.state)
+        words = actions.job_words(job)
         if job.state == JobState.NEEDS_HUMAN and job.last_error:
             words += f": {job.last_error}"
         item["job"] = {
@@ -228,7 +241,7 @@ def _send(path: Path) -> FileResponse:
 # --- pages ---
 
 MODE_JS = """
-const MODE_ORDER = ["approve", "auto", "notify"];
+const MODE_ORDER = ["approve", "auto"];
 function modeControl(course, modes, onDone) {
   const seg = document.createElement("div"); seg.className = "seg";
   for (const m of MODE_ORDER) {
@@ -258,7 +271,7 @@ COURSES_JS = MODE_JS + """
 async function load() {
   let d;
   try { d = await call("/api/courses"); } catch (e) { $("err").textContent = e.message; return; }
-  $("sem").textContent = d.courses.length ? (d.semester || "This semester") + " · " + d.courses.length + " courses. Approve sends you the PDF first; auto uploads without asking; notify only sends the question."
+  $("sem").textContent = d.courses.length ? (d.semester || "This semester") + " · " + d.courses.length + " courses. Approve sends you the PDF first; auto uploads without asking. Solving (bypass, manual, auto) and safe mode are set in the chat menu."
                                           : "No courses yet: they appear after the first check of the LMS.";
   const list = $("list"); list.innerHTML = "";
   for (const c of d.courses) {
@@ -303,6 +316,7 @@ function itemHtml(i) {
     btns.push('<button data-act="approve" data-job="' + i.job.id + '" data-title="' + esc(i.title) + '">Approve and upload</button>');
     btns.push('<button class="secondary" data-act="reject" data-job="' + i.job.id + '" data-title="' + esc(i.title) + '">Reject</button>');
   }
+  if (i.can_delete) btns.push('<button class="secondary" data-act="delete" data-assignment="' + i.id + '" data-title="' + esc(i.title) + '" data-file="' + esc(i.submitted_file) + '">Delete submission</button>');
   if (i.job && i.job.can_redo) btns.push('<button class="secondary" data-act="redo" data-job="' + i.job.id + '" data-title="' + esc(i.title) + '">Redo with a note</button>');
   if (btns.length) h += '<div class="row small">' + btns.join("") + "</div>";
   if (i.job && i.job.history.length) h += '<details class="hist"><summary>History</summary>' +
@@ -315,8 +329,10 @@ async function act(btn) {
   if (kind === "approve" && !confirm("Upload the solved PDF for " + title + " to the LMS now?")) return;
   if (kind === "reject" && !confirm("Reject the solution for " + title + "? Nothing will be uploaded.")) return;
   if (kind === "redo") { const note = prompt("What should change in the redo?"); if (!note) return; body = { note }; }
+  if (kind === "delete" && !confirm("Delete your submission for " + title + " from the LMS?\\nThe LMS shows " + btn.dataset.file + ". Nothing is uploaded in its place until you approve a report or upload one yourself.")) return;
   btn.disabled = true;
-  try { const r = await call("/api/jobs/" + job + "/" + kind, body); alert(r.message); } catch (e) { alert(e.message); }
+  const path = kind === "delete" ? "/api/assignments/" + btn.dataset.assignment + "/delete-submission" : "/api/jobs/" + job + "/" + kind;
+  try { const r = await call(path, body); alert(r.message); } catch (e) { alert(e.message); }
   load();
 }
 async function load() {

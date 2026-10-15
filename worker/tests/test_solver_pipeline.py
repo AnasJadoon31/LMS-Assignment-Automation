@@ -1,16 +1,21 @@
+import dataclasses
+import importlib
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy import select
 
+from lms_worker import actions, files
 from lms_worker.claude_login import LoginStatus
 from lms_worker.db import Artifact, Assignment, Course, Event, Job, JobState
 from lms_worker.kv import DbKV
 from lms_worker.lms import models as lms
 from lms_worker.lms.bahria_pages import LMS_TZ
-from lms_worker.lms.errors import AlreadySubmitted
+from lms_worker.lms.errors import AlreadySubmitted, LMSError, SessionExpired
 from lms_worker.notify import Outbox
 from lms_worker.solver.claude import rate_limit
 from lms_worker.solver.pipeline import CONTINUE, SIGNED_OUT_KEY, Solver, report_name
@@ -250,16 +255,99 @@ def test_without_an_upload_the_pdf_comes_back_to_upload_by_hand(sessions, channe
     assert file == pdf.name
 
 
-def test_handwritten_work_is_sent_to_copy_and_never_uploaded(solver, sandbox, channel, sessions, tmp_path):
+@pytest.mark.parametrize("replaces", [False, True])
+def test_a_course_prompt_is_added_to_or_replaces_the_built_in_one(solver, sandbox, sessions, tmp_path, replaces):
+    job_id = add_job(sessions, tmp_path)
+    with sessions.begin() as s:
+        course = s.get(Job, job_id).assignment.course
+        course.prompt, course.prompt_replaces = "Execute every example too.", replaces
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    system = sandbox.runs[0]["job"]["system"]
+    if replaces:
+        assert system.startswith("Execute every example too.\n\nDo not ask the student anything")
+        assert "You solve a university assignment" not in system
+    else:
+        assert system.startswith("You solve a university assignment") and "The work folder is /work" in system
+        assert "The student's own instructions for this course; follow them too:\nExecute every example too." in system
+        assert "Execute every example in the lab sheet as well" in system  # the built-in OS Lab rule
+
+
+def test_a_course_with_its_own_theme_is_solved_in_it_and_the_rest_use_the_default(solver, sandbox, sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    assert "design system artifact https://claude.ai/artifact/F2Je3LZvKN92ysXVL7jM2R." in sandbox.runs[0]["job"]["system"]
+
+    with sessions.begin() as s:
+        job = s.get(Job, job_id)
+        job.assignment.course.theme = "https://claude.ai/artifact/OtherTheme42"
+        actions.move(s, job, JobState.DOWNLOADED, "again")
+    solver.run_once()
+    system = sandbox.runs[1]["job"]["system"]
+    assert "design system artifact https://claude.ai/artifact/OtherTheme42." in system and "F2Je3LZvKN92ysXVL7jM2R" not in system
+
+
+def test_the_model_picked_in_the_chat_is_the_one_the_run_uses(solver, sandbox, sessions, tmp_path):
+    add_job(sessions, tmp_path)
+    DbKV(sessions).set("solver_model", "sonnet")
+    DbKV(sessions).set("solver_effort", "xhigh")
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    assert (sandbox.runs[0]["job"]["model"], sandbox.runs[0]["job"]["effort"]) == ("sonnet", "xhigh")
+
+
+def test_the_daily_limit_can_be_lifted_for_today():
+    from lms_worker.kv import FileKV
+    import tempfile
+
+    kv = FileKV(Path(tempfile.mkdtemp()))
+    guard = UsageGuard(kv, daily_cap=1)
+    guard.count_run(NOW)
+    assert guard.paused(NOW).reason == "daily cap"
+    kv.set("solver_cap_lifted", NOW.astimezone(LMS_TZ).date().isoformat())
+    assert guard.paused(NOW) is None
+    assert guard.paused(NOW + timedelta(days=1)) is None  # a new day: the count starts again
+    guard.count_run(NOW + timedelta(days=1))
+    assert guard.paused(NOW + timedelta(days=1)).reason == "daily cap"  # and yesterday's lift is over
+
+
+def test_handwritten_work_waits_for_approval_even_in_auto_mode(solver, sandbox, channel, sessions, tmp_path):
     job_id = add_job(sessions, tmp_path, mode="auto")
     sandbox.script = play(stream({**SUMMARY, "status": "handwritten"}))
 
     assert solver.run_once().status == "handwritten"
-    assert state(sessions, job_id) == "HANDWRITTEN"
+    assert state(sessions, job_id) == "AWAITING_APPROVAL"  # not SUBMITTING: a typed report is never uploaded unasked
+    assert DbKV(sessions).get(POLL_NOW_KEY) is None
     text, file = channel.sent[-1]
     assert text.startswith("Solved, handwritten: Assignment 01 - Recurrence Relations")
-    assert text.endswith("The sheet asks for handwritten work: copy this by hand. Nothing will be uploaded.")
+    assert text.endswith("The sheet asks for handwritten work, so it was not uploaded: copy this by hand. "
+                         "To upload this report as it is, reply menu, then Waiting for your approval.")
     assert file.endswith(".pdf")
+    with sessions.begin() as s:
+        job = s.get(Job, job_id)
+        assert actions.handwritten(job) and actions.job_words(job) == actions.HANDWRITTEN_WORDS
+        done, message = actions.approve(s, job, DbKV(sessions), NOW, "WhatsApp")
+        assert done and message.startswith("Approved: Recurrence Relations.") and job.state == "SUBMITTING"
+
+
+def test_older_handwritten_jobs_that_can_still_be_uploaded_become_approvable(engine, sessions, tmp_path):
+    waiting = add_job(sessions, tmp_path, state=JobState.HANDWRITTEN)
+    closed = add_job(sessions, tmp_path, state=JobState.HANDWRITTEN, ref="155150:2")
+    submitted = add_job(sessions, tmp_path, state=JobState.HANDWRITTEN, ref="155150:3")
+    with sessions.begin() as s:
+        s.get(Job, closed).assignment.deadline_passed = True
+        s.get(Job, submitted).assignment.submitted_file = "mine.pdf"
+
+    migration = importlib.import_module("lms_worker.db.migrations.versions.0006_handwritten_waits_for_approval")
+    with engine.begin() as conn, Operations.context(MigrationContext.configure(conn)):
+        migration.upgrade()
+
+    assert [state(sessions, j) for j in (waiting, closed, submitted)] == ["AWAITING_APPROVAL", "HANDWRITTEN", "HANDWRITTEN"]
+    with sessions() as s:
+        moved = s.scalars(select(Event).where(Event.to_state == "AWAITING_APPROVAL")).all()
+        assert [(e.job_id, e.from_state, e.detail) for e in moved] == [
+            (waiting, "HANDWRITTEN", "handwritten work now waits for your approval")]
 
 
 def test_blocked_work_stops_with_claudes_reason(solver, sandbox, channel, sessions, tmp_path):
@@ -348,14 +436,78 @@ def test_a_run_that_finds_claude_signed_out_does_not_count(solver, sandbox, chan
     assert len(sandbox.runs) == 1
 
 
-def test_only_open_assignments_in_approve_or_auto_mode_are_solved(solver, sandbox, sessions, tmp_path):
+def test_only_open_assignments_are_solved_until_the_end_of_the_deadlines_day(solver, sandbox, sessions, tmp_path):
     add_job(sessions, tmp_path, kind="paper", ref="155150:P1", title="Mid Term paper")
-    add_job(sessions, tmp_path, ref="155150:2", title="Closed", deadline=NOW - timedelta(minutes=1))
-    assert solver.run_once().status == "idle"
-    job_id = add_job(sessions, tmp_path, ref="155150:3", title="Sorting")
+    add_job(sessions, tmp_path, ref="155150:2", title="Yesterday", deadline=NOW - timedelta(days=1))
+    waiting = add_job(sessions, tmp_path, ref="155150:4", title="Manual")
     with sessions.begin() as s:
-        s.get(Job, job_id).assignment.course.mode = "notify"
+        s.get(Job, waiting).state = JobState.WAITING_GO  # manual solving: not before your go-ahead
     assert solver.run_once().status == "idle" and not sandbox.runs
+    # The posted time passed a minute ago, but the LMS takes uploads until 11:59 pm that day
+    late = add_job(sessions, tmp_path, ref="155150:3", title="Sorting", deadline=NOW - timedelta(minutes=1))
+    sandbox.script = play(stream(SUMMARY))
+    assert solver.run_once().status == "solved" and state(sessions, late) == "AWAITING_APPROVAL"
+
+
+def test_a_redo_starts_fresh_when_the_prompt_or_theme_changed(solver, sandbox, sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    with sessions.begin() as s:
+        actions.redo(s, s.get(Job, job_id), "tighter margins", "WhatsApp")
+    solver.run_once()
+    same = sandbox.runs[1]["job"]
+    assert same["resume"] == "sess-1" and same["prompt"].startswith("The student asked for changes: tighter margins")
+
+    with sessions.begin() as s:
+        job = s.get(Job, job_id)
+        job.assignment.course.theme = "https://claude.ai/artifact/NewTheme42"
+        job.assignment.course.prompt = "Use C."
+        actions.redo(s, job, "new theme please", "WhatsApp")
+    solver.run_once()
+    fresh = sandbox.runs[2]["job"]
+    assert "resume" not in fresh  # a resumed session would keep working from the old theme
+    assert "NewTheme42" in fresh["system"] and "Use C." in fresh["system"]
+    assert "The student asked for a redo with this note: new theme please" in fresh["prompt"]
+    with sessions() as s:
+        assert "a fresh run: the course's prompt, theme or files changed" in s.scalars(
+            select(Event.detail).where(Event.job_id == job_id, Event.to_state == "SOLVING").order_by(Event.id.desc())).first()
+
+
+def test_auto_solving_lets_claude_ask_first_and_your_answer_resumes_it(solver, sandbox, channel, sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path)
+    with sessions.begin() as s:
+        a = s.get(Job, job_id).assignment
+        a.course.solve = "auto"
+        files.keep(files.refs_dir(solver.data_dir, a), "notes.pdf", b"%PDF notes")
+        files.keep(files.theme_dir(solver.data_dir, a.course), "format.docx", b"PK")
+    asked = {**SUMMARY, "status": "needs_input", "questions": ["Which dataset should Q2 use?"]}
+    sandbox.script = play(stream(asked), files=False)
+    assert solver.run_once().status == "asked" and state(sessions, job_id) == "NEEDS_INPUT"
+    first = sandbox.runs[0]["job"]["system"]
+    assert "Before you solve, decide whether you can do all of it well on your own" in first
+    assert "/work/in/theme-reference: format.docx" in first and "/work/in/reference: notes.pdf" in first
+    assert channel.sent[-1][0].startswith("Claude needs something before solving: Design & Analysis of Algorithms · Recurrence Relations\n"
+                                          "1. Which dataset should Q2 use?")
+
+    with sessions.begin() as s:
+        actions.answer(s, s.get(Job, job_id), "Use iris.", "the chat")
+    sandbox.script = play(stream(SUMMARY))
+    assert solver.run_once().status == "solved"
+    again = sandbox.runs[1]["job"]
+    assert again["resume"] == "sess-1" and again["prompt"].startswith("The student answered: Use iris.")
+    with sessions() as s:
+        job = s.get(Job, job_id)
+        work = solver.job_dir(job.assignment, job) / "work" / "in"
+    assert (work / "reference" / "notes.pdf").read_bytes() == b"%PDF notes" and (work / "theme-reference" / "format.docx").is_file()
+
+
+def test_bypass_solving_tells_claude_never_to_ask(solver, sandbox, sessions, tmp_path):
+    add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    system = sandbox.runs[0]["job"]["system"]
+    assert "Do not ask the student anything" in system and "Before you solve, decide" not in system
 
 
 def test_nearest_deadline_first_and_a_deadline_warning_while_paused(solver, sandbox, channel, sessions, tmp_path):
@@ -431,15 +583,337 @@ def test_a_submission_already_there_counts_as_ours_only_after_our_own_try(sessio
         assert job.lms_submission_file == ("Assignment_01.pdf" if expected == "CONFIRMED" else None)
 
 
+UPLOADED = "Assignment_01.pdf"
+
+
+def uploaded_job(sessions, tmp_path, *, state=JobState.CONFIRMED):
+    """A job whose report the service uploaded; the LMS shows the file."""
+    job_id = add_job(sessions, tmp_path, state=state, fingerprint=LISTED.fingerprint())
+    with sessions.begin() as s:
+        job = s.get(Job, job_id)
+        job.lms_submission_file = UPLOADED if state == JobState.CONFIRMED else None
+        job.assignment.submitted_file = UPLOADED
+    return job_id
+
+
+def ask_to_delete(sessions, job_id):
+    with sessions.begin() as s:
+        return actions.delete_submission(s, s.get(Job, job_id).assignment, DbKV(sessions), NOW, "WhatsApp")
+
+
+def test_a_submission_you_ask_to_delete_is_deleted_and_the_report_waits_again(sessions, channel, tmp_path):
+    job_id = uploaded_job(sessions, tmp_path)
+    done, message = ask_to_delete(sessions, job_id)
+    assert done and message == "Deleting your submission for Recurrence Relations from the LMS now; a message will confirm it."
+    assert DbKV(sessions).get(POLL_NOW_KEY)  # the worker is asked to poll at once
+    assert ask_to_delete(sessions, job_id) == (False, "Nothing changed: the submission for Recurrence Relations is already being deleted.")
+
+    class Deleting(FakeLMS):
+        def delete_submission(self, a):
+            self.calls.append(f"delete:{a.lms_ref}")
+            self.listing[DAA.lms_ref] = [LISTED]  # the row is open again, nothing submitted
+            return UPLOADED
+
+    fake = Deleting()
+    fake.set(DAA, dataclasses.replace(LISTED, submitted_file=UPLOADED))
+    watcher = Watcher(fake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data", now=Clock(NOW))
+    assert watcher.poll_once().deleted == 1
+    assert fake.calls.count("delete:155150:1") == 1
+    with sessions() as s:
+        job = s.get(Job, job_id)
+        a = job.assignment
+        assert (job.state, job.lms_submission_file) == ("AWAITING_APPROVAL", None)
+        assert (a.submitted_file, a.delete_requested_at) == (None, None)
+        assert s.scalars(select(Event.detail).where(Event.job_id == job_id).order_by(Event.id)).all()[-2:] == [
+            "delete of the LMS submission requested on WhatsApp: Recurrence Relations",
+            "Assignment_01.pdf deleted from the LMS at your request; waiting for your approval again"]
+    assert channel.sent[-1][0] == (
+        "Deleted from the LMS: Design & Analysis of Algorithms · Recurrence Relations\n"
+        "Assignment_01.pdf is no longer submitted.\n"
+        "The solved report waits for your approval again: reply menu, then Waiting for your approval.")
+
+    assert watcher.poll_once().deleted == 0  # asked once, done once
+    assert fake.calls.count("delete:155150:1") == 1
+    assert state(sessions, job_id) == "AWAITING_APPROVAL"
+
+
+def test_a_report_that_stopped_on_your_old_submission_can_go_up_once_you_delete_it(sessions, channel, tmp_path):
+    job_id = uploaded_job(sessions, tmp_path, state=JobState.NEEDS_HUMAN)
+    pdf = tmp_path / "Assignment 01 - Recurrence Relations.pdf"
+    pdf.write_bytes(b"%PDF solved")
+    with sessions.begin() as s:
+        job = s.get(Job, job_id)
+        job.last_error = "The LMS already shows a submission; the service never replaces one"
+        s.add(Artifact(job_id=job_id, kind="pdf", path=str(pdf), sha256="0" * 64, size=11))
+    ask_to_delete(sessions, job_id)
+
+    class Deleting(FakeLMS):
+        def delete_submission(self, a):
+            self.listing[DAA.lms_ref] = [LISTED]
+            return UPLOADED
+
+    fake = Deleting()
+    fake.set(DAA, dataclasses.replace(LISTED, submitted_file=UPLOADED))
+    Watcher(fake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data", now=Clock(NOW)).poll_once()
+    with sessions() as s:
+        job = s.get(Job, job_id)
+        assert (job.state, job.last_error) == ("AWAITING_APPROVAL", None)
+    assert channel.sent[-1][0].endswith("The solved report waits for your approval again: reply menu, then Waiting for your approval.")
+
+
+def test_a_submission_deleted_on_the_lms_itself_puts_the_report_back_for_approval(sessions, channel, tmp_path):
+    job_id = uploaded_job(sessions, tmp_path)
+    fake = FakeLMS()
+    fake.set(DAA, dataclasses.replace(LISTED, submitted_file=UPLOADED))
+    watcher = Watcher(fake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data", now=Clock(NOW))
+    watcher.poll_once()
+    assert state(sessions, job_id) == "CONFIRMED"  # still on the LMS: nothing changes
+
+    fake.set(DAA, LISTED)  # you deleted it on the LMS website
+    watcher.poll_once()
+    with sessions() as s:
+        job = s.get(Job, job_id)
+        assert (job.state, job.lms_submission_file) == ("AWAITING_APPROVAL", None)
+    assert channel.sent[-1][0].startswith("No longer submitted: Design & Analysis of Algorithms · Recurrence Relations")
+    sent = len(channel.sent)
+    watcher.poll_once()
+    assert len(channel.sent) == sent and state(sessions, job_id) == "AWAITING_APPROVAL"  # said once
+
+
+def test_a_delete_the_lms_refuses_is_reported_and_not_repeated(sessions, channel, tmp_path):
+    job_id = uploaded_job(sessions, tmp_path)
+    ask_to_delete(sessions, job_id)
+
+    class Refusing(FakeLMS):
+        def delete_submission(self, a):
+            self.calls.append("delete")
+            raise LMSError("The LMS still shows the submission after the delete")
+
+    fake = Refusing()
+    fake.set(DAA, dataclasses.replace(LISTED, submitted_file=UPLOADED))
+    watcher = Watcher(fake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data", now=Clock(NOW))
+    assert watcher.poll_once().deleted == 0 and watcher.poll_once().deleted == 0
+    assert fake.calls.count("delete") == 1
+    with sessions() as s:
+        job = s.get(Job, job_id)
+        assert (job.state, job.lms_submission_file, job.assignment.submitted_file) == ("CONFIRMED", UPLOADED, UPLOADED)
+        assert job.assignment.delete_requested_at is None
+    assert channel.sent[-1][0] == ("Not deleted: Design & Analysis of Algorithms · Recurrence Relations\n"
+                                   "The LMS still shows the submission after the delete")
+
+
+def test_delete_is_offered_only_for_an_open_assignment_the_lms_shows_a_file_for(sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path, state=JobState.AWAITING_APPROVAL)
+    nothing = "Nothing changed: Recurrence Relations has no submission on the LMS that can be deleted now."
+    assert ask_to_delete(sessions, job_id) == (False, nothing)  # nothing submitted
+    with sessions.begin() as s:
+        a = s.get(Job, job_id).assignment
+        a.submitted_file, a.deadline_passed = UPLOADED, True
+    assert ask_to_delete(sessions, job_id) == (False, nothing)  # closed: the LMS no longer offers Delete
+    with sessions() as s:
+        assert s.get(Job, job_id).assignment.delete_requested_at is None
+
+
+def test_a_session_that_ends_keeps_the_delete_for_the_next_poll(sessions, channel, tmp_path):
+    job_id = uploaded_job(sessions, tmp_path)
+    ask_to_delete(sessions, job_id)
+
+    class Expired(FakeLMS):
+        def delete_submission(self, a):
+            raise SessionExpired("the session ended")
+
+    fake = Expired()
+    fake.set(DAA, dataclasses.replace(LISTED, submitted_file=UPLOADED))
+    result = Watcher(fake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data", now=Clock(NOW)).poll_once()
+    assert result.status == "session"
+    with sessions() as s:
+        assert s.get(Job, job_id).assignment.delete_requested_at is not None
+    assert state(sessions, job_id) == "CONFIRMED"
+
+
 def test_a_redo_after_a_blocked_run_starts_a_new_session(solver, sandbox, sessions, tmp_path):
     job_id = add_job(sessions, tmp_path)
     sandbox.script = play(stream({**SUMMARY, "status": "blocked", "blocked_reason": "No Artifact tool."}), files=False)
     assert solver.run_once().status == "blocked"
     with sessions.begin() as s:
-        from lms_worker import actions
+        from lms_worker import actions, files
         assert actions.redo(s, s.get(Job, job_id), "Try again", "the web page")[0]
 
     sandbox.script = play(stream(SUMMARY, session="sess-2"))
     assert solver.run_once().status == "solved"
     job = sandbox.runs[-1]["job"]
     assert "resume" not in job and "The student asked for a redo with this note: Try again" in job["prompt"]
+
+
+# --- lecture notes as a reference, Redo with Opus ---
+
+
+def details(sessions, job_id):
+    with sessions() as s:
+        return list(s.scalars(select(Event.detail).where(Event.job_id == job_id).order_by(Event.id)))
+
+
+def test_the_model_and_effort_are_the_ones_you_set_and_nothing_runs_before_the_solve(solver, sandbox, sessions, tmp_path):
+    add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    (solve,) = sandbox.runs  # one run: no model is asked first which model should solve it
+    assert "model" not in solve["job"] and "effort" not in solve["job"]  # the CLI's default
+
+    DbKV(sessions).set("solver_model", "claude-sonnet-5-5")
+    DbKV(sessions).set("solver_effort", "high")
+    add_job(sessions, tmp_path, ref="155150:2", title="Sorting")
+    solver.run_once()
+    assert len(sandbox.runs) == 2
+    assert (sandbox.runs[1]["job"]["model"], sandbox.runs[1]["job"]["effort"]) == ("claude-sonnet-5-5", "high")
+
+
+class FakeLectures:
+    def __init__(self, data_dir, fail=False):
+        self.data_dir, self.fail, self.fetched = data_dir, fail, []
+
+    def lectures(self, course):
+        from lms_worker.lms.materials import Lecture, LectureFile
+
+        if self.fail:
+            raise RuntimeError("the LMS session has ended")
+        return [Lecture(str(n), f"Topic {n}", (LectureFile(str(n), f"Topic {n}", f"week-{n}.pptx", "x"),), (), None) for n in (1, 2, 3)]
+
+    def lecture(self, course, week, filename):
+        self.fetched.append(filename)
+        return files.keep(files.course_dir(self.data_dir, course) / "lectures", filename, b"slides")
+
+
+def lecture_files(solver, sessions, job_id):
+    with sessions() as s:
+        job = s.get(Job, job_id)
+        folder = solver.job_dir(job.assignment, job) / "work" / "in" / "lectures"
+        return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []
+
+
+def test_lecture_notes_are_a_reference_in_auto_and_always_and_left_out_when_off(solver, sandbox, sessions, tmp_path):
+    solver.materials = FakeLectures(solver.data_dir)
+    every = ["week-1.pptx", "week-2.pptx", "week-3.pptx"]
+    job_id = add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    assert lecture_files(solver, sessions, job_id) == [] and "in/lectures" not in sandbox.runs[0]["job"]["system"]
+    assert solver.materials.fetched == []  # off: the LMS is not even asked
+
+    auto = add_job(sessions, tmp_path, ref="155150:2", title="Sorting")
+    with sessions.begin() as s:
+        s.get(Job, auto).assignment.course.lectures = "auto"
+    solver.run_once()
+    assert len(sandbox.runs) == 2 and lecture_files(solver, sessions, auto) == every  # still one run per solve
+    system = sandbox.runs[1]["job"]["system"]
+    assert "/work/in/lectures: week-1.pptx, week-2.pptx, week-3.pptx." in system
+    assert "Decide from the sheet whether it builds on any of them" in system
+    assert "lecture notes at hand: week-1.pptx, week-2.pptx, week-3.pptx" in details(sessions, auto)
+
+    always = add_job(sessions, tmp_path, ref="155150:3", title="Graphs")
+    with sessions.begin() as s:
+        s.get(Job, always).assignment.course.lectures = "always"
+    solver.run_once()
+    assert lecture_files(solver, sessions, always) == every
+    assert "Read the ones this assignment builds on before solving" in sandbox.runs[2]["job"]["system"]
+
+    solver.materials.fail = True  # lecture notes that cannot be read never hold a solve up
+    fourth = add_job(sessions, tmp_path, ref="155150:4", title="Trees")
+    assert solver.run_once().status == "solved"
+    assert any(d.startswith("the lecture notes could not be read") for d in details(sessions, fourth))
+
+
+def test_redo_with_opus_starts_again_on_opus_whatever_else_is_set(solver, sandbox, sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    DbKV(sessions).set("solver_model", "claude-sonnet-5-5")  # even over a model fixed in Settings
+    with sessions.begin() as s:
+        actions.redo(s, s.get(Job, job_id), "Q2 is wrong", "WhatsApp", strong=True)
+    assert solver.run_once().status == "solved"
+    again = sandbox.runs[-1]["job"]
+    assert len(sandbox.runs) == 2
+    assert (again["model"], again["effort"]) == ("opus", "high") and "resume" not in again
+    assert "The student asked for a redo with this note: Q2 is wrong" in again["prompt"]
+    assert "solving (a fresh run, as you asked) with opus, high effort" in details(sessions, job_id)
+
+    with sessions.begin() as s:  # a normal redo afterwards goes back to the fixed model
+        actions.redo(s, s.get(Job, job_id), "bigger headings", "WhatsApp")
+    solver.run_once()
+    assert sandbox.runs[-1]["job"]["model"] == "claude-sonnet-5-5" and sandbox.runs[-1]["job"]["resume"] == "sess-1"
+
+
+# --- lecture summaries ---
+
+NOTES = {"status": "done", "title": "DAA: weeks 1 to 2", "pages": 3}
+
+
+def notes_script(result=NOTES, pdf=True):
+    def script(work, on_line):
+        if pdf:
+            (work / "out" / "notes.pdf").write_bytes(b"%PDF notes")
+            (work / "notes.md").write_text("# notes")
+        return play(stream(result, session="notes-1"), files=False)(work, on_line)
+    return script
+
+
+def queue_summary(solver, sessions):
+    with sessions.begin() as s:
+        course = s.scalar(select(Course).where(Course.code == "155150"))
+        if course is None:
+            course = Course(code="155150", name="Design & Analysis of Algorithms", lms_ref="MTU1MTUw", semester="MjAyNjM=",
+                            semester_name="Fall-2026")
+            s.add(course)
+            s.flush()
+        for name in ("week-1.pptx", "week-2.pdf"):
+            files.keep(files.course_dir(solver.data_dir, course) / "lectures", name, b"slides")
+        lectures = [{"week": "1", "title": "Intro", "file": "week-1.pptx"}, {"week": "2", "title": "Recurrences", "file": "week-2.pdf"}]
+        return actions.summarize(s, course, lectures).id
+
+
+def test_a_lecture_summary_is_written_in_one_run_and_sent(solver, sandbox, drive, channel, sessions, tmp_path):
+    from lms_worker.db import Summary
+
+    DbKV(sessions).set("solver_model", "claude-sonnet-5-5")
+    sm_id = queue_summary(solver, sessions)
+    sandbox.script = notes_script()
+    assert solver.run_once().status == "solved"
+    (write,) = sandbox.runs  # one run: nothing is asked first
+    assert write["files"] == ["week-1.pptx", "week-2.pdf"]
+    assert (write["job"]["model"], write["job"]["text"], write["job"]["plain"]) == ("claude-sonnet-5-5", True, True)
+    assert "effort" not in write["job"] and write["job"]["prepared"] is False
+    assert "one document from which the lectures can be learnt without opening the slides" in write["job"]["system"]
+    assert "Leave nothing out to save space" in write["job"]["system"]
+    assert "Open a page image in /work/in/pages only where the text shows that a slide's figure carries the point" in write["job"]["system"]
+    assert "lms-notes /work/notes.md /work/out/notes.pdf" in write["job"]["system"]
+    assert "week 1: Intro (week-1.pptx); week 2: Recurrences (week-2.pdf)" in write["job"]["prompt"]
+    with sessions() as s:
+        sm = s.get(Summary, sm_id)
+        assert sm.state == "DONE" and Path(sm.path).name == "DAA weeks 1 to 2.pdf" and Path(sm.path).read_bytes() == b"%PDF notes"
+    text, file = channel.sent[-1]
+    assert file == "DAA weeks 1 to 2.pdf"
+    assert text.startswith("Lecture notes summary: Design & Analysis of Algorithms\nweeks 1, 2, 3 page(s)\nWritten by claude-sonnet-5-5")
+    assert drive.saved[-1] == (["University Assignments", "Fall-2026", "Design & Analysis of Algorithms", "Lecture summaries"],
+                               ["DAA weeks 1 to 2.pdf"])
+    assert solver.run_once().status == "idle"
+
+
+def test_assignments_go_before_summaries_and_a_failed_summary_is_retried_once(solver, sandbox, channel, sessions, tmp_path, clock):
+    from lms_worker.db import Summary
+
+    sm_id = queue_summary(solver, sessions)
+    job_id = add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    assert solver.run_once().job_id == job_id  # the assignment first
+    with sessions() as s:
+        assert s.get(Summary, sm_id).state == "QUEUED"
+
+    sandbox.script = notes_script(pdf=False)
+    assert solver.run_once().status == "retry"
+    assert solver.run_once().status == "idle"  # not before ten minutes have passed
+    clock.at = NOW + timedelta(minutes=11)
+    assert solver.run_once().status == "failed" and len(sandbox.runs) == 3
+    with sessions() as s:
+        assert s.get(Summary, sm_id).state == "FAILED"
+    assert channel.sent[-1][0].startswith("The lecture summary could not be written: Design & Analysis of Algorithms, weeks 1, 2\n"
+                                          "the run ended without notes.pdf")

@@ -24,7 +24,9 @@ The design is in the tech spec.
    **University Assignments/<semester>/<course>/** on your Google Drive.
 4. The PDF comes to you on WhatsApp. Approve it from the menu and the worker uploads it; in
    auto mode it uploads straight away. Handwritten work is solved in full and sent to you to
-   copy, never uploaded. Work that cannot be done here (hardware, group work) stops with the reason.
+   copy; it waits for your approval in every mode, and is uploaded only if you approve it as it is.
+   While an assignment is open you can delete its submission from the menu or the Courses page, as on
+   the LMS; a report the service had uploaded then waits for your approval again. Work that cannot be done here (hardware, group work) stops with the reason.
 
 Claude Pro limits: solving pauses when a usage window passes 80% (`SOLVER_PAUSE_AT`) or the
 limit is hit, never draws paid extra usage, and runs at most 6 times a day
@@ -50,10 +52,11 @@ service a domain and set `PUBLIC_URL` to it.
 Evolution API runs inside the stack and is reachable only by the worker, at
 `EVOLUTION_API_URL` (default `http://evolution-api:8080`) with `EVOLUTION_API_KEY`, both from the
 environment. The worker owns the WhatsApp instance: it creates it on first use, links it by QR code
-or by phone-number pairing code, and sends through it to `WHATSAPP_NUMBER`. The setup page offers
+or by phone-number pairing code, and sends through it to your own number: the one saved on the setup
+page, else `WHATSAPP_NUMBER`. The setup page offers
 the same QR and phone-number linking, through the same code (`lms_worker/whatsapp.py`). Your replies reach the app through an Evolution webhook to the api
 service, also inside the stack: the api registers it at start, with a secret header derived from
-`APP_SECRET_KEY`, and answers only `WHATSAPP_NUMBER`.
+`APP_SECRET_KEY`, and answers only that number.
 
 ## The WhatsApp menu
 

@@ -66,10 +66,10 @@ def test_course_list_with_modes_and_counts(client, semester):
     by_name = {c["name"]: c for c in d["courses"]}
     assert by_name["DAA"]["counts"] == {"remaining": 2, "due_soon": 1, "approval": 1, "needs_you": 0, "papers_coming": 0}
     assert by_name["CA Lab"]["counts"]["papers_coming"] == 1 and by_name["CA Lab"]["lab"] is True
-    assert by_name["DAA"]["mode"] == "approve" and set(d["modes"]) == {"approve", "auto", "notify"}
+    assert by_name["DAA"]["mode"] == "approve" and set(d["modes"]) == {"approve", "auto"}
 
     assert client.post(f"/api/courses/{semester['daa']}/mode", headers=H, json={"mode": "auto"}).json() == {
-        "message": "DAA is now in auto mode."}
+        "message": "DAA: uploading is now auto (upload after the checks, without asking)."}
     assert client.post(f"/api/courses/{semester['daa']}/mode", headers=H, json={"mode": "sometimes"}).status_code == 400
 
 
@@ -91,6 +91,25 @@ def test_a_course_shows_its_work_files_and_approval(client, semester, sessions):
     with sessions() as s:
         assert s.get(Job, job).state == "SUBMITTING"
         assert s.scalar(select(Event.detail).order_by(Event.id.desc())) == "approved on the web page"
+    assert DbKV(sessions).get(POLL_NOW_KEY)
+
+
+def test_a_submission_on_an_open_assignment_can_be_deleted_from_the_page(client, semester, sessions):
+    signed_in(client)
+    assert 'data-act="delete"' in client.get(f"/courses/{semester['lab']}").text
+    by_title = {i["title"]: i for i in client.get(f"/api/courses/{semester['lab']}", headers=H).json()["assignments"]}
+    assert {t: i["can_delete"] for t, i in by_title.items()} == {"Lab 4": False, "Lab 5": False, "Lab 6": True}
+    assert by_title["Lab 6"]["submitted_file"] == "l6.pdf"
+    lab6 = by_title["Lab 6"]["id"]
+
+    assert client.post(f"/api/assignments/{lab6}/delete-submission").status_code == 403  # no X-LMS header
+    r = client.post(f"/api/assignments/{lab6}/delete-submission", headers=H)
+    assert r.json()["message"] == "Deleting your submission for Lab 6 from the LMS now; a message will confirm it."
+    assert client.post(f"/api/assignments/{lab6}/delete-submission", headers=H).status_code == 409  # already asked
+    assert client.post(f"/api/assignments/{by_title['Lab 5']['id']}/delete-submission", headers=H).status_code == 409  # closed
+    assert client.post("/api/assignments/999999/delete-submission", headers=H).status_code == 404
+    again = {i["title"]: i for i in client.get(f"/api/courses/{semester['lab']}", headers=H).json()["assignments"]}["Lab 6"]
+    assert again["status"] == "submitted; being deleted from the LMS, as you asked" and not again["can_delete"]
     assert DbKV(sessions).get(POLL_NOW_KEY)
 
 

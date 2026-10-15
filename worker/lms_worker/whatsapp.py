@@ -10,6 +10,7 @@ Evolution v2 endpoints used (all with the global `apikey` header from EVOLUTION_
   GET    /instance/connect/{instance}[?number=] -> {code, base64, pairingCode, count}
   DELETE /instance/logout/{instance}
   GET    /instance/fetchInstances?instanceName=
+  POST   /chat/getBase64FromMediaMessage/{instance}  {message: {key, message}} -> {base64}: a file you sent
   POST   /webhook/set/{instance}                {webhook: {enabled, url, headers, events: [MESSAGES_UPSERT]}}
 A pairing code is only issued when a connection starts with a number, so a pending QR
 session is logged out first.
@@ -138,6 +139,49 @@ class EvolutionAdmin:
                 }
             },
         )
+
+    def media(self, data: dict) -> bytes:
+        """The file of an incoming media message (the webhook's `data`), decrypted by Evolution."""
+        import base64
+
+        r = self._request("POST", f"/chat/getBase64FromMediaMessage/{self.cfg.instance}",
+                          json={"message": {"key": data.get("key") or {}, "message": data.get("message") or {}}, "convertToMp4": False})
+        encoded = r.json().get("base64")
+        if not encoded:
+            raise WhatsAppError("Evolution API returned no file for that message")
+        return base64.b64decode(encoded)
+
+    def groups(self) -> list[dict]:
+        """The WhatsApp groups the bot's number is in: [{id, name, size}], by name."""
+        r = self._request("GET", f"/group/fetchAllGroups/{self.cfg.instance}", params={"getParticipants": "false"})
+        out = []
+        for g in r.json() or []:
+            if isinstance(g, dict) and str(g.get("id", "")).endswith("@g.us"):
+                out.append({"id": g["id"], "name": g.get("subject") or g["id"], "size": g.get("size")})
+        return sorted(out, key=lambda g: g["name"].lower())
+
+    def hear_groups(self) -> bool:
+        """Make sure Evolution passes group messages on (its "Ignore groups" setting off), keeping
+        the instance's other settings. Returns True when it had to change it."""
+        r = self._request("GET", f"/settings/find/{self.cfg.instance}", missing_ok=True)
+        current = r.json() if r is not None else {}
+        if not isinstance(current, dict) or not current.get("groupsIgnore"):
+            return False
+        keep = ("rejectCall", "msgCall", "alwaysOnline", "readMessages", "readStatus", "syncFullHistory")
+        body = {k: current[k] for k in keep if k in current}
+        body.update(groupsIgnore=False, rejectCall=bool(body.get("rejectCall")), msgCall=body.get("msgCall") or "",
+                    alwaysOnline=bool(body.get("alwaysOnline")), readMessages=bool(body.get("readMessages")),
+                    readStatus=bool(body.get("readStatus")), syncFullHistory=bool(body.get("syncFullHistory")))
+        self._request("POST", f"/settings/set/{self.cfg.instance}", json=body)
+        return True
+
+    def participants(self, group_jid: str) -> list[dict]:
+        """A group's members as WhatsApp reports them: each has an id (a phone JID or an @lid)
+        and, when WhatsApp shares it, the phone JID too."""
+        r = self._request("GET", f"/group/participants/{self.cfg.instance}", params={"groupJid": group_jid})
+        body = r.json()
+        found = body.get("participants") if isinstance(body, dict) else body
+        return [p for p in (found or []) if isinstance(p, dict)]
 
     def unlink(self) -> None:
         if self.state().state in ("open", "connecting"):
