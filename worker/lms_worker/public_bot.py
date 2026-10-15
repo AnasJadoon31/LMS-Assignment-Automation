@@ -101,10 +101,15 @@ def parse(body: dict) -> Incoming | None:
     msg = data.get("message") or {}
     ext = msg.get("extendedTextMessage") or {}
     text = msg.get("conversation") or ext.get("text") or ""
-    ctx = ext.get("contextInfo") or {}
+    # Evolution API v2 lifts contextInfo (who is tagged, which message is quoted) to the top of the
+    # data; older versions leave it inside the message
+    ctx = dict(data.get("contextInfo") or {}) if isinstance(data.get("contextInfo"), dict) else {}
+    inner = ext.get("contextInfo") or {}
     for part in msg.values():  # a caption or a reply on another kind of message
-        if isinstance(part, dict) and isinstance(part.get("contextInfo"), dict) and not ctx:
-            ctx = part["contextInfo"]
+        if not inner and isinstance(part, dict) and isinstance(part.get("contextInfo"), dict):
+            inner = part["contextInfo"]
+    for k, v in inner.items():
+        ctx.setdefault(k, v)
     if not text:
         return None
     return Incoming(
@@ -153,6 +158,10 @@ class Directory:
             if self._at:
                 return
         self._bot, self._members, self._at = bot, members, self.clock()
+
+    def bot_ids(self) -> set[str]:
+        self._refresh()
+        return set(self._bot)
 
     def is_bot(self, ids: list[str]) -> bool:
         self._refresh()

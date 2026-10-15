@@ -160,6 +160,21 @@ class EvolutionAdmin:
                 out.append({"id": g["id"], "name": g.get("subject") or g["id"], "size": g.get("size")})
         return sorted(out, key=lambda g: g["name"].lower())
 
+    def hear_groups(self) -> bool:
+        """Make sure Evolution passes group messages on (its "Ignore groups" setting off), keeping
+        the instance's other settings. Returns True when it had to change it."""
+        r = self._request("GET", f"/settings/find/{self.cfg.instance}", missing_ok=True)
+        current = r.json() if r is not None else {}
+        if not isinstance(current, dict) or not current.get("groupsIgnore"):
+            return False
+        keep = ("rejectCall", "msgCall", "alwaysOnline", "readMessages", "readStatus", "syncFullHistory")
+        body = {k: current[k] for k in keep if k in current}
+        body.update(groupsIgnore=False, rejectCall=bool(body.get("rejectCall")), msgCall=body.get("msgCall") or "",
+                    alwaysOnline=bool(body.get("alwaysOnline")), readMessages=bool(body.get("readMessages")),
+                    readStatus=bool(body.get("readStatus")), syncFullHistory=bool(body.get("syncFullHistory")))
+        self._request("POST", f"/settings/set/{self.cfg.instance}", json=body)
+        return True
+
     def participants(self, group_jid: str) -> list[dict]:
         """A group's members as WhatsApp reports them: each has an id (a phone JID or an @lid)
         and, when WhatsApp shares it, the phone JID too."""

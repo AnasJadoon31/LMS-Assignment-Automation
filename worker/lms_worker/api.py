@@ -127,6 +127,12 @@ def create_app(
         if m is None or directory is None or public_sender is None:
             return {"handled": False, "reason": "not a text message to the bot"}
         if not await run_in_threadpool(addressed, m, directory):
+            if m.group:
+                log.info("Group message not for the bot: group %s ticked=%s, tagged %s, replying to %s; the bot is %s",
+                         m.chat, directory.ticked(m.chat), m.mentions or "nobody", m.replied_to or "nothing",
+                         sorted(directory.bot_ids()) or "unknown")
+            else:
+                log.info("Private message from %s, who is not in a ticked group", m.ids)
             return {"handled": False, "reason": "not for the bot"}
         if not _first_time(sessions, m.message_id):
             return {"handled": False, "reason": "duplicate"}
@@ -267,6 +273,11 @@ def _register_until_done(admin: EvolutionAdmin, url: str, secret: str, stop: thr
             admin.ensure_instance()
             admin.set_webhook(url, {SECRET_HEADER: secret})
             log.info("Evolution webhook points at %s", url)
+            try:  # the public menu answers in groups: Evolution must pass group messages on
+                if admin.hear_groups():
+                    log.info("Turned off Evolution's \"Ignore groups\" setting so group messages reach the bot")
+            except WhatsAppError as e:
+                log.warning("Could not check Evolution's group setting: %s", e)
             return
         except WhatsAppError as e:
             log.warning("Evolution webhook not set yet (%s); retrying in %ss", e, REGISTER_RETRY_SECONDS)

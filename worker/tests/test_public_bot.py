@@ -191,3 +191,33 @@ def test_the_webhook_routes_you_and_classmates_apart(sessions):
         r = c.post("/api/webhooks/evolution", json=group_msg("anyone?", msg_id="g2"), headers=h).json()
         assert r["handled"] is False                                          # group chatter is left alone
     assert len(phone.sent) == 1                                               # nothing of theirs reached your chat
+
+
+def test_tags_lifted_to_the_top_of_the_data_count_too(directory):
+    """Evolution API v2 sends contextInfo next to the message, not inside it."""
+    body = group_msg("menu")
+    body["data"]["message"] = {"conversation": f"@{BOT_LID} menu"}
+    body["data"]["contextInfo"] = {"mentionedJid": [f"{BOT_LID}@lid"]}
+    m = parse(body)
+    assert m.mentions == [BOT_LID] and addressed(m, directory)
+
+
+def test_evolution_is_told_to_pass_group_messages_on():
+    import httpx
+
+    from lms_worker.config import EvolutionConfig
+    from lms_worker.whatsapp import EvolutionAdmin
+
+    sent = []
+
+    def handler(request):
+        if request.url.path.startswith("/settings/find"):
+            return httpx.Response(200, json={"rejectCall": True, "msgCall": "busy", "groupsIgnore": True, "alwaysOnline": False,
+                                             "readMessages": False, "readStatus": False, "syncFullHistory": False})
+        sent.append(json.loads(request.content))
+        return httpx.Response(201, json={})
+
+    admin = EvolutionAdmin(EvolutionConfig(base_url="http://evo", api_key="k", instance="lms"), transport=httpx.MockTransport(handler))
+    assert admin.hear_groups() is True
+    assert sent == [{"rejectCall": True, "msgCall": "busy", "alwaysOnline": False, "readMessages": False, "readStatus": False,
+                     "syncFullHistory": False, "groupsIgnore": False}]
