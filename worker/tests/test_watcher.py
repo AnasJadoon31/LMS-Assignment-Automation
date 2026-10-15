@@ -92,7 +92,9 @@ def channel():
 
 @pytest.fixture
 def watcher(lmsfake, sessions, channel, tmp_path):
-    return Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data")
+    # A fixed clock before DUE, so the tests do not depend on today's date
+    return Watcher(lmsfake, sessions, DbKV(sessions), Outbox({"whatsapp": channel}), tmp_path / "data",
+                   now=lambda: datetime(2026, 10, 7, 12, 0, tzinfo=LMS_TZ))
 
 
 def jobs(sessions):
