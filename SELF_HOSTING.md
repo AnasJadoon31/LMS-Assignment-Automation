@@ -97,6 +97,18 @@ Add the bot's number to a WhatsApp group, then on the setup page under **WhatsAp
 Groups get only these notices; your alerts, solved reports and the menu stay in your own chat.
 **Send a test message** and **Send the summary now** check it straight away.
 
+### The public menu for classmates
+
+In a ticked group, anyone who tags the bot (or replies to one of its messages) gets a menu:
+assignment question files, lecture files, deadlines, course outline and plan, and a
+leaderboard. Every reply tags them and quotes their message, and the bot remembers where each
+person is in the menu. Members of ticked groups can also message the bot privately, without
+tagging. Strangers and other groups get no answer, and your own number keeps your private menu.
+
+Only question files and the LMS's lecture, outline and plan files can be sent there: solved
+reports, receipts, your uploads and lab papers never are. The setup page lists who has used
+the bot, how often, and their last pick.
+
 ## Save reports to Google Drive
 
 Every solved report (the .docx, the .pdf and the question file) is saved to

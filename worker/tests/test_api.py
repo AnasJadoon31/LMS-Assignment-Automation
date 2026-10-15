@@ -72,7 +72,7 @@ def test_a_number_saved_on_the_setup_page_is_the_one_answered(sessions, phone):
     WhatsAppNumber(kv).save("923119999999")
     with TestClient(app) as c:
         assert post(c, upsert(jid="923119999999@s.whatsapp.net")).json()["handled"]
-        assert post(c, upsert(msg_id="m2")).json()["reason"] == "sender"  # WHATSAPP_NUMBER no longer applies
+        assert post(c, upsert(msg_id="m2")).json()["reason"] == "not for the bot"  # WHATSAPP_NUMBER no longer applies
 
 
 def test_wrong_or_missing_secret_is_refused(client, phone):
@@ -82,7 +82,7 @@ def test_wrong_or_missing_secret_is_refused(client, phone):
 
 
 def test_other_senders_groups_and_own_messages_are_ignored(client, phone):
-    assert post(client, upsert(jid="923119999999@s.whatsapp.net")).json()["reason"] == "sender"
+    assert post(client, upsert(jid="923119999999@s.whatsapp.net")).json()["reason"] == "not for the bot"
     assert post(client, upsert(jid="120363000000000000@g.us", msg_id="g")).json()["handled"] is False
     assert post(client, upsert(from_me=True, msg_id="me")).json()["handled"] is False
     assert post(client, {"event": "connection.update", "data": {}}).json()["handled"] is False

@@ -30,6 +30,7 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -44,6 +45,8 @@ from .notify import DiscordSetting, EvolutionNotifier, Notifier, NotifyError, Wh
 from .watcher import HEARTBEAT_KEY
 from .dashboard import dashboard_router
 from .web import Auth, setup_router
+from .public_bot import Directory, PublicBot, PublicSender, addressed, parse as parse_public
+from .db.models import BotUser
 from .whatsapp import EvolutionAdmin, WhatsAppError
 
 log = logging.getLogger(__name__)
@@ -115,12 +118,36 @@ def create_app(
         with sessions() as s:
             return summary_text(open_assignments(s, utcnow()), utcnow())
 
+    public = PublicBot(sessions, settings.data_dir, materials=materials)
+    directory = Directory(admin, group_setting) if admin is not None else None
+    public_sender = PublicSender(settings.evolution) if settings.evolution else None
+
+    async def _public(body: dict, background: BackgroundTasks) -> dict:
+        m = parse_public(body)
+        if m is None or directory is None or public_sender is None:
+            return {"handled": False, "reason": "not a text message to the bot"}
+        if not await run_in_threadpool(addressed, m, directory):
+            return {"handled": False, "reason": "not for the bot"}
+        if not _first_time(sessions, m.message_id):
+            return {"handled": False, "reason": "duplicate"}
+        replies = await run_in_threadpool(public.handle, m.chat, m.ids[0], m.name, m.text, group=m.group)
+        background.add_task(public_sender.send, m, replies)
+        return {"handled": True, "replies": len(replies), "public": True}
+
+    def bot_users() -> list[dict]:
+        names = {g.id: g.name for g in group_setting.get()}
+        with sessions() as s:
+            rows = s.scalars(select(BotUser).order_by(BotUser.last_at.desc()).limit(500)).all()
+            return [{"name": u.name, "person": u.person, "where": "Private chat" if u.chat_id == "private" else names.get(u.chat_id, "A group"),
+                     "requests": u.requests, "last_option": u.last_option, "last_at": u.last_at.isoformat()} for u in rows]
+
     app = FastAPI(title="LMS Assignment Automation", lifespan=lifespan, docs_url=None, redoc_url=None)
     auth = Auth(settings.admin_password, settings.app_secret_key or "", kv=kv)
     app.include_router(setup_router(password=settings.admin_password, secret_key=settings.app_secret_key or "",
                                     login=login, admin=admin, drive=drive, discord=discord,
                                     whatsapp=whatsapp, sender=sender, discord_bot=discord_bot,
                                     groups=group_setting, group_sender=group_sender, group_summary=group_summary,
+                                    bot_users=bot_users,
                                     public_url=settings.public_url, auth=auth))
     app.include_router(dashboard_router(auth, sessions, kv))
 
@@ -140,12 +167,10 @@ def create_app(
             raise HTTPException(status_code=401, detail="bad secret")
         body = await request.json()
         message = _incoming(body)
-        if message is None:
-            return {"handled": False, "reason": "not a text message to the bot"}
+        if message is None or message[0] != whatsapp.get():
+            # not you: the public menu, for tagged messages in ticked groups and their members
+            return await _public(body, background)
         number, message_id, text, media = message
-        if number != whatsapp.get():
-            log.info("Ignored a WhatsApp message from a number that is not the one messages go to")
-            return {"handled": False, "reason": "sender"}
         if not _first_time(sessions, message_id):
             return {"handled": False, "reason": "duplicate"}
         file = None

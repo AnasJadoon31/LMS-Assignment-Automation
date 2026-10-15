@@ -250,6 +250,23 @@ class Setting(Base):
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
 
+class BotUser(Base):
+    """Someone in a group (or a private chat) who uses the public menu: how often, and the last
+    thing they picked. One row per person per chat; chat_id is the group JID or "private"."""
+
+    __tablename__ = "bot_users"
+    __table_args__ = (UniqueConstraint("chat_id", "person"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[str] = mapped_column(String(64), index=True)
+    person: Mapped[str] = mapped_column(String(64))  # phone digits, or the WhatsApp LID when the phone is hidden
+    name: Mapped[str] = mapped_column(String(128), default="")
+    requests: Mapped[int] = mapped_column(Integer, default=0)
+    last_option: Mapped[str] = mapped_column(String(256), default="")
+    first_at: Mapped[datetime] = mapped_column(default=utcnow)
+    last_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
 class ChatSession(Base):
     """Where each WhatsApp chat is in the bot's menus. Resets after 10 minutes idle."""
 

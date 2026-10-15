@@ -160,6 +160,14 @@ class EvolutionAdmin:
                 out.append({"id": g["id"], "name": g.get("subject") or g["id"], "size": g.get("size")})
         return sorted(out, key=lambda g: g["name"].lower())
 
+    def participants(self, group_jid: str) -> list[dict]:
+        """A group's members as WhatsApp reports them: each has an id (a phone JID or an @lid)
+        and, when WhatsApp shares it, the phone JID too."""
+        r = self._request("GET", f"/group/participants/{self.cfg.instance}", params={"groupJid": group_jid})
+        body = r.json()
+        found = body.get("participants") if isinstance(body, dict) else body
+        return [p for p in (found or []) if isinstance(p, dict)]
+
     def unlink(self) -> None:
         if self.state().state in ("open", "connecting"):
             self._request("DELETE", f"/instance/logout/{self.cfg.instance}")

@@ -125,7 +125,7 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
                  drive: GoogleDrive | None = None, discord: DiscordSetting | None = None, public_url: str | None = None,
                  clock=time.time, auth: Auth | None = None, whatsapp: WhatsAppNumber | None = None,
                  sender: Notifier | None = None, discord_bot=None, groups=None, group_sender: Notifier | None = None,
-                 group_summary=None) -> APIRouter:
+                 group_summary=None, bot_users=None) -> APIRouter:
     """`groups`: groups.WhatsAppGroups; `group_sender` posts to them; `group_summary()` gives the
     summary text as it would go out now."""
     router = APIRouter()
@@ -400,6 +400,11 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
         return _group_send("✅ *LMS bot connected*\nThis group will get new assignments, deadline reminders "
                            "and a summary at 8:00 AM and 9:00 PM.")
 
+    @router.get("/api/setup/bot-users")
+    def bot_users_list(request: Request) -> dict:
+        guard(request)
+        return {"users": bot_users() if bot_users is not None else []}
+
     @router.post("/api/setup/whatsapp/groups/summary")
     def whatsapp_groups_summary(request: Request) -> dict:
         guard(request)
@@ -578,6 +583,11 @@ SETUP_BODY = """
     <div class="row"><button class="secondary" id="gr-load">Show the bot's groups</button><button id="gr-save" hidden>Save</button></div>
     <div class="row"><button class="secondary" id="gr-test" hidden>Send a test message</button><button class="secondary" id="gr-summary" hidden>Send the summary now</button></div>
     <div class="err" id="gr-err"></div>
+    <div style="margin-top:14px"><b>Classmates using the bot</b></div>
+    <div class="muted">In a ticked group, anyone who tags the bot (or replies to it) gets the public menu: question
+      files, lectures, deadlines, outline and plan, and a leaderboard. Members of those groups can also message the
+      bot privately. Your own files (solved reports, receipts, uploads) are never sent there.</div>
+    <div id="bu-list" class="muted" style="margin-top:8px;overflow-x:auto">No one yet.</div>
   </div>
 </div>
 <div class="card" id="drive">
@@ -729,6 +739,19 @@ $("d-test").onclick = async () => {
 };
 $("d-off").onclick = async () => { if (!confirm("Stop sending messages to Discord?")) return;
   try { await call("/api/setup/discord/off", {}); await refresh(); } catch (e) { $("d-err").textContent = e.message; } };
+async function loadUsers() {
+  try {
+    const r = await call("/api/setup/bot-users");
+    if (!r.users || !r.users.length) { $("bu-list").textContent = "No one yet."; return; }
+    const when = (t) => new Date(t).toLocaleString([], { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+    $("bu-list").innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:14px;color:var(--ink)">' +
+      '<tr style="text-align:left"><th>Name</th><th>Number</th><th>Where</th><th>Requests</th><th>Last pick</th><th>Last seen</th></tr>' +
+      r.users.map((u) => "<tr style='border-top:1px solid var(--rule)'><td>" + esc(u.name || "—") + "</td><td>" + esc(u.person) +
+        "</td><td>" + esc(u.where) + "</td><td>" + u.requests + "</td><td>" + esc(u.last_option || "—") + "</td><td>" + when(u.last_at) + "</td></tr>").join("") +
+      "</table>";
+  } catch (e) {}
+}
+loadUsers(); setInterval(loadUsers, 30000);
 $("gr-load").onclick = async () => {
   $("gr-err").textContent = ""; busy($("gr-load"), true);
   try {
