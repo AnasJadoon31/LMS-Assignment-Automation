@@ -6,7 +6,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from sqlalchemy import select
+
 from lms_worker.config import EvolutionConfig
+from lms_worker.db import Assignment
 from lms_worker.groups import Group, GroupNotices, GroupNotifier, WhatsAppGroups, summary_text
 from lms_worker.kv import DbKV
 from lms_worker.lms.bahria_pages import LMS_TZ
@@ -78,6 +81,20 @@ def test_reminders_go_whether_submitted_or_not_and_only_once(setup):
     setup["watcher"].poll_once()
     later = [m.split("\n")[0] for m, _ in setup["group"].sent[2:] if "Assignments due" not in m]
     assert later == ["🚨 *Due in 2 hours*"] * 2
+
+
+def test_a_new_deadline_on_a_submitted_assignment_is_announced(setup):
+    setup["lms"].set(DAA, meta(DAA, 2, "Sorting", deadline=NOW + timedelta(days=3), submitted_file="mine.pdf"))
+    setup["watcher"].poll_once()
+    setup["lms"].set(DAA, meta(DAA, 2, "Sorting", deadline=NOW + timedelta(days=5), submitted_file="mine.pdf"))
+    setup["watcher"].poll_once()
+    assert setup["group"].sent[-1][0] == ("🗓️ *Deadline changed*\n\n📘 Design & Analysis of Algorithms\n📝 *Sorting*\n"
+                                          "❌ Was Sun 11 Oct, 10:00 AM\n✅ Now Tue 13 Oct, 10:00 AM (5 d 0 h left)")
+    assert setup["owner"].sent[-1][0].startswith("Deadline changed: Design & Analysis of Algorithms · Sorting")
+    with setup["watcher"].sessions() as s:
+        assert s.scalar(select(Assignment.deadline)) == NOW + timedelta(days=5)
+    setup["watcher"].poll_once()
+    assert sum("Deadline changed" in m for m, _ in setup["group"].sent) == 1
 
 
 def test_summaries_at_8_am_and_9_pm_once_each(setup):

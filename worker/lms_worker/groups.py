@@ -132,6 +132,14 @@ def new_assignment_text(a: Assignment, now: datetime, *, revision: int = 1, file
     return "\n".join(lines)
 
 
+def deadline_changed_text(a: Assignment, old: datetime | None, now: datetime) -> str:
+    lines = ["🗓️ *Deadline changed*", "", f"📘 {a.course.name}", f"📝 *{a.title}*"]
+    if old:
+        lines.append(f"❌ Was {_when(old)}")
+    lines.append(f"✅ Now {_when(a.deadline)} ({_left(a.deadline - now)} left)")
+    return "\n".join(lines)
+
+
 def question_file_text(a: Assignment) -> str:
     return f"📎 Question file: *{a.title}*\n📘 {a.course.name}"
 
@@ -202,6 +210,14 @@ class GroupNotices:
         # the announcement already says how long is left: no reminder right after it
         sent = set(filter(None, a.reminders.split(",")))
         a.reminders = ",".join(sorted(sent | set(self._crossed(a))))
+
+    def deadline_changed(self, s: Session, a: Assignment, old: datetime | None) -> None:
+        """A new date on an assignment that gets no new revision (e.g. already submitted)."""
+        if not self.on or a.kind == PAPER or a.deadline is None:
+            return
+        self.outbox.queue(s, "group-deadline", deadline_changed_text(a, old, self.now()), to=(CHANNEL,))
+        sent = set(filter(None, a.reminders.split(",")))
+        a.reminders = ",".join(sorted(sent | set(self._crossed(a))))  # the notice says how long is left
 
     def remind(self) -> int:
         if not self.on:

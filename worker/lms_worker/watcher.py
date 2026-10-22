@@ -278,6 +278,7 @@ class Watcher:
             return "new_jobs"
 
         changes = _changes(row, meta)
+        old_deadline = row.deadline
         if meta.marks and meta.marks != row.marks:
             self.outbox.queue(s, "marks", f"Marks posted\n{course.name}\n{row.title}: {meta.marks}")
             result.marks_posted += 1
@@ -332,6 +333,12 @@ class Watcher:
             row.skipped_reason = reason
             if latest:
                 s.add(Event(job_id=latest.id, detail=f"Assignment changed ({', '.join(changes)}) but {reason.lower()}"))
+            if "deadline" in changes and meta.deadline and not meta.deadline_passed:
+                # nothing to solve again (already submitted), but the new date still matters
+                self.outbox.queue(s, "deadline", f"Deadline changed: {course.name} · {row.title}\n"
+                                  f"Was {_pkt(old_deadline) if old_deadline else 'not shown'}, now {_pkt(meta.deadline)}")
+                if self.groups is not None:
+                    self.groups.deadline_changed(s, row, old_deadline)
             return None
         row.skipped_reason = None
 

@@ -169,15 +169,37 @@ def decode_download_key(href: str) -> DownloadKey | None:
     return DownloadKey(student_id=parts[0], kind=parts[2], filename=parts[4])
 
 
+DATE = re.compile(r"(\d{1,2})[\s-]+([A-Za-z]{3,9})[\s,-]+(\d{4})\s*[-,@]?\s*(?:at\s*)?(\d{1,2}):(\d{2})(?::\d{2})?\s*([AaPp]\.?[Mm]\.?)?")
+
+
 def parse_deadline(text: str) -> datetime | None:
-    """'1 October 2026-11:55 pm' -> 2026-10-01 23:55 PKT."""
-    text = " ".join(text.split())
-    for fmt in ("%d %B %Y-%I:%M %p", "%d %B %Y - %I:%M %p", "%d %b %Y-%I:%M %p"):
-        try:
-            return datetime.strptime(text, fmt).replace(tzinfo=LMS_TZ)
-        except ValueError:
-            continue
-    return None
+    """'1 October 2026-11:55 pm' -> 2026-10-01 23:55 PKT. Also finds the date inside a longer
+    label ('Extended: 25 Oct 2026 - 11:55 PM') and takes a 24-hour time."""
+    m = DATE.search(" ".join(text.split()))
+    if not m:
+        return None
+    day, month, year, hour, minute, half = m.groups()
+    try:
+        month_no = datetime.strptime(month[:3].title(), "%b").month
+        hour_no = int(hour)
+        if half:
+            if not 1 <= hour_no <= 12:
+                return None
+            hour_no = hour_no % 12 + (12 if half[0].lower() == "p" else 0)
+        return datetime(int(year), month_no, int(day), hour_no, int(minute), tzinfo=LMS_TZ)
+    except ValueError:
+        return None
+
+
+def _deadline(cell: Tag) -> datetime | None:
+    """The deadline cell shows the date in a label titled 'Actual'. When the teacher extends it,
+    the LMS adds another label: the date that counts is that one, whichever order they come in,
+    else the latest date shown."""
+    dated = [(small, d) for small in cell.find_all(["small", "span"]) if (d := parse_deadline(_text(small)))]
+    if not dated:
+        return parse_deadline(_text(cell))
+    others = [d for small, d in dated if (small.get("title") or "").strip().lower() not in ("", "actual")]
+    return max(others or [d for _, d in dated])
 
 
 def _options(soup: BeautifulSoup, select_id: str) -> list[Option]:
@@ -335,8 +357,7 @@ def _parse_row(soup: BeautifulSoup, cells: list[Tag], layout: Layout, tr: Tag | 
     else:
         title = _text(cells[layout.title])
     if starts_at is None:
-        labels = deadline.find_all(["small", "span"]) or [deadline]
-        ends_at = parse_deadline(_text(labels[-1]))
+        ends_at = _deadline(deadline)
     hidden = bool(s_link) and s_key is None and "k=NA" in (s_link.get("href") or "")
 
     return AssignmentRow(
