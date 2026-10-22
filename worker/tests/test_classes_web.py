@@ -408,3 +408,43 @@ def test_the_worker_runs_the_class_poller(sessions, tmp_path):
     poller = rt.class_poller()
     assert poller is not None and poller.sender is not None and poller.sender.cfg.instance == "lms-classes"
     poller.tick()                                                   # no classes yet: nothing to do, no error
+
+
+def test_rules_changed_on_the_page_are_saved_for_one_class(env):
+    """In a browser: changing a row of one class's rules makes it that class's own rule, and saves."""
+    import socket
+    import threading
+
+    import uvicorn
+    from playwright.sync_api import sync_playwright
+
+    join(env)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(env["c"].app, host="127.0.0.1", port=port, log_level="warning"))
+    threading.Thread(target=server.run, daemon=True).start()
+    while not server.started:
+        time.sleep(0.05)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(f"http://127.0.0.1:{port}/login")
+            page.fill("#p", PASSWORD)
+            page.click("button")
+            page.goto(f"http://127.0.0.1:{port}/classes")
+            page.wait_for_selector('#r-which option:nth-child(2)', state="attached")
+            page.select_option("#r-which", page.eval_on_selector("#r-which option:nth-child(2)", "o => o.value"))
+            page.select_option('[data-mode="mode"]', "menu")
+            assert not page.is_checked('[data-inherit="mode"]')       # no longer following the default
+            page.click("#r-save")
+            page.wait_for_function("document.getElementById('r-err').textContent.startsWith('Saved')")
+            browser.close()
+        assert errors == []
+    finally:
+        server.should_exit = True
+    with env["sessions"]() as s:
+        assert '"mode": {"max": "menu"' in s.scalar(select(SchoolClass)).rules

@@ -698,6 +698,7 @@ textarea { font:inherit; width:100%; min-height:90px; padding:9px 10px; border-r
 .lock { color:var(--muted); font-size:13px; } label.inline { display:flex; gap:8px; align-items:center; margin:6px 0; }
 label.inline input { width:auto; } .kv { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; font-size:14px; }
 .rule { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:8px 0; border-top:1px solid var(--rule); }
+.rule.own { box-shadow:inset 3px 0 0 var(--gold); padding-left:8px; }
 .rule .name { flex:1 1 220px; } .rule select, .rule input[type=number] { width:auto; }
 """
 
@@ -725,7 +726,8 @@ ADMIN_BODY = """
 <div class="card"><h2>Classes</h2><div id="c-list" class="muted">Loading…</div><div class="err" id="c-err"></div></div>
 <div class="card" id="rules-card">
   <h2 id="r-title">Default rules for every class</h2>
-  <div class="muted" id="r-help">Always on and always off are yours; CR decides lets the CR switch it (starting where you set). Limits: the CR may only go lower if you allow it.</div>
+  <div class="muted" id="r-help">Always on and always off are yours; CR decides lets the CR switch it (starting where you set). Limits: the CR may only go lower if you allow it.
+    For one class, a row marked default follows the defaults; change it and it becomes that class's own rule (marked in gold).</div>
   <div class="row"><select id="r-which"><option value="">Defaults (every class)</option></select></div>
   <div id="r-list"></div>
   <div class="row"><button id="r-save">Save rules</button></div>
@@ -755,7 +757,7 @@ ADMIN_BODY = """
 """
 
 ADMIN_JS = r"""
-let data = null, qrTimer = null;
+let data = null, qrTimer = null, rulesDirty = false;
 const when = (t) => t ? new Date(t).toLocaleString([], { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "—";
 const chip = (text, cls) => '<span class="chip ' + (cls || "") + '">' + esc(text) + "</span>";
 const STATUS = { pending: ["waiting for approval", "wait"], active: ["active", "ok"], paused: ["paused", "wait"], blocked: ["blocked", "bad"] };
@@ -777,7 +779,7 @@ async function load() {
       (i.used_by ? " by +" + esc(i.used_by) : i.state === "open" ? " · until " + when(i.expires_at) : "") + "</td><td>" +
       (i.state === "open" ? '<button class="secondary" data-revoke="' + i.id + '">Withdraw</button>' : "") + "</td></tr>").join("") + "</table>" : "";
   $("c-list").innerHTML = data.classes.length ? data.classes.map(card).join("") : "No classes yet. Make an invite link above.";
-  renderRules();
+  if (!rulesDirty) renderRules();  // the refresh never throws away rules you are still editing
 }
 function card(c) {
   const [word, cls] = STATUS[c.status] || [c.status, ""];
@@ -825,11 +827,12 @@ function ruleRow(spec, rule, inherited) {
     ctl = '<select data-mode="' + k + '">' + data.modes.map((m) => '<option value="' + m + '">' + ({ off: "Off", notify: "Notices only", menu: "Notices and menu" }[m]) + "</option>").join("") +
       '</select><label class="inline"><input type="checkbox" data-cr="' + k + '"> CR may pick less</label>';
   }
-  return '<div class="rule" data-key="' + k + '"><div class="name"><b>' + esc(spec.label) + '</b><div class="muted">' + esc(spec.section) + (spec.help ? " · " + esc(spec.help) : "") + "</div></div>" + ctl + use + "</div>";
+  return '<div class="rule' + (inherited && rule ? " own" : "") + '" data-key="' + k + '"><div class="name"><b>' + esc(spec.label) + '</b><div class="muted">' + esc(spec.section) + (spec.help ? " · " + esc(spec.help) : "") + "</div></div>" + ctl + use + "</div>";
 }
 function renderRules() {
   if (!data) return;
   const cid = $("r-which").value, klass = data.classes.find((c) => String(c.id) === cid);
+  $("r-which").dataset.shown = cid;
   $("r-title").textContent = klass ? "Rules for " + klass.name : "Default rules for every class";
   $("r-list").innerHTML = data.specs.map((s) => ruleRow(s, klass ? klass.rules[s.key] : data.defaults[s.key], !!klass)).join("");
   for (const s of data.specs) {
@@ -839,7 +842,18 @@ function renderRules() {
     else { q("[data-mode").value = r.max || "notify"; q("[data-cr").checked = !!r.cr; }
   }
 }
-$("r-which").onchange = renderRules;
+$("r-which").onchange = () => {
+  if (rulesDirty && !confirm("Drop the changes you have not saved?")) { $("r-which").value = $("r-which").dataset.shown || ""; return; }
+  rulesDirty = false; renderRules();
+};
+// Changing a row means you want your own rule for it: untick "default" for that row
+$("r-list").addEventListener("change", (ev) => {
+  const t = ev.target, row = t.closest(".rule"); if (!row) return;
+  rulesDirty = true; $("r-err").textContent = "Not saved yet.";
+  if (t.dataset.inherit) { row.classList.toggle("own", !t.checked); return; }
+  const inherit = row.querySelector("[data-inherit]");
+  if (inherit && inherit.checked) { inherit.checked = false; row.classList.add("own"); }
+});
 $("r-save").onclick = async () => {
   $("r-err").textContent = ""; const cid = $("r-which").value, rules = {};
   for (const s of data.specs) {
@@ -850,9 +864,13 @@ $("r-save").onclick = async () => {
     else rules[s.key] = { max: q("[data-mode").value, cr: q("[data-cr").checked };
   }
   try {
-    if (cid) { const r = await call("/api/classes/" + cid + "/rules", { rules }); $("r-err").textContent = r.told_cr.length ? "Saved; the CR was told: " + r.told_cr.join("; ") : "Saved."; }
-    else { await call("/api/classes/rules", { rules: Object.fromEntries(Object.entries(rules).filter(([, v]) => v)) }); $("r-err").textContent = "Saved for every class."; }
+    let note;
+    if (cid) { const r = await call("/api/classes/" + cid + "/rules", { rules }); const own = Object.values(rules).filter(Boolean).length;
+      note = "Saved: " + own + " rule" + (own === 1 ? "" : "s") + " of this class's own" + (r.told_cr.length ? "; the CR was told: " + r.told_cr.join("; ") : "."); }
+    else { await call("/api/classes/rules", { rules: Object.fromEntries(Object.entries(rules).filter(([, v]) => v)) }); note = "Saved for every class."; }
+    rulesDirty = false;
     await load();
+    $("r-err").textContent = note;
   } catch (e) { $("r-err").textContent = e.message; }
 };
 async function link(number) {
