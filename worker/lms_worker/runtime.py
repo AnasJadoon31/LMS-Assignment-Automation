@@ -90,6 +90,27 @@ class Runtime:
         reader = BahriaAdapter(self.settings, store=SessionStore(store.kv, store.box), guard=self.adapter.guard)
         return Materials(reader, self.settings.data_dir, self.kv)
 
+    def class_poller(self):
+        """Other sections' classes, on the class bot's number. None without a database."""
+        if self.sessions is None or not self.settings.app_secret_key:
+            return None
+        from .classes.lms import adapter
+        from .classes.poller import ClassPoller
+        from .classes.sending import ClassSender
+        from .classes.store import Classes
+
+        box = SecretBox(self.settings.app_secret_key)
+        classes = Classes(self.sessions, self.kv, self.settings.data_dir, box=box)
+        cfg = self.settings.class_evolution
+        outbox = self.outbox()
+
+        def alert(text: str) -> None:  # to you, with your other messages
+            with self.sessions.begin() as s:
+                outbox.queue(s, "classes", f"🏫 {text}")
+
+        return ClassPoller(classes, lambda klass: adapter(self.settings, self.kv, box, klass),
+                           sender=ClassSender(cfg) if cfg else None, alert=alert, public_url=self.settings.public_url)
+
     def watcher(self) -> Watcher:
         if self.sessions is None:
             raise ConfigError("Polling needs DATABASE_URL")

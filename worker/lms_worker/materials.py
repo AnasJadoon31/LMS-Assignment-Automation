@@ -46,8 +46,9 @@ def screenshot(page_html: str, path: Path) -> None:
 
 class Materials:
     def __init__(self, adapter, data_dir: Path, kv: KeyValue, *, now: Callable[[], datetime] = utcnow,
-                 shoot: Callable[[str, Path], None] = screenshot) -> None:
+                 shoot: Callable[[str, Path], None] = screenshot, poll_key: str = POLL_NOW_KEY) -> None:
         self.adapter, self.data_dir, self.kv, self.now, self.shoot = adapter, data_dir, kv, now, shoot
+        self.poll_key = poll_key  # the poller to wake when the session has ended
 
     def lectures(self, course: Course) -> list[Lecture]:
         return self._ask(lambda: self.adapter.lectures(_course(course)))
@@ -82,7 +83,7 @@ class Materials:
         try:
             return fetch()
         except SessionExpired as e:
-            self.kv.set(POLL_NOW_KEY, self.now().isoformat())
+            self.kv.set(self.poll_key, self.now().isoformat())
             raise MaterialsError("The LMS session has ended. A new login was asked for; try again in a minute.") from e
         except ContractBroken as e:
             raise MaterialsError(f"The LMS page is not as expected: {e}") from e

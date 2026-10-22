@@ -31,6 +31,8 @@ services:
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-}
       - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-lms}
       - WHATSAPP_NUMBER=${WHATSAPP_NUMBER:-}
+      # The class bot: a second WhatsApp number for other classes' groups (link it on the Classes page)
+      - CLASS_EVOLUTION_INSTANCE=${CLASS_EVOLUTION_INSTANCE:-lms-classes}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - PUBLIC_URL=${PUBLIC_URL:-}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
@@ -69,6 +71,8 @@ services:
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-}
       - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-lms}
       - WHATSAPP_NUMBER=${WHATSAPP_NUMBER:-}
+      # The class bot: a second WhatsApp number for other classes' groups (link it on the Classes page)
+      - CLASS_EVOLUTION_INSTANCE=${CLASS_EVOLUTION_INSTANCE:-lms-classes}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       # Where Evolution API reaches this api; set it when Evolution runs outside this stack
       - API_INTERNAL_URL=${API_INTERNAL_URL:-http://api:8000}

@@ -160,6 +160,17 @@ class EvolutionAdmin:
                 out.append({"id": g["id"], "name": g.get("subject") or g["id"], "size": g.get("size")})
         return sorted(out, key=lambda g: g["name"].lower())
 
+    def groups_with_members(self) -> list[dict]:
+        """Every group the bot is in, with its participants (and who is an admin), in one call."""
+        r = self._request("GET", f"/group/fetchAllGroups/{self.cfg.instance}", params={"getParticipants": "true"})
+        out = []
+        for g in r.json() or []:
+            if isinstance(g, dict) and str(g.get("id", "")).endswith("@g.us"):
+                members = [p for p in g.get("participants") or [] if isinstance(p, dict)]
+                out.append({"id": g["id"], "name": g.get("subject") or g["id"], "size": g.get("size") or len(members),
+                            "participants": members})
+        return sorted(out, key=lambda g: g["name"].lower())
+
     def hear_groups(self) -> bool:
         """Make sure Evolution passes group messages on (its "Ignore groups" setting off), keeping
         the instance's other settings. Returns True when it had to change it."""

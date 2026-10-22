@@ -283,6 +283,9 @@ def cmd_run(rt: Runtime, args) -> int:
         print(f"Solving in {solver.sandbox.image} containers", flush=True)
     else:
         print("Solving is off: set SOLVER_IMAGE to turn it on", flush=True)
+    classes = rt.class_poller()
+    if classes is not None:
+        threading.Thread(target=classes.run_forever, args=(stop,), name="classes", daemon=True).start()
     print("Polling the LMS; stop with Ctrl-C", flush=True)
     run_forever(
         rt.watcher(),

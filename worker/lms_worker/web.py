@@ -516,11 +516,11 @@ def _back_html(message: str, ok: bool = False) -> str:
             f'</div></main></body></html>')
 
 
-def shell(title: str, tab: str, body: str, script: str = "") -> str:
+def shell(title: str, tab: str, body: str, script: str = "", style: str = "") -> str:
     """A signed-in page: header, the Courses and Setup tabs, then the body."""
-    tabs = "".join(f'<a href="/{t.lower()}" class="{"on" if t.lower() == tab else ""}">{t}</a>' for t in ("Courses", "Setup"))
+    tabs = "".join(f'<a href="/{t.lower()}" class="{"on" if t.lower() == tab else ""}">{t}</a>' for t in ("Courses", "Classes", "Setup"))
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-            f'<title>{html.escape(title)}</title><style>{STYLE}</style></head><body>'
+            f'<title>{html.escape(title)}</title><style>{STYLE}{style}</style></head><body>'
             f'<header><h1>LMS Assignment Automation</h1><form method="post" action="/logout"><button>Sign out</button></form></header>'
             f'<nav class="tabs">{tabs}</nav><main>{body}</main><script>{CALL_JS}{script}</script></body></html>')
 

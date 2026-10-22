@@ -207,6 +207,11 @@ class Directory:
         self._refresh()
         return any(i in self._members for i in ids)
 
+    def groups_of(self, ids: list[str]) -> set[str]:
+        """The ticked groups these ids are a member of."""
+        self._refresh()
+        return set().union(*(self._members.get(i, set()) for i in ids)) if ids else set()
+
 
 def addressed(m: Incoming, directory: Directory) -> bool:
     """Should the public menu answer this message?"""
@@ -239,14 +244,18 @@ def allowed(path: Path, data_dir: Path, question_files: set[str]) -> bool:
 
 
 class PublicBot:
+    KEY_PREFIX = "pub:"  # ChatSession rows of the public menu
+    last_pick: str | None = None  # what the last handle() picked, for the log
+    PRIVATE_CHAT = PRIVATE  # where private chats are counted in bot_users
+
     def __init__(self, sessions: sessionmaker[Session], data_dir: Path, *, materials=None,
                  now: Callable[[], datetime] = utcnow) -> None:
         self.sessions, self.data_dir, self.materials, self.now = sessions, data_dir, materials, now
 
     def handle(self, chat: str, person: str, name: str, text: str, *, group: bool, unreadable: bool = False) -> list[Reply]:
         text = strip_tags(text)
-        where = chat if group else PRIVATE
-        key = "pub:" + hashlib.sha1(f"{where}|{person}".encode()).hexdigest()[:40]
+        where = chat if group else self.PRIVATE_CHAT
+        key = self.KEY_PREFIX + hashlib.sha1(f"{where}|{person}".encode()).hexdigest()[:40]
         with self.sessions.begin() as s:
             row = s.get(ChatSession, key)
             if row is None:
@@ -259,6 +268,7 @@ class PublicBot:
                 replies, picked = [self._render(s, stack, group=group, chat=where, hint=UNREADABLE)], None
             else:
                 replies, picked = self._dispatch(s, stack, text, group=group, chat=where)
+            self.last_pick = picked
             row.state = json.dumps({"stack": stack})
             row.updated_at = self.now()
             self._count(s, where, person, name, picked)
@@ -304,7 +314,7 @@ class PublicBot:
         raise ValueError(option["do"])
 
     def _file(self, s: Session, option: dict) -> Reply:
-        course = s.get(Course, option.get("course")) if option.get("course") else None
+        course = self._course_row(s, option.get("course")) if option.get("course") else None
         try:
             if option["do"] == "question":
                 a = s.get(Assignment, option["assignment"])
@@ -402,8 +412,11 @@ class PublicBot:
                 break
         return f"📝 *{course.name}*", [] if options else ["No question files yet."], options
 
+    def _course_row(self, s: Session, course_id):
+        return s.get(Course, course_id)
+
     def _screen_lectures(self, s, screen, *, group, chat):
-        course = s.get(Course, screen["course"])
+        course = self._course_row(s, screen["course"])
         if self.materials is None:
             return f"📖 *{course.name}*", ["Lectures are not available right now."], []
         try:
@@ -421,7 +434,7 @@ class PublicBot:
         return f"📖 *{course.name}*", [] if options else ["No lecture files on the LMS yet."], options[-PAGE * 3:]
 
     def _screen_outline(self, s, screen, *, group, chat):
-        course = s.get(Course, screen["course"])
+        course = self._course_row(s, screen["course"])
         options = [("📋 Course outline", {"do": "outline", "label": f"{course.name} · outline", "course": course.id}),
                    ("🗓️ Course plan", {"do": "plan", "label": f"{course.name} · plan", "course": course.id})]
         return f"📋 *{course.name}*", [], options
@@ -458,8 +471,8 @@ class PublicSender:
     """Replies to a group or a private chat. In a group each message tags the person and quotes
     the message they sent."""
 
-    def __init__(self, cfg: EvolutionConfig, *, transport: httpx.BaseTransport | None = None) -> None:
-        self.cfg = cfg
+    def __init__(self, cfg: EvolutionConfig, *, transport: httpx.BaseTransport | None = None, pacer=None) -> None:
+        self.cfg, self.pacer = cfg, pacer  # pacer: spaces messages out (the class bot)
         self.client = httpx.Client(base_url=cfg.base_url, headers={"apikey": cfg.api_key}, timeout=60, transport=transport)
 
     def send(self, m: Incoming, replies: list[Reply]) -> None:
@@ -481,6 +494,8 @@ class PublicSender:
                 return
 
     def _post(self, endpoint: str, body: dict) -> None:
+        if self.pacer is not None:
+            self.pacer.wait()
         r = self.client.post(f"/message/{endpoint}/{self.cfg.instance}", json=body)
         if r.status_code >= 300:
             raise RuntimeError(f"Evolution API {endpoint} returned {r.status_code}: {r.text[:300]}")

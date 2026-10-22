@@ -83,6 +83,51 @@ question file or paper, the solved PDF, DOCX, notebook and receipt, Approve, Rej
 note, and History. Approve, Reject and switching a course to auto ask 1. Yes / 2. No first.
 
 
+## Other classes (the class bot)
+
+Other sections can get the same group notices, run by their CR, on a second WhatsApp number (the
+class bot, Evolution instance `CLASS_EVOLUTION_INSTANCE`, default `lms-classes`). Nothing of a
+class touches your courses, jobs or files: classes live in their own tables (`classes`,
+`class_courses`, `class_assignments`, ...) and folders (`<data>/classes/<id>/`), and the solver
+never sees them. For a class the bot only reads the LMS: no solving, no uploads, no deletes, no
+lab papers.
+
+1. **Link the class bot** on the **Classes** page (a QR code, like your own bot).
+2. **Invite a CR**: make an invite link there (one use, 48 hours) and send it to them.
+3. **The CR joins**: proves their number with a code the class bot sends on WhatsApp, then signs in
+   to the LMS with their own login. By default only the LMS session is kept, and the CR signs in
+   again when the LMS ends it; they can tick "remember my password" (kept encrypted) instead. A
+   sign-up for your own class, for a class that already has a CR, or by an account that already
+   runs one is refused.
+4. **You approve** the class. The CR adds the class bot to their group, makes sure they are a group
+   admin, and ticks the group on their page (`/cr`, signed in with a WhatsApp code).
+
+**Rules.** Every setting has a rule from you: always on, always off (optionally hidden from the CR),
+or CR decides (with where their switch starts). Limits have a maximum and whether the CR may go
+lower; the bot's mode (off, notices only, notices and menu) has a maximum the CR may only go
+below. Rules are set once for every class and, where you want, per class; locking a setting
+overrides the CR's choice at once, and the CR is told what changed. New classes start on notices
+only; turn the menu on per class.
+
+**Limits.** Menu requests and files per person per hour, replies per group per hour, CR
+announcements per day. Someone over a limit gets one polite note, then silence until the hour is
+up; you are told when someone hits limits three times in a day. The class bot spaces its messages
+a few seconds apart to keep the number safe from WhatsApp bans.
+
+**Overseeing.** The Classes page lists every class (status, CR, groups, courses, last check,
+errors) with approve, pause, block, remove and check now; your pause and block always beat the
+CR's. "Pause every class" stops all checking, sending and answering at once. You can block a person
+in one class or everywhere, see who uses each class's menu, and read the log (CR actions, your
+changes, every message the bot sent, menu use, limits, problems; 60 days, CSV export). You get a
+WhatsApp message when a CR is waiting for approval, a class's LMS login stops working, or the class
+bot's sending starts failing.
+
+**The CR's page** shows their class and lets them, within your rules: sign in to the LMS again,
+tick groups, change settings, pause notices for some days, pause the bot, block people in their
+class, send announcements (off unless you allow them), read their class's log, and remove the class
+(which deletes its LMS login and files).
+
+
 ## What the watcher does
 
 - **Finds work.** Each poll reads every course of the current semester. An assignment that is open and not yet

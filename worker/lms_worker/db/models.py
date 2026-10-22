@@ -284,3 +284,196 @@ class InboundMessage(Base):
 
     message_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+# --- classes: other sections' groups, run by their CR (lms_worker/classes) ---
+#
+# Kept apart from the tables above on purpose: nothing of a class can reach your courses,
+# jobs or files, and the solver never sees a class assignment.
+
+
+class ClassStatus(StrEnum):
+    PENDING = "pending"  # signed up, waiting for your approval
+    ACTIVE = "active"
+    PAUSED = "paused"
+    BLOCKED = "blocked"
+    REMOVED = "removed"  # the CR removed it, or you did; its login and files are gone
+
+
+class SchoolClass(Base):
+    """A section whose groups get notices (and, if allowed, the menu) from the class bot."""
+
+    __tablename__ = "classes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16), default=ClassStatus.PENDING, index=True)
+    paused_by: Mapped[str | None] = mapped_column(String(16))  # admin or cr; a CR cannot undo yours
+    muted_until: Mapped[datetime | None]  # the CR's "pause notices for N days"
+    semester: Mapped[str] = mapped_column(String(64), default="")
+    semester_name: Mapped[str] = mapped_column(String(64), default="")
+    # The CR's LMS login: the enrollment always, the password only if they chose to keep it
+    enrollment: Mapped[str] = mapped_column(String(64), default="")
+    institute: Mapped[str] = mapped_column(String(64), default="Karachi Campus")
+    password_enc: Mapped[str | None] = mapped_column(Text)
+    login_state: Mapped[str] = mapped_column(String(16), default="ok")  # ok, needs_signin, error
+    login_error: Mapped[str | None] = mapped_column(Text)
+    rules: Mapped[str] = mapped_column(Text, default="{}")  # your rules for this class (JSON)
+    choices: Mapped[str] = mapped_column(Text, default="{}")  # the CR's choices (JSON)
+    summary_sent: Mapped[str] = mapped_column(String(32), default="")
+    next_poll_at: Mapped[datetime | None]
+    last_poll_at: Mapped[datetime | None]
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    approved_at: Mapped[datetime | None]
+
+    people: Mapped[list[ClassPerson]] = relationship(back_populates="klass", cascade="all, delete-orphan")
+    groups: Mapped[list[ClassGroup]] = relationship(back_populates="klass", cascade="all, delete-orphan")
+    courses: Mapped[list[ClassCourse]] = relationship(back_populates="klass", cascade="all, delete-orphan")
+
+
+class ClassPerson(Base):
+    """Who runs a class: its CR, and deputies you invited. They sign in with a WhatsApp code."""
+
+    __tablename__ = "class_people"
+    __table_args__ = (UniqueConstraint("class_id", "phone"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    class_id: Mapped[int] = mapped_column(ForeignKey("classes.id"), index=True)
+    phone: Mapped[str] = mapped_column(String(32), index=True)
+    name: Mapped[str] = mapped_column(String(128), default="")
+    role: Mapped[str] = mapped_column(String(16), default="cr")  # cr, deputy
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    klass: Mapped[SchoolClass] = relationship(back_populates="people")
+
+
+class ClassInvite(Base):
+    """A one-time sign-up link you made. Only its hash is kept."""
+
+    __tablename__ = "class_invites"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    name: Mapped[str] = mapped_column(String(128))  # the class, as you named it
+    role: Mapped[str] = mapped_column(String(16), default="cr")
+    class_id: Mapped[int | None] = mapped_column(ForeignKey("classes.id"))  # deputies join an existing class
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    expires_at: Mapped[datetime]
+    used_at: Mapped[datetime | None]
+    used_by: Mapped[str | None] = mapped_column(String(32))
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+
+
+class ClassGroup(Base):
+    """A WhatsApp group a CR ticked. A group belongs to one class."""
+
+    __tablename__ = "class_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    class_id: Mapped[int] = mapped_column(ForeignKey("classes.id"), index=True)
+    group_jid: Mapped[str] = mapped_column(String(64), unique=True)
+    name: Mapped[str] = mapped_column(String(255), default="")
+    added_by: Mapped[str] = mapped_column(String(32), default="")
+    added_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    klass: Mapped[SchoolClass] = relationship(back_populates="groups")
+
+
+class ClassCourse(Base):
+    __tablename__ = "class_courses"
+    __table_args__ = (UniqueConstraint("class_id", "semester", "lms_ref"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    class_id: Mapped[int] = mapped_column(ForeignKey("classes.id"), index=True)
+    code: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(255))
+    lms_ref: Mapped[str] = mapped_column(String(64))
+    semester: Mapped[str] = mapped_column(String(64))
+    semester_name: Mapped[str] = mapped_column(String(64), default="")
+    last_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    klass: Mapped[SchoolClass] = relationship(back_populates="courses")
+    assignments: Mapped[list[ClassAssignment]] = relationship(back_populates="course", cascade="all, delete-orphan")
+
+
+class ClassAssignment(Base):
+    """What the class's assignment list shows. Nothing about anyone's submission is kept."""
+
+    __tablename__ = "class_assignments"
+    __table_args__ = (UniqueConstraint("course_id", "lms_ref"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("class_courses.id"), index=True)
+    lms_ref: Mapped[str] = mapped_column(String(64))
+    number: Mapped[str] = mapped_column(String(16))
+    title: Mapped[str] = mapped_column(String(512))
+    deadline: Mapped[datetime | None]
+    attachment_name: Mapped[str | None] = mapped_column(String(512))
+    remarks: Mapped[str | None] = mapped_column(Text)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    deadline_passed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    question_path: Mapped[str | None] = mapped_column(String(1024))
+    download_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    reminders: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    first_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    course: Mapped[ClassCourse] = relationship(back_populates="assignments")
+
+
+class ClassMessage(Base):
+    """The class bot's outbox: one row per message per group (or CR), sent in order, paced."""
+
+    __tablename__ = "class_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    class_id: Mapped[int | None] = mapped_column(ForeignKey("classes.id"), index=True)
+    to: Mapped[str] = mapped_column(String(64))  # a group JID or a phone number
+    kind: Mapped[str] = mapped_column(String(32))
+    text: Mapped[str] = mapped_column(Text)
+    file_path: Mapped[str | None] = mapped_column(String(1024))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    sent_at: Mapped[datetime | None] = mapped_column(index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class ClassLog(Base):
+    """Everything that happens around classes, kept 60 days: who did what, what the bot sent,
+    who asked the menu for what (the option, never their chat text), and problems."""
+
+    __tablename__ = "class_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    class_id: Mapped[int | None] = mapped_column(ForeignKey("classes.id"), index=True)
+    actor: Mapped[str] = mapped_column(String(64))  # admin, cr:<phone>, bot, system, student:<id>
+    kind: Mapped[str] = mapped_column(String(32), index=True)  # cr, admin, sent, menu, limit, problem
+    detail: Mapped[str] = mapped_column(Text, default="")
+    person: Mapped[str | None] = mapped_column(String(64), index=True)
+
+
+class ClassBlock(Base):
+    """Someone the bot ignores: in one class (class_id), or everywhere (none)."""
+
+    __tablename__ = "class_blocks"
+    __table_args__ = (UniqueConstraint("class_id", "person"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    class_id: Mapped[int | None] = mapped_column(ForeignKey("classes.id"), index=True)
+    person: Mapped[str] = mapped_column(String(64), index=True)
+    by: Mapped[str] = mapped_column(String(16))  # admin or cr
+    at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class ClassHit(Base):
+    """Usage counted against the limits: menu requests, files, group replies, limit notices."""
+
+    __tablename__ = "class_hits"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    class_id: Mapped[int] = mapped_column(Integer, index=True)
+    who: Mapped[str] = mapped_column(String(64))  # a person, or a group JID
+    kind: Mapped[str] = mapped_column(String(16))  # request, file, reply, limited, announce
+    at: Mapped[datetime] = mapped_column(default=utcnow, index=True)

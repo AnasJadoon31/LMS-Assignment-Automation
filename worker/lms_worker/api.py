@@ -64,6 +64,11 @@ def webhook_secret(app_secret_key: str) -> str:
     return hmac.new(app_secret_key.encode(), b"evolution-webhook", hashlib.sha256).hexdigest()
 
 
+def class_webhook_secret(app_secret_key: str) -> str:
+    """The class bot's webhook has its own secret, so it can never pass for yours."""
+    return hmac.new(app_secret_key.encode(), b"evolution-webhook-classes", hashlib.sha256).hexdigest()
+
+
 def create_app(
     settings: Settings,
     sessions: sessionmaker[Session],
@@ -80,8 +85,13 @@ def create_app(
     materials=None,  # materials.Materials: lecture notes, plan and outline for the menu
     discord_bot: DiscordBotSetting | None = None,
     discord_chat: bool = True,  # connect to Discord when a bot token is saved
+    class_admin: EvolutionAdmin | None = None,  # the class bot's WhatsApp (classes/)
+    class_sender=None,  # classes.sending.ClassSender: codes and messages from the class bot
+    class_public_sender: PublicSender | None = None,  # the class bot's menu replies
+    class_sign_in=None,  # (enrollment, password, institute) -> classes.lms.SignedIn
 ) -> FastAPI:
     secret = webhook_secret(settings.app_secret_key or "")
+    class_secret = class_webhook_secret(settings.app_secret_key or "")
     if whatsapp is None:
         whatsapp = WhatsAppNumber(kv, settings.evolution.number if settings.evolution else None)
     if sender is None and settings.evolution:
@@ -106,6 +116,9 @@ def create_app(
         if register_webhook and admin is not None:
             url = f"{internal_url.rstrip('/')}/api/webhooks/evolution"
             threading.Thread(target=_register_until_done, args=(admin, url, secret, stop), daemon=True).start()
+        if register_webhook and class_admin is not None:
+            url = f"{internal_url.rstrip('/')}/api/webhooks/evolution/classes"
+            threading.Thread(target=_register_until_done, args=(class_admin, url, class_secret, stop), daemon=True).start()
         if discord_chat and discord_bot is not None:
             threading.Thread(target=DiscordChat(discord_bot, bot.handle).run_forever, args=(stop,), daemon=True).start()
         yield
@@ -124,6 +137,51 @@ def create_app(
     public = PublicBot(sessions, settings.data_dir, materials=materials)
     directory = Directory(admin, group_setting) if admin is not None else None
     public_sender = PublicSender(settings.evolution) if settings.evolution else None
+
+    # --- classes: other sections, on the class bot's own number ---
+    from .classes.bot import ClassBot, ClassGroupsView
+    from .classes.store import Classes
+    from .classes.web import classes_router
+
+    class_box = SecretBox(settings.app_secret_key) if settings.app_secret_key else None
+    classes = Classes(sessions, kv, settings.data_dir, box=class_box)
+    class_cfg = settings.class_evolution
+    if class_cfg is not None:
+        from .classes.sending import PACER, ClassSender
+
+        class_admin = class_admin or EvolutionAdmin(class_cfg)
+        class_sender = class_sender or ClassSender(class_cfg)
+        class_public_sender = class_public_sender or PublicSender(class_cfg, pacer=PACER)
+    if class_sign_in is None:
+        from .classes.lms import sign_in as _sign_in
+
+        def class_sign_in(enrollment: str, password: str, institute: str):
+            return _sign_in(settings, enrollment, password, institute)
+
+    def owner_alert(text: str) -> None:
+        """A message to you about classes, sent in the background."""
+        if sender is None:
+            log.info("Class alert: %s", text)
+            return
+
+        def send() -> None:
+            try:
+                sender.text(f"🏫 {text}")
+            except NotifyError as e:
+                log.warning("Could not send a class alert: %s", e)
+
+        threading.Thread(target=send, daemon=True).start()
+
+    def class_materials(klass):
+        from .classes.lms import adapter as class_adapter
+        from .classes.store import class_dir, poll_key
+        from .materials import Materials
+
+        return Materials(class_adapter(settings, kv, class_box, klass), class_dir(settings.data_dir, klass.id), kv,
+                         poll_key=poll_key(klass.id))
+
+    class_directory = Directory(class_admin, ClassGroupsView(classes)) if class_admin is not None else None
+    class_bot = ClassBot(classes, class_directory, materials_for=class_materials, alert=owner_alert) if class_directory else None
 
     async def _public(body: dict, background: BackgroundTasks) -> dict:
         m = parse_public(body)
@@ -173,6 +231,28 @@ def create_app(
                                     bot_users=bot_users,
                                     public_url=settings.public_url, auth=auth))
     app.include_router(dashboard_router(auth, sessions, kv))
+    app.state.classes_data_dir = settings.data_dir
+    app.include_router(classes_router(auth=auth, classes=classes, settings=settings, admin=class_admin, sender=class_sender,
+                                      sign_in=class_sign_in, alert=owner_alert, secret=(settings.app_secret_key or "") + "|classes"))
+
+    @app.post("/api/webhooks/evolution/classes")
+    async def evolution_classes(request: Request, background: BackgroundTasks,
+                                x_webhook_secret: str | None = Header(default=None)) -> dict:
+        """The class bot's incoming messages: the class menu, never your own bot."""
+        if not x_webhook_secret or not hmac.compare_digest(x_webhook_secret, class_secret):
+            raise HTTPException(status_code=401, detail="bad secret")
+        body = await request.json()
+        m = parse_public(body)
+        if m is None or class_bot is None or class_public_sender is None:
+            return {"handled": False, "reason": "not a text message to the class bot"}
+        if not await run_in_threadpool(_first_time, sessions, f"cls:{m.message_id}" if m.message_id else ""):
+            return {"handled": False, "reason": "duplicate"}
+        outcome = await run_in_threadpool(class_bot.respond, m)
+        if outcome.reason != "ok" and not outcome.replies:
+            log.info("Class bot did not answer %s: %s", m.ids[0] if m.ids else "?", outcome.reason)
+        if outcome.replies:
+            background.add_task(class_public_sender.send, m, outcome.replies)
+        return {"handled": bool(outcome.replies), "reason": outcome.reason, "replies": len(outcome.replies)}
 
     @app.get("/api/health")
     def health() -> dict:

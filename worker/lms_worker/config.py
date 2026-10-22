@@ -91,6 +91,14 @@ class Settings:
     solver: SolverConfig | None = None
     google_client_id: str | None = None  # Google Drive saving: an OAuth client of type Web application
     google_client_secret: str | None = field(default=None, repr=False)
+    class_instance: str = "lms-classes"  # the class bot's Evolution instance: a second number for other classes
+
+    @property
+    def class_evolution(self) -> EvolutionConfig | None:
+        """The class bot: the same Evolution API, its own instance and number."""
+        if self.evolution is None or not self.class_instance or self.class_instance == self.evolution.instance:
+            return None
+        return EvolutionConfig(base_url=self.evolution.base_url, api_key=self.evolution.api_key, instance=self.class_instance)
 
 
 def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
@@ -154,4 +162,5 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         solver=solver,
         google_client_id=os.environ.get("GOOGLE_CLIENT_ID", "").strip() or None,
         google_client_secret=os.environ.get("GOOGLE_CLIENT_SECRET", "").strip() or None,
+        class_instance=os.environ.get("CLASS_EVOLUTION_INSTANCE", "lms-classes").strip(),
     )
