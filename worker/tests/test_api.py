@@ -56,14 +56,14 @@ def post(client, body, secret=webhook_secret(SECRET_KEY)):
 def test_your_message_gets_the_menu(client, phone):
     r = post(client, upsert("hi"))
     assert r.status_code == 200 and r.json() == {"handled": True, "replies": 1}
-    assert phone.sent[0][0].startswith("*LMS BOT*")
+    assert phone.sent[0][0].startswith("📚 *LMS BOT*")
 
 
 def test_extended_text_messages_count_too(client, phone):
     body = upsert()
     body["data"]["message"] = {"extendedTextMessage": {"text": "menu"}}
     assert post(client, body).json()["handled"]
-    assert phone.sent[0][0].startswith("*LMS BOT*")
+    assert phone.sent[0][0].startswith("📚 *LMS BOT*")
 
 
 def test_a_number_saved_on_the_setup_page_is_the_one_answered(sessions, phone):

@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -78,8 +79,32 @@ def say(bot, *messages):
     return replies
 
 
+# Icons the menu adds in front of titles, options and lines, and the footer's italics
+DECOR = re.compile(r"^((?:\d+\. )?)(?:[\U0001F000-\U0001FAFF\u2190-\u21FF\u2300-\u27BF\u2B00-\u2BFF]\ufe0f?)+ ", re.M)
+
+
+def plain(t):
+    """The menu's words without its icons, so tests read what it says."""
+    return re.sub(r"^_(.*)_$", r"\1", DECOR.sub(r"\1", t), flags=re.M)
+
+
 def text(replies):
-    return "\n---\n".join(r.text for r in replies)
+    return plain("\n---\n".join(r.text for r in replies))
+
+
+def test_the_menu_looks_like_whatsapp(bot, semester):
+    """Icons on the title, every option and every line of an item; urgency dots in lists."""
+    out = say(bot, "hi")[0].text
+    lines = out.splitlines()
+    assert lines[0] == "📚 *LMS BOT*" and lines[1] == ""
+    assert "1. 📝 Assignments: 2 remaining, 1 due soon" in out and "8. 🩺 System status" in out
+    assert lines[-1] == "_Reply with a number._"
+    listed = say(bot, "1", "1")[0].text                       # Assignments, Remaining
+    assert listed.startswith("📝 *Assignments: remaining*")
+    assert "1. 🔴 Recurrence Relations" in listed or "1. 🟠 Recurrence Relations" in listed
+    item = say(bot, "1")[0].text
+    assert item.startswith("📝 *Recurrence Relations*") and "📘 DAA · Assignment 1" in item and "⏰ Due" in item
+    assert "1. 📎 Send the question file" in item and item.endswith("_Reply with a number · 0 = back · menu = home_")
 
 
 def test_main_menu_counts_everything(bot, semester):
@@ -139,7 +164,7 @@ def test_remaining_list_is_sorted_by_deadline_and_opens_an_item(bot, semester):
     out = text(say(bot, "menu", "1", "1"))
     assert out.index("Recurrence Relations") < out.index("Sorting")
     item = text(say(bot, "1"))
-    assert "Recurrence Relations\nDAA · Assignment 1" in item
+    assert "*Recurrence Relations*\n\nDAA · Assignment 1" in item
     assert "(in 1 d 6 h)" in item
     assert "Status: not submitted" in item
     assert "Service: solved; waiting for your approval (revision 1)" in item
@@ -572,7 +597,7 @@ def test_list_numbers_stay_put_when_new_items_arrive(bot, semester, sessions):
         daa = s.scalar(select(Course).where(Course.name == "DAA"))
         s.add(Assignment(course=daa, lms_ref="155150:3", number="3", title="Greedy", deadline=NOW + timedelta(hours=1), fingerprint="x"))
     out = text(say(bot, "2"))
-    assert out.startswith("Sorting")
+    assert out.startswith("*Sorting*")
 
 
 def test_long_lists_are_paged(bot, semester, sessions):

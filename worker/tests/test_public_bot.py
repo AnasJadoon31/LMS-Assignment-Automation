@@ -185,7 +185,7 @@ def test_the_webhook_routes_you_and_classmates_apart(sessions):
     h = {SECRET_HEADER: webhook_secret(SECRET_KEY)}
     with TestClient(app) as c:
         assert c.post("/api/webhooks/evolution", json=upsert("hi"), headers=h).json() == {"handled": True, "replies": 1}
-        assert phone.sent[0][0].startswith("*LMS BOT*")                       # you: your own menu
+        assert phone.sent[0][0].startswith("📚 *LMS BOT*")                       # you: your own menu
         r = c.post("/api/webhooks/evolution", json=group_msg("menu", mentions=[f"{BOT_LID}@lid"]), headers=h).json()
         assert r == {"handled": True, "replies": 1, "public": True}            # tagged in the group: the public menu
         r = c.post("/api/webhooks/evolution", json=group_msg("anyone?", msg_id="g2"), headers=h).json()

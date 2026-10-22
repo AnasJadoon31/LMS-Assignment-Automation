@@ -512,15 +512,15 @@ class Bot:
         screen = stack[-1]
         title, lines, options = getattr(self, f"_screen_{screen['name']}")(s, screen)
         screen["options"] = {str(n): opt for n, (_, opt) in enumerate(options, start=1)}
-        body = [f"*{title}*"] if title else []
+        body = [f"{_title_icon(screen)} *{title}*", ""] if title else []
         body += lines
         if lines and options:
             body.append("")
-        body += [f"{n}. {label}" for n, (label, _) in enumerate(options, start=1)]
-        footer = "Reply with a number." if len(stack) == 1 else "Reply with a number. 0 = back, menu = start."
+        body += [f"{n}. {_icon(label)}" for n, (label, _) in enumerate(options, start=1)]
+        footer = "Reply with a number." if len(stack) == 1 else "Reply with a number · 0 = back · menu = home"
         if screen["name"] == "confirm":
             footer = "Reply 1 or 2."
-        body += ["", hint or footer]
+        body += ["", f"_{hint or footer}_"]
         return Reply("\n".join(body))
 
     def _screen_main(self, s: Session, screen: dict):
@@ -623,31 +623,31 @@ class Bot:
         now = self.now()
         job = a.jobs[-1] if a.jobs else None
         what = f"Paper {a.number}" if a.kind == PAPER else f"Assignment {a.number}"
-        lines = [a.title, f"{a.course.name} · {what}"]
+        lines = [f"📘 {a.course.name} · {what}"]
         if a.kind == PAPER and a.starts_at:
-            lines.append(f"{_window(a)} ({_paper_timing(a, now)})")
+            lines.append(f"🗓️ {_window(a)} ({_paper_timing(a, now)})")
         elif a.deadline:
-            lines.append(f"Due {_when(a.deadline)}" + (f" ({_due_words(a, now)})" if not a.deadline_passed else ""))
+            lines.append(f"⏰ Due {_when(a.deadline)}" + (f" ({_due_words(a, now)})" if not a.deadline_passed else ""))
         else:
-            lines.append("No deadline shown")
-        lines.append(f"Status: {_status(a, now)}")
-        lines.append(f"Marks: {a.marks or 'not marked yet'}")
+            lines.append("⏰ No deadline shown")
+        lines.append(f"{_dot(a, now)} Status: {_status(a, now)}")
+        lines.append(f"🏅 Marks: {a.marks or 'not marked yet'}")
         if a.remarks:
-            lines.append(f"Teacher's note: {a.remarks}")
+            lines.append(f"🗒️ Teacher's note: {a.remarks}")
         if a.kind == ASSIGNMENT:
             if job:
                 state = actions.job_words(job) + (f": {job.last_error}" if job.state == JobState.NEEDS_HUMAN and job.last_error else "")
-                lines.append(f"Service: {state} (revision {job.revision})")
+                lines.append(f"🤖 Service: {state} (revision {job.revision})")
                 if job.state == JobState.NEEDS_INPUT:
                     lines += ["Claude asks:"] + [f"• {q}" for q in _questions(job)]
                 lines += _triage_lines(job)
             elif a.skipped_reason:
-                lines.append(f"Service: not handled; {a.skipped_reason.lower()}")
+                lines.append(f"🤖 Service: not handled; {a.skipped_reason.lower()}")
         else:
             lines.append("Lab papers are tracked only; the service never solves them.")
         refs = files.listed(files.refs_dir(self.data_dir, a)) if self.data_dir and a.kind == ASSIGNMENT else []
         if refs:
-            lines.append("Your reference files: " + ", ".join(p.name for p in refs))
+            lines.append("📚 Your reference files: " + ", ".join(p.name for p in refs))
         if a.upload_requested_at:
             lines.append("Your own file is being uploaded now.")
 
@@ -680,7 +680,7 @@ class Bot:
             options.append(("Upload my own file", {"do": "await_file", "purpose": "own", "assignment": a.id}))
         if actions.can_delete(a):
             options.append(("Delete my submission from the LMS", {"do": "confirm", "action": "delete", "assignment": a.id}))
-        return "", lines, options
+        return a.title, lines, options
 
     def _screen_file_what(self, s: Session, screen: dict):
         a = s.get(Assignment, screen["assignment"])
@@ -846,7 +846,7 @@ class Bot:
                 "redo": [f"Redo {a.title} with this note?", f'"{screen.get("note", "")}"',
                          *(["Opus solves it again from the start, which uses more of your plan than a normal redo."] * bool(screen.get("strong")))],
             }[action]
-        return "", question, [("Yes", {"do": "yes"}), ("No", {"do": "no"})]
+        return "", [f"❓ {question[0]}", *question[1:]], [("Yes", {"do": "yes"}), ("No", {"do": "no"})]
 
     # --- data ---
 
@@ -868,30 +868,30 @@ class Bot:
         return s.scalar(select(Course.semester).order_by(Course.last_seen_at.desc()).limit(1))
 
     def _status(self, s: Session) -> str:
-        lines = ["*System status*"]
+        lines = ["🩺 *System status*", ""]
         beat = self.kv.get(HEARTBEAT_KEY)
         if beat:
             b = json.loads(beat)
-            lines.append(f"Last check: {_when(datetime.fromisoformat(b['at']))} ({b['status']})")
+            lines.append(f"🔄 Last check: {_when(datetime.fromisoformat(b['at']))} ({b['status']})")
         else:
-            lines.append("Last check: never")
+            lines.append("🔄 Last check: never")
         paused = self.kv.get(POLL_PAUSE_KEY)
-        lines.append(f"Polling: paused ({paused})" if paused else "Polling: running")
+        lines.append(f"⏸️ Polling: paused ({paused})" if paused else "▶️ Polling: running")
         guard = self.kv.get("login_guard")
         if guard and json.loads(guard).get("paused_reason"):
-            lines.append(f"LMS login: paused ({json.loads(guard)['paused_reason']})")
+            lines.append(f"🔑 LMS login: paused ({json.loads(guard)['paused_reason']})")
         else:
-            lines.append("LMS login: ok")
-        lines.append(self._claude_line())
-        lines.append(UsageGuard(self.kv).status_line(self.now()))
+            lines.append("🔑 LMS login: ok")
+        lines.append("🤖 " + self._claude_line())
+        lines.append("📊 " + UsageGuard(self.kv).status_line(self.now()))
         jobs = s.scalars(select(Job)).all()
         active = [j for j in jobs if j.state not in TERMINAL_STATES]
-        lines.append(f"Jobs: {len(active)} active, {sum(j.state == JobState.AWAITING_APPROVAL for j in jobs)} waiting for you")
+        lines.append(f"⚙️ Jobs: {len(active)} active, {sum(j.state == JobState.AWAITING_APPROVAL for j in jobs)} waiting for you")
         summaries = s.scalars(select(Summary.state).where(Summary.state.in_([SummaryState.QUEUED, SummaryState.RUNNING]))).all()
         if summaries:
-            lines.append(f"Lecture summaries: {len(summaries)} being written or waiting")
+            lines.append(f"✍️ Lecture summaries: {len(summaries)} being written or waiting")
         month = (self.now().year, self.now().month)
-        lines.append(f"Tokens used this month: {sum(j.cost_tokens for j in jobs if (j.created_at.year, j.created_at.month) == month):,}")
+        lines.append(f"🔢 Tokens used this month: {sum(j.cost_tokens for j in jobs if (j.created_at.year, j.created_at.month) == month):,}")
         return "\n".join(lines)
 
     def _claude_line(self) -> str:
@@ -907,7 +907,7 @@ class Bot:
 
     def _history(self, s: Session, job_id: int) -> str:
         events = s.scalars(select(Event).where(Event.job_id == job_id).order_by(Event.id.desc()).limit(8)).all()
-        lines = ["*History*"] + [f"{_when(e.at)}: {e.detail}" for e in reversed(events)]
+        lines = ["🕘 *History*", ""] + [f"• {_when(e.at)}: {e.detail}" for e in reversed(events)]
         return "\n".join(lines)
 
 
@@ -1151,8 +1151,64 @@ def _status(a: Assignment, now: datetime) -> str:
     return "not submitted"
 
 
+# Icons for menu options, by how the label starts. Labels not listed (list items) carry their own.
+ICONS = (
+    ("Assignments", "📝"), ("Lab papers", "🧪"), ("Needs your action", "⚡"), ("Due or starting", "⏰"),
+    ("Courses:", "📘"), ("Check the LMS now", "🔄"), ("System status", "🩺"),
+    ("Remaining", "📌"), ("Due in the next 48", "⏰"), ("Waiting for your approval", "✅"), ("Waiting for your go-ahead", "▶️"),
+    ("Claude is waiting", "💬"), ("Queued or being solved", "⚙️"), ("Stopped, needs you", "🛑"), ("Submitted", "📤"),
+    ("Missed", "❌"), ("Marked", "🏅"), ("All", "🗂️"), ("Upcoming", "🗓️"), ("Open now", "🟢"),
+    ("Starting in the next 48", "⏰"), ("Finished", "🏁"),
+    ("Send the paper", "📎"), ("Send the question file", "📎"), ("Send the solved PDF", "📄"), ("Send the DOCX", "📝"),
+    ("Send the notebook", "💻"), ("Send the LMS receipt", "🧾"), ("Solve it now", "▶️"), ("Answer Claude", "💬"),
+    ("Solve it without", "⏭️"), ("Approve and upload", "✅"), ("Reject", "❌"), ("Redo with a note", "🔁"),
+    ("Redo with Opus", "🧠"), ("History", "🕘"), ("Add a reference file", "📚"), ("Remove the reference files", "🗑️"),
+    ("Upload my own file", "📤"), ("Upload it to the LMS", "📤"), ("Use it as a reference", "📚"),
+    ("Delete my submission", "🗑️"), ("Yes", "✅"), ("No", "❌"), ("OK", "👌"),
+    ("Lecture notes for solving", "📖"), ("Lecture notes", "📖"), ("Course plan", "🗓️"), ("Course outline", "📋"),
+    ("Course settings", "🛠️"), ("Settings", "⚙️"), ("Solver model", "🤖"), ("Solver effort", "🧠"),
+    ("Daily solve limit", "📊"), ("Reset the web page password", "🔑"), ("Summarize lectures", "✍️"), ("More (", "➡️"),
+    ("Solving:", "🤖"), ("Uploading:", "📤"), ("Safe mode:", "🛡️"), ("System prompt", "💬"), ("Report theme", "🎨"),
+    ("Turn safe mode", "🛡️"), ("Put the limits back", "📊"), ("Lift the limits", "📊"), ("Default", "↩️"),
+    ("Type a model name", "⌨️"), ("Set this course's theme", "🎨"), ("Use the default theme", "↩️"),
+    ("Send a theme reference", "📎"), ("Add my instructions", "➕"), ("Replace the built-in prompt", "✏️"),
+    ("Show the built-in prompt", "👀"), ("Show my prompt", "👀"), ("Remove my prompt", "🗑️"), ("Week ", "📄"),
+)
+TITLE_ICONS = {"main": "📚", "action": "⚡", "settings": "⚙️", "model": "🤖", "effort": "🧠", "cap": "📊", "courses": "📘",
+               "course": "📘", "course_settings": "🛠️", "solve_pick": "🤖", "lectures_pick": "📖", "safe": "🛡️",
+               "lectures": "📖", "theme": "🎨", "prompt": "💬", "modes": "🛠️", "mode_pick": "📤", "file_what": "📎"}
+
+
+def _icon(label: str) -> str:
+    for start, icon in ICONS:
+        if label.startswith(start):
+            return f"{icon} {label}"
+    return label
+
+
+def _title_icon(screen: dict) -> str:
+    name = screen["name"]
+    if name in ("section", "list", "item"):
+        return "🧪" if screen.get("kind") == PAPER else "📝"
+    return TITLE_ICONS.get(name, "📌")
+
+
+def _dot(a: Assignment, now: datetime) -> str:
+    """🔴 due within a day, 🟠 within three, 🟢 later, ✅ submitted or marked, ⚪ closed, 🗓️ a paper not open yet."""
+    if a.marks or a.submitted_file or a.paper_status == PAPER_SUBMITTED:
+        return "✅"
+    if a.deadline_passed or (a.deadline is not None and a.deadline <= now):
+        return "⚪"
+    if a.kind == PAPER and a.starts_at and a.starts_at > now:
+        return "🗓️"
+    if a.deadline is None:
+        return "🔵"
+    left = a.deadline - now
+    return "🔴" if left <= timedelta(hours=24) else "🟠" if left <= timedelta(days=3) else "🟢"
+
+
 def _line(a: Assignment, now: datetime, *, with_course: bool) -> str:
-    bits = [a.title]
+    bits = [f"{_dot(a, now)} {a.title}"]
     if with_course:
         bits.append(a.course.name)
     if a.kind == PAPER and a.starts_at:
