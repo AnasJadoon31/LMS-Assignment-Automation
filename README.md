@@ -96,9 +96,11 @@ lab papers.
 2. **Invite a CR**: make an invite link there (one use, 48 hours) and send it to them.
 3. **The CR joins**: proves their number with a code the class bot sends on WhatsApp, then signs in
    to the LMS with their own login. By default only the LMS session is kept, and the CR signs in
-   again when the LMS ends it; they can tick "remember my password" (kept encrypted) instead. A
-   sign-up for your own class, for a class that already has a CR, or by an account that already
-   runs one is refused.
+   again when the LMS ends it; they can tick "remember my password" (kept encrypted) instead. Each
+   section of a program is its own class, even when sections share courses; only an LMS account
+   that already runs a class is refused. When a new class lists mostly the same courses as another
+   class (or yours), you see "Shares 5 of 6 courses with BSCS 5-A: maybe the same section signed
+   up twice" on its card and in the approval alert, and decide.
 4. **You approve** the class. The CR adds the class bot to their group, makes sure they are a group
    admin, and ticks the group on their page (`/cr`, signed in with a WhatsApp code).
 
@@ -121,6 +123,15 @@ in one class or everywhere, see who uses each class's menu, and read the log (CR
 changes, every message the bot sent, menu use, limits, problems; 60 days, CSV export). You get a
 WhatsApp message when a CR is waiting for approval, a class's LMS login stops working, or the class
 bot's sending starts failing.
+
+**On WhatsApp.** Everything above also works in a private chat with the class bot. From your
+own number, `menu` gives your controls: classes waiting for approval, every class (approve, pause,
+block, remove, check now, its rules, who uses it, its log, a deputy invite), invite a CR, the
+default rules, blocked people, the log and pausing every class. From a CR's or deputy's number,
+`menu` gives their controls: announce (with a preview to confirm), settings, groups, people and
+blocks, pausing notices or the bot, the LMS sign-in status, the log, the student menu (`cr` comes
+back) and removing the class. Signing in to the LMS again stays on the CR's page, so a password
+never sits in a chat; the bot sends the link.
 
 **The CR's page** shows their class and lets them, within your rules: sign in to the LMS again,
 tick groups, change settings, pause notices for some days, pause the bot, block people in their

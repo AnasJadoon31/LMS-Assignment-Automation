@@ -55,14 +55,36 @@ class Outcome:
     class_id: int | None = None
 
 
+def admin_groups(admin, number: str) -> dict[str, dict]:
+    """The class bot's groups where this number is a group admin: id -> {name, size}."""
+    out = {}
+    for g in admin.groups_with_members():
+        for p in g["participants"]:
+            ids = {str(p.get(k) or "").split("@")[0].split(":")[0] for k in ("id", "jid", "phoneNumber")}
+            if number in ids and p.get("admin") in ("admin", "superadmin"):
+                out[g["id"]] = {"name": g["name"], "size": g["size"]}
+    return out
+
+
 class ClassBot:
     def __init__(self, classes: Classes, directory: Directory, *, materials_for: Callable[[SchoolClass], object] | None = None,
-                 alert: Callable[[str], None] | None = None, now: Callable[[], datetime] = utcnow) -> None:
+                 alert: Callable[[str], None] | None = None, now: Callable[[], datetime] = utcnow,
+                 cr_menu=None, admin_menu=None, is_admin: Callable[[list[str]], bool] | None = None) -> None:
+        """`cr_menu`: crbot.CRMenu, for CRs in a private chat. `admin_menu`: adminbot.AdminMenu, for you
+        (`is_admin(ids)` tells your number)."""
         self.classes, self.directory, self.materials_for = classes, directory, materials_for
         self.alert, self.now = alert or (lambda _: None), now
+        self.cr_menu, self.admin_menu, self.is_admin = cr_menu, admin_menu, is_admin or (lambda ids: False)
         self.sessions = classes.sessions
 
     def respond(self, m: Incoming) -> Outcome:
+        if not m.group and not m.unreadable:
+            # you and the CRs get your controls in a private chat, even while every class is paused
+            if self.admin_menu is not None and self.is_admin(m.ids):
+                return Outcome("admin", self.admin_menu.handle(m.ids[0], m.text))
+            found = self.cr_menu.person(m.ids) if self.cr_menu is not None else None
+            if found is not None and not self.cr_menu.student_mode(found, m.text):
+                return Outcome("cr", self.cr_menu.handle(found, m.text), found[0])
         if self.classes.paused_all:
             return Outcome("all classes are paused")
         if m.unreadable:

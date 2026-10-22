@@ -181,7 +181,22 @@ def create_app(
                          poll_key=poll_key(klass.id))
 
     class_directory = Directory(class_admin, ClassGroupsView(classes)) if class_admin is not None else None
-    class_bot = ClassBot(classes, class_directory, materials_for=class_materials, alert=owner_alert) if class_directory else None
+    class_bot = None
+    if class_directory is not None:
+        from .classes.adminbot import AdminMenu
+        from .classes.bot import admin_groups
+        from .classes.crbot import CRMenu
+
+        def class_notify(to: str, text: str) -> None:
+            if class_sender is not None:
+                class_sender.text(to, text)
+
+        class_bot = ClassBot(
+            classes, class_directory, materials_for=class_materials, alert=owner_alert,
+            cr_menu=CRMenu(classes, groups_for=lambda number: admin_groups(class_admin, number), public_url=settings.public_url),
+            admin_menu=AdminMenu(classes, public_url=settings.public_url, notify=class_notify),
+            is_admin=lambda ids: bool(whatsapp.get()) and whatsapp.get() in ids,
+        )
 
     async def _public(body: dict, background: BackgroundTasks) -> dict:
         m = parse_public(body)

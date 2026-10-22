@@ -448,17 +448,12 @@ def classes_router(*, auth, classes: Classes, settings, admin=None, sender=None,
         """Groups the class bot is in where this number is an admin: id -> {name, size}."""
         if admin is None:
             raise HTTPException(status_code=503, detail="The class bot is not set up yet")
+        from .bot import admin_groups
+
         try:
-            groups = admin.groups_with_members()
+            return admin_groups(admin, number)
         except WhatsAppError as e:
             _err(e, 502)
-        out = {}
-        for g in groups:
-            for p in g["participants"]:
-                ids = {str(p.get(k) or "").split("@")[0].split(":")[0] for k in ("id", "jid", "phoneNumber")}
-                if number in ids and p.get("admin") in ("admin", "superadmin"):
-                    out[g["id"]] = {"name": g["name"], "size": g["size"]}
-        return out
 
     @router.get("/api/cr/groups")
     def cr_groups(request: Request) -> dict:
@@ -654,9 +649,10 @@ def classes_router(*, auth, classes: Classes, settings, admin=None, sender=None,
                 alert(f"A CR sign-up was refused: {name} (+{number}): {e}")
                 raise SignInError(str(e)) from e
             with classes.sessions() as s:
-                cname = s.get(SchoolClass, class_id).name
-            alert(f"New CR waiting for your approval: {name} (+{number}) for {cname}, {len(done.courses)} courses. "
-                  "Approve it on the Classes page.")
+                klass = s.get(SchoolClass, class_id)
+                cname, note = klass.name, classes.overlap_note(classes.overlaps(s, klass))
+            alert(f"New CR waiting for your approval: {name} (+{number}) for {cname}, {len(done.courses)} courses."
+                  + (f"\n{note}" if note else "") + "\nApprove it on the Classes page, or message the class bot: menu.")
             return {"person_id": person_id}
 
         try:
@@ -794,6 +790,7 @@ function card(c) {
     "<span>LMS</span><span>" + esc(c.enrollment) + " · " + esc(c.semester || "") + " · password " + (c.remembers_password ? "kept" : "not kept") + "</span>" +
     "<span>Groups</span><span>" + (c.groups.map((g) => esc(g.name)).join(", ") || "none ticked yet") + "</span>" +
     "<span>Courses</span><span>" + (c.courses.map(esc).join(", ") || "—") + "</span>" +
+    (c.overlap ? "<span>Note</span><span" + (c.overlap.startsWith("⚠️") ? ' class="state bad"' : "") + ">" + esc(c.overlap) + "</span>" : "") +
     "<span>Checked</span><span>" + when(c.last_poll_at) + (c.last_error ? ' · <span class="state bad">' + esc(c.last_error) + "</span>" : "") + "</span></div>" +
     '<div class="row small">' + actions + '<button class="secondary" data-rules="' + c.id + '">Rules</button><button class="secondary" data-poll="' + c.id +
     '">Check now</button><button class="secondary" data-logs="' + c.id + '">Log</button><button class="secondary" data-remove="' + c.id + '" data-name="' + esc(c.name) + '">Remove</button></div></div>';

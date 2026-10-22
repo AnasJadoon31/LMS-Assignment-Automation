@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, object_session, sessionmaker
 
 from ..db.models import (BotUser, ChatSession, ClassAssignment, ClassBlock, ClassCourse, ClassGroup, ClassHit, ClassInvite,
                          ClassLog, ClassMessage, ClassPerson, ClassStatus, Course, SchoolClass, utcnow)
@@ -254,28 +254,46 @@ class Classes:
         return i
 
     def taken(self, s: Session, courses: list[lms.Course], enrollment: str) -> str | None:
-        """Why these courses cannot become a new class: they are your own class, or most of them
-        belong to a class that already has a CR, or this enrollment already runs one."""
+        """Why this sign-up cannot make a class at all: no courses, or this LMS account already runs
+        one. Sections of the same program and semester are separate classes, so shared courses never
+        refuse a sign-up; `overlaps` shows them to you for the approval instead."""
         if not courses:
             return "The LMS lists no courses for this account"
-        sem, refs = courses[0].semester, {c.lms_ref for c in courses}
-        half = max(1, (len(refs) + 1) // 2)
-        mine = s.scalars(select(Course.lms_ref).where(Course.semester == sem, Course.lms_ref.in_(refs))).all()
-        if len(set(mine)) >= half:
-            return "This is the admin's own class; it already has the bot"
-        rows = s.execute(select(ClassCourse.class_id, ClassCourse.lms_ref).join(SchoolClass).where(
-            ClassCourse.semester == sem, ClassCourse.lms_ref.in_(refs),
-            SchoolClass.status.not_in([ClassStatus.REMOVED]))).all()
-        by_class: dict[int, set] = {}
-        for cid, ref in rows:
-            by_class.setdefault(cid, set()).add(ref)
-        for cid, found in by_class.items():
-            if len(found) >= half:
-                return f"This class is already set up ({s.get(SchoolClass, cid).name}). Ask the admin."
         if s.scalar(select(SchoolClass).where(SchoolClass.enrollment == enrollment,
                                              SchoolClass.status.not_in([ClassStatus.REMOVED]))):
             return "This LMS account already runs a class"
         return None
+
+    @staticmethod
+    def overlaps(s: Session, klass: SchoolClass) -> list[dict]:
+        """Other classes (and your own) that list the same LMS courses this semester: a hint that it
+        may be the same section signed up twice. [{name, shared, total}], most shared first."""
+        mine = {c.lms_ref for c in klass.courses if c.semester == klass.semester}
+        if not mine:
+            return []
+        out = []
+        own = set(s.scalars(select(Course.lms_ref).where(Course.semester == klass.semester, Course.lms_ref.in_(mine))).all())
+        if own:
+            out.append({"name": "your own class", "shared": len(own), "total": len(mine)})
+        rows = s.execute(select(ClassCourse.class_id, ClassCourse.lms_ref).join(SchoolClass).where(
+            ClassCourse.semester == klass.semester, ClassCourse.lms_ref.in_(mine), ClassCourse.class_id != klass.id,
+            SchoolClass.status.not_in([ClassStatus.REMOVED]))).all()
+        by_class: dict[int, set] = {}
+        for cid, ref in rows:
+            by_class.setdefault(cid, set()).add(ref)
+        for cid, refs in by_class.items():
+            out.append({"name": s.get(SchoolClass, cid).name, "shared": len(refs), "total": len(mine)})
+        return sorted(out, key=lambda o: -o["shared"])
+
+    @staticmethod
+    def overlap_note(found: list[dict]) -> str:
+        """'⚠️ Shares 5 of 6 courses with BSCS 5-A: maybe the same section' for the biggest overlap."""
+        if not found:
+            return ""
+        top = found[0]
+        same = top["shared"] * 4 >= top["total"] * 3  # three quarters or more: likely one section twice
+        return (f"{'⚠️ ' if same else ''}Shares {top['shared']} of {top['total']} courses with {top['name']}"
+                + (": maybe the same section signed up twice" if same else ""))
 
     def signup(self, token: str, number: str, cr_name: str, enrollment: str, institute: str, password: str | None,
                state: dict, courses: list[lms.Course]) -> tuple[int, int]:
@@ -396,6 +414,12 @@ class Classes:
                 raise PermissionError("Announcements are switched off for your class")
             if klass.status != ClassStatus.ACTIVE:
                 raise PermissionError("Your class is not active")
+            if self.paused_all:
+                raise PermissionError("The admin has paused every class for now")
+            if klass.muted_until and klass.muted_until > self.now():
+                raise PermissionError("Notices are paused for your class; turn them back on first")
+            if not klass.groups:
+                raise PermissionError("Tick a group first")
             limit = p.value("limit_announce")
             if self.hits(s, class_id, number, "announce", hours=24) >= limit:
                 raise PermissionError(f"You can send {limit} announcements a day")
@@ -503,6 +527,7 @@ class Classes:
             "courses": sorted(c.name for c in klass.courses if c.semester == klass.semester),
             "mode": p.value("mode"),
             "rules": policy.load(klass.rules),
+            "overlap": self.overlap_note(self.overlaps(s, klass)) if (s := object_session(klass)) else "",
         }
 
     def assignments(self, s: Session, class_id: int) -> list[ClassAssignment]:

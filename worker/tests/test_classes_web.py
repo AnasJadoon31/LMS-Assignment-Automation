@@ -20,7 +20,7 @@ from .test_api import SECRET_KEY, SETTINGS
 
 PASSWORD = "admin pass phrase"
 BOT, BOT_LID = "923119999999", "99001122"
-CR, ALI, ALI_LID = "923001234567", "923002222222", "55002222"
+CR, ALI, ALI_LID = "923004444444", "923002222222", "55002222"
 GROUP = "120363000000000999@g.us"
 SEM = "MjAyNjM="
 COURSES = [lms.Course(code=str(100 + i), name=f"Course {i}", lms_ref=f"REF{i}", semester=SEM, semester_name="Fall-2026")
@@ -80,10 +80,15 @@ class Owner:
         self.sent.append(caption)
 
 
+SECTION_C = [lms.Course(code=str(100 + i), name=f"Course {i}", lms_ref=f"REF{i}", semester=SEM, semester_name="Fall-2026")
+             for i in range(2, 6)]
+
+
 def fake_sign_in(enrollment, password, institute):
     if password != "lms-pass":
         raise SignInError("The LMS did not accept that enrollment and password")
-    return SignedIn(state={"cookies": [{"name": "PHPSESSID", "value": "abc", "domain": "lms.bahria.edu.pk"}]}, courses=COURSES)
+    return SignedIn(state={"cookies": [{"name": "PHPSESSID", "value": "abc", "domain": "lms.bahria.edu.pk"}]},
+                    courses=SECTION_C if enrollment == "02-2" else COURSES)
 
 
 @pytest.fixture
@@ -114,7 +119,7 @@ def wait(c, url):
     raise AssertionError("sign-in did not finish")
 
 
-def join(env, *, phone="0300-1234567", password="lms-pass"):
+def join(env, *, phone="0300-4444444", password="lms-pass", enrollment="02-1"):
     """Make an invite as you, then sign up through it as the CR. Returns the invite link."""
     c, sender = env["c"], env["sender"]
     admin(c)
@@ -125,7 +130,7 @@ def join(env, *, phone="0300-1234567", password="lms-pass"):
     assert c.post(f"/api/join/{token}/code", json={"phone": phone, "name": "Sara"}, headers=H).json() == {"sent": True}
     code = sender.code(phone_of(phone))
     assert c.post(f"/api/join/{token}/verify", json={"phone": phone, "name": "Sara", "code": code}, headers=H).json() == {"verified": True}
-    c.post(f"/api/join/{token}/lms", json={"enrollment": "02-1", "password": password, "remember": False}, headers=H)
+    c.post(f"/api/join/{token}/lms", json={"enrollment": enrollment, "password": password, "remember": False}, headers=H)
     return token, wait(c, f"/api/join/{token}/lms")
 
 
@@ -168,18 +173,29 @@ def test_a_wrong_code_or_password_gets_nowhere(env):
     assert c.post(f"/api/join/{token}/code", json={"phone": CR, "name": "Sara"}, headers=H).status_code == 400  # 3 codes an hour
 
 
-def test_the_same_class_cannot_sign_up_twice_nor_your_own(env):
-    c, sessions = env["c"], env["sessions"]
-    join(env)
-    _, again = join(env, phone="03007654321")
-    assert again["state"] == "error" and "already set up (BSCS 5-B)" in again["error"]
+def test_sections_sign_up_separately_and_an_overlap_is_shown_not_refused(env):
+    """Sections of one program share a semester and maybe some courses: each is its own class. A big
+    overlap is shown to you for the approval; only an LMS account that already runs a class is refused."""
+    c, sessions, owner = env["c"], env["sessions"], env["owner"]
+    join(env)                                                               # 5-B: REF0..REF3
+    _, again = join(env, phone="03007654321")                               # same account again
+    assert again["state"] == "error" and "already runs a class" in again["error"]
+    _, other = join(env, phone="03001112223", enrollment="02-2")            # 5-C: REF2..REF5, two shared
+    assert other == {"state": "done"}
+    _, twin = join(env, phone="03001112224", enrollment="02-3")             # someone else of 5-B: all four shared
+    assert twin == {"state": "done"}
+    c.cookies.clear()
+    admin(c)
+    notes = {k["enrollment"]: k["overlap"] for k in c.get("/api/classes", headers=H).json()["classes"]}
+    assert notes["02-2"] == "Shares 2 of 4 courses with BSCS 5-B"                # another section: just a note
+    assert notes["02-3"].startswith("⚠️ Shares 4 of 4 courses with BSCS 5-B: maybe the same section")
+    time.sleep(0.1)
+    assert any("maybe the same section" in m for m in owner.sent)            # in the approval alert too
     with sessions.begin() as s:
-        for x in s.scalars(select(SchoolClass)).all():
-            x.status = "removed"
-        for i in range(3):
+        for i in range(4):
             s.add(Course(code="x", name="mine", lms_ref=f"REF{i}", semester=SEM))
-    _, mine = join(env, phone="03001112223")
-    assert "admin's own class" in mine["error"]
+    notes = {k["enrollment"]: k["overlap"] for k in c.get("/api/classes", headers=H).json()["classes"]}
+    assert notes["02-1"].startswith("⚠️ Shares 4 of 4 courses with your own class")
 
 
 def test_you_approve_and_rule_and_the_cr_works_within_your_rules(env):
@@ -448,3 +464,129 @@ def test_rules_changed_on_the_page_are_saved_for_one_class(env):
         server.should_exit = True
     with env["sessions"]() as s:
         assert '"mode": {"max": "menu"' in s.scalar(select(SchoolClass)).rules
+
+
+# --- the controls on WhatsApp ---
+
+
+def chat(c, text, *, who, n=[0]):
+    """A private message to the class bot from `who` (a phone number); returns the bot's reply text."""
+    n[0] += 1
+    before = len(c.replies.sent)
+    body = class_msg(text, chat="private", msg_id=f"w{n[0]}", sender=(who, "1" + who[-6:]))
+    r = post(c.client, body)
+    new = c.replies.sent[before:]
+    return "\n---\n".join(t for _, texts, _ in new for t in texts), r
+
+
+class Chat:
+    def __init__(self, env):
+        self.client, self.replies = env["c"], env["replies"]
+
+    def __call__(self, text, who):
+        return chat(self, text, who=who)[0]
+
+
+def test_you_run_classes_from_whatsapp(env):
+    from .test_api import ME
+
+    c, sessions = env["c"], env["sessions"]
+    say = Chat(env)
+    main = say("menu", ME)
+    assert main.startswith("🏫 *Classes* · your controls") and "3. ➕ Invite a CR" in main
+    assert "Send the class's name" in say("3", ME)
+    reply = say("BSCS 5-D", ME)
+    link = re.search(r"/join/(\S+)", reply)
+    assert "Invite for the CR of *BSCS 5-D*" in reply and link
+    join(env)                                                   # a CR signs up through the page
+    c.cookies.clear()
+    waiting = say("menu", ME)
+    assert "Waiting for approval (1)" in waiting
+    assert "BSCS 5-B · ⏳ waiting" in say("1", ME)
+    klass = say("1", ME)
+    assert klass.startswith("🏫 *BSCS 5-B*") and "1. ✅ Approve" in klass
+    assert "✅ Done. The CR was told." in say("1", ME)
+    # rules for this class: the menu allowed
+    rules = say("3", ME)
+    assert "⚖️ *Rules for BSCS 5-B*" in rules
+    mode = say("1", ME)
+    assert "Up to: Notices and menu" in mode
+    assert "✅ Saved. The CR was told." in say("3", ME)
+    with sessions() as s:
+        assert '"mode": {"max": "menu"' in s.scalar(select(SchoolClass)).rules
+    # a number per class: limits
+    say("0", ME)
+    limits = say("16", ME)                                      # Menu requests per person per hour
+    assert "Menu requests per person per hour" in limits
+    say("1", ME)
+    assert "✅ Saved" in say("4", ME)
+    with sessions() as s:
+        assert '"limit_requests": {"max": 4' in s.scalar(select(SchoolClass)).rules
+    # pause everything from WhatsApp, and back
+    say("menu", ME)
+    assert "Pause every class?" in say("6", ME)
+    assert "Every class is paused" in say("1", ME)
+    assert "Every class is back on" in say("6", ME)
+
+
+def test_a_cr_runs_their_class_from_whatsapp(env):
+    from .test_api import ME
+
+    c, sessions = env["c"], env["sessions"]
+    say = Chat(env)
+    join(env)
+    c.cookies.clear()
+    admin(c)
+    cid = c.get("/api/classes", headers=H).json()["classes"][0]["id"]
+    c.post(f"/api/classes/{cid}/status", json={"status": "active"}, headers=H)
+    c.post(f"/api/classes/{cid}/rules", json={"rules": {"mode": {"max": "menu", "cr": True}, "remind_2h": {"lock": "on"},
+                                                        "announce": {"lock": "cr", "default": True}}}, headers=H)
+    main = say("hi", CR)
+    assert main.startswith("🛠️ *BSCS 5-B* · CR controls") and "📣 Announce (3 left today)" in main
+    # settings: a locked one stays, a free one flips
+    settings = say("2", CR)
+    lines = {l.split(". ", 1)[1].split(":")[0]: l.split(". ", 1)[0] for l in settings.splitlines() if re.match(r"\d+\. ", l)}
+    assert "🔒 Reminder 2 hours before the deadline is set by the admin" in say(lines["Reminder 2 hours before the deadline"], CR)
+    assert "✅ Reminder 24 hours before the deadline: off." in say(lines["Reminder 24 hours before the deadline"], CR)
+    # groups: tick the one where the CR is an admin
+    say("menu", CR)
+    groups = say("3", CR)
+    assert "⬜ 5-B official" in groups and "Not mine" not in groups
+    assert "✅ 5-B official" in say("1", CR)
+    # announce, with a preview and a yes
+    say("menu", CR)
+    assert "Send the announcement" in say("1", CR)
+    preview = say("Quiz moved to Friday", CR)
+    assert "This goes to 1 group" in preview and "📣 *From your CR* (Sara)" in preview
+    assert "✅ Announcement queued for 1 group." in say("1", CR)
+    # pause notices, then an announcement is refused without counting
+    say("menu", CR)
+    say("5", CR)
+    assert "Notices paused for 3 days" in say("3", CR)
+    say("1", CR)
+    say("Another one", CR)
+    assert "Notices are paused for your class" in say("1", CR)
+    # the student menu and back
+    say("menu", CR)
+    student_option = [l for l in say("menu", CR).splitlines() if "Student menu" in l][0].split(".")[0]
+    assert "send *menu*" in say(student_option, CR)
+    assert say("menu", CR).startswith("📚 *BSCS 5-B*")
+    assert say("cr", CR).startswith("🛠️ *BSCS 5-B*")
+    with sessions() as s:
+        details = [l.detail for l in s.scalars(select(ClassLog)).all()]
+        assert sum(d.startswith("Announcement to 1 groups") for d in details) == 1
+    # the CR cannot reach your controls, and you are not mistaken for a CR
+    assert "your controls" not in say("admin", CR)
+    assert say("menu", ME).startswith("🏫 *Classes*")
+
+
+def test_a_cr_removes_their_class_from_whatsapp(env):
+    c, sessions = env["c"], env["sessions"]
+    say = Chat(env)
+    join(env)
+    remove = [l for l in say("menu", CR).splitlines() if "Remove my class" in l][0].split(".")[0]
+    assert "send the class name exactly" in say(remove, CR)
+    assert "not the class name" in say("BSCS 5-X", CR)
+    assert "is removed" in say("bscs 5-b", CR)
+    with sessions() as s:
+        assert s.scalar(select(SchoolClass)).status == "removed"
