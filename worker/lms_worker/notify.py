@@ -7,9 +7,11 @@ holds the other back, and a retry never re-sends to a channel that already got i
 Discord webhooks are one-way, so approvals and the reply menu stay on WhatsApp and
 the web UI; Discord gets the same alerts and files. The webhook can be set on the setup
 page (kept encrypted) or with DISCORD_WEBHOOK_URL; the page's choice wins, and it is read
-on every send, so a change needs no restart.
+on every send, so a change needs no restart. The number WhatsApp messages go to works the
+same way: saved on the setup page, or WHATSAPP_NUMBER.
 
-A channel that is switched off (no Discord webhook) gets no rows; its pending rows wait.
+A channel that is switched off (no Discord webhook, no WhatsApp number) gets no rows; its
+pending rows wait.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 20
 DISCORD_KEY = "discord_webhook"
+WHATSAPP_KEY = "whatsapp_number"
 
 
 class NotifyError(Exception):
@@ -54,12 +57,15 @@ def active(notifier: Notifier) -> bool:
 
 
 class EvolutionNotifier:
-    """POST /message/sendText/{instance} and /message/sendMedia/{instance}, authenticated by the apikey header."""
+    """POST /message/sendText/{instance} and /message/sendMedia/{instance}, authenticated by the apikey header.
+    With `number`, where messages go is looked up on every send; without it, it is WHATSAPP_NUMBER."""
 
-    def __init__(self, cfg: EvolutionConfig, *, transport: httpx.BaseTransport | None = None) -> None:
-        if not cfg.number:
+    def __init__(self, cfg: EvolutionConfig, *, number: Callable[[], str | None] | None = None,
+                 transport: httpx.BaseTransport | None = None) -> None:
+        if number is None and not cfg.number:
             raise ValueError("WhatsApp messages need WHATSAPP_NUMBER")
         self.cfg = cfg
+        self._number = number or (lambda: cfg.number)
         self.client = httpx.Client(
             base_url=cfg.base_url,
             headers={"apikey": cfg.api_key},
@@ -67,16 +73,26 @@ class EvolutionNotifier:
             transport=transport,
         )
 
+    def active(self) -> bool:
+        return bool(self._number())
+
+    def _to(self) -> str:
+        number = self._number()
+        if not number:
+            raise NotifyError("WhatsApp has no number to send to; save one on the setup page")
+        return number
+
     def text(self, message: str) -> None:
-        self._post("sendText", {"number": self.cfg.number, "text": message})
+        self._post("sendText", {"number": self._to(), "text": message})
 
     def document(self, path: Path, caption: str) -> None:
         mimetype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         self._post(
             "sendMedia",
             {
-                "number": self.cfg.number,
-                "mediatype": "document",
+                "number": self._to(),
+                # a picture (the course plan) shows in the chat; everything else is a document
+                "mediatype": "image" if mimetype in ("image/png", "image/jpeg") else "document",
                 "mimetype": mimetype,
                 "caption": caption,
                 "fileName": path.name,
@@ -211,6 +227,45 @@ class DiscordSetting:
         return DiscordNotifier(url, transport=self.transport)
 
 
+class WhatsAppNumber:
+    """Where WhatsApp messages go, and the only number the bot answers: your own number,
+    saved on the setup page, else WHATSAPP_NUMBER."""
+
+    def __init__(self, kv: KeyValue | None, env_number: str | None = None) -> None:
+        self.kv, self.env_number = kv, env_number
+
+    def _stored(self) -> str | None:
+        raw = self.kv.get(WHATSAPP_KEY) if self.kv else None
+        return json.loads(raw).get("number") if raw else None
+
+    def get(self) -> str | None:
+        return self._stored() or self.env_number
+
+    def source(self) -> str | None:
+        """page, env, or None when there is no number."""
+        if self._stored():
+            return "page"
+        return "env" if self.env_number else None
+
+    @property
+    def editable(self) -> bool:
+        return self.kv is not None
+
+    def save(self, number: str) -> str:
+        digits = "".join(ch for ch in number if ch.isdigit())
+        if not 8 <= len(digits) <= 15 or digits.startswith("0"):
+            raise ValueError("Type the number with its country code and no leading 0, e.g. 923001234567")
+        if not self.editable:
+            raise ValueError("Saving a number here needs a store; set WHATSAPP_NUMBER instead")
+        self.kv.set(WHATSAPP_KEY, json.dumps({"number": digits}))
+        return digits
+
+    def remove(self) -> None:
+        """Forget the saved number; WHATSAPP_NUMBER applies again, if it is set."""
+        if self.kv:
+            self.kv.delete(WHATSAPP_KEY)
+
+
 def masked(url: str | None) -> str | None:
     """'discord.com/api/webhooks/1234…/••••Ab3x': enough to recognise, not enough to post."""
     if not url:
@@ -270,13 +325,20 @@ def send_test(channels: dict[str, Notifier], message: str) -> dict[str, str | No
 
 
 class Outbox:
+    # Channels that get only the messages addressed to them (WhatsApp groups get assignment notices)
+    OPT_IN = frozenset({"group"})
+
     def __init__(self, channels: dict[str, Notifier]) -> None:
         if not channels:
             raise ValueError("Outbox needs at least one channel")
         self.channels = channels
 
-    def queue(self, session: Session, kind: str, text: str, *, file: Path | None = None, job_id: int | None = None) -> None:
+    def queue(self, session: Session, kind: str, text: str, *, file: Path | None = None, job_id: int | None = None,
+              to: tuple[str, ...] | None = None) -> None:
+        """One row per active channel; `to` picks channels, else every channel but the opt-in ones."""
         for channel, notifier in self.channels.items():
+            if (channel not in to) if to is not None else (channel in self.OPT_IN):
+                continue
             if not active(notifier):
                 continue
             session.add(

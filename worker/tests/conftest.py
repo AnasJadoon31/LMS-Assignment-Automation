@@ -48,6 +48,7 @@ class PortalState:
     posts: list[dict] = field(default_factory=list)
     lms_requests: list[str] = field(default_factory=list)
     uploads: list[dict] = field(default_factory=list)  # Submit form posts to the LMS
+    deletes: list[dict] = field(default_factory=list)  # Delete links followed on the LMS
     uploaded: str | None = None  # the file name the LMS shows on row 3 after an upload
 
     @property
@@ -57,6 +58,9 @@ class PortalState:
     @property
     def lms(self) -> str:
         return f"http://localhost:{self.lms_port}"
+
+
+DELETE_ROW_3 = "includes/studentprocess.php?s=assignmentSubmissionDelete&aSubId=NTAwMDAwMg%3D%3D&a=MjMwMzY4&oc=MTAwMDAy"
 
 
 def assignments_page(oc: str | None, uploaded: str | None = None) -> str:
@@ -69,6 +73,8 @@ def assignments_page(oc: str | None, uploaded: str | None = None) -> str:
                             f'<td> <a href="Download.php?k={key}" class="label label-info">Submission</a></td>')
         html = re.sub(r'data-target="#modal-assignment-solution-3"(.*?)Submit</div>',
                       r'data-target="#modal-delete-assignment-submission-3"\1Delete</div>', html, flags=re.S)
+        html += ('<div class="modal fade" id="modal-delete-assignment-submission-3"><div class="modal-footer">'
+                 f'<a href="{DELETE_ROW_3}" type="submit" class="btn btn-danger">Delete Assignment Submission</a></div></div>')
     html = re.sub(r'(<option value="MTAw[^"]*")\s*selected', r"\1", html)
     if oc:
         html = html.replace(f'<option value="{oc}"', f'<option value="{oc}" selected')
@@ -172,6 +178,18 @@ def _handler(portal: PortalState, site: str):
                 return self._send(200, assignments_page(query.get("oc", [None])[0], portal.uploaded))
             if path == "/Student/Hop.php":
                 return self._send(302, headers={"Location": "/Student/Dashboard.php"})
+            if path == "/Student/includes/studentprocess.php":
+                raw = urlsplit(self.path).query
+                portal.lms_requests[-1] = f"{path}?{raw}"
+                if self._cookies().get("PHPSESSID") != "good":
+                    return self._send(302, headers={"Location": f"{portal.cms}/"})
+                query = {k: v[0] for k, v in parse_qs(raw).items()}
+                if query.get("s") != "assignmentSubmissionDelete":
+                    return self._send(404, "not found")
+                portal.deletes.append(query)
+                if query.get("a") == "MjMwMzY4":  # row 3, the one the fixture lets you upload to
+                    portal.uploaded = None
+                return self._send(302, headers={"Location": "/Student/Assignments.php?msg=deleted"})
             return self._send(404, "not found")
 
         def do_POST(self):

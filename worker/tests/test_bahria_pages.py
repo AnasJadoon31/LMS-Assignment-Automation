@@ -62,11 +62,28 @@ def test_download_key_first_field_is_the_student_not_the_assignment():
         ("1 October 2026-11:55 pm", datetime(2026, 10, 1, 23, 55, tzinfo=LMS_TZ)),
         ("12 October 2026-11:00 am", datetime(2026, 10, 12, 11, 0, tzinfo=LMS_TZ)),
         ("  23 September 2026-12:00 pm ", datetime(2026, 9, 23, 12, 0, tzinfo=LMS_TZ)),
+        ("Extended: 25 Oct 2026 - 11:55 PM", datetime(2026, 10, 25, 23, 55, tzinfo=LMS_TZ)),
+        ("3 November 2026 23:59", datetime(2026, 11, 3, 23, 59, tzinfo=LMS_TZ)),
         ("tomorrow", None),
     ],
 )
 def test_parse_deadline(text, expected):
     assert parse_deadline(text) == expected
+
+
+@pytest.mark.parametrize("cell", [
+    # the teacher extended it: the new label counts, before or after the Actual one
+    "<small class='label label-info' title='Actual'>11 October 2026-11:55 pm</small><br>"
+    "<small class='label label-danger' title='Extended'>Extended: 18 October 2026-11:55 pm</small>",
+    "<small class='label label-danger' title='Extended'>18 October 2026-11:55 pm</small> "
+    "<small class='label label-info' title='Actual'>11 October 2026-11:55 pm</small>",
+    # untitled labels: the latest date
+    "<small>18 October 2026-11:55 pm</small><small>11 October 2026-11:55 pm</small>",
+])
+def test_an_extended_deadline_is_read(cell):
+    html = ASSIGNMENTS_HTML.replace("<small class='label label-info' title='Actual'>11 October 2026-11:55 pm</small>", cell)
+    rows = parse_assignments_page(html).rows
+    assert rows[-1].deadline == datetime(2026, 10, 18, 23, 55, tzinfo=LMS_TZ)
 
 
 def test_changed_table_layout_breaks_the_contract():

@@ -1,6 +1,10 @@
 """DockerSandbox.deployed: Coolify renames a compose file's images, volumes and networks."""
 
+import re
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from lms_worker.solver.sandbox import DockerSandbox
 
@@ -59,6 +63,31 @@ def test_a_missing_sandbox_network_is_made():
     client = FakeDocker(["lms-solver:latest"], {"bridge": False}, {"worker": mounts("v")}, hostname_known=True)
     box = DockerSandbox.deployed("lms-solver:latest", "lms-sandbox", None, "/claude-home", client=client)
     assert box.network == "lms-sandbox" and client.created == ["lms-sandbox"]
+
+
+def test_a_pruned_sandbox_network_is_made_again_before_a_run(tmp_path):
+    client = FakeDocker(["lms-solver:latest"], {"lms-sandbox": False}, {"worker": mounts("v")}, hostname_known=True)
+    box = DockerSandbox.deployed("lms-solver:latest", "lms-sandbox", None, "/claude-home", client=client)
+    assert client.created == []  # it was there at start
+    del client._networks["lms-sandbox"]  # docker network prune, between runs
+
+    def no_containers(*args, **kwargs):
+        assert client.created == ["lms-sandbox"]  # made before the container that needs it
+        raise NotFound("this fake starts no containers")
+
+    client.containers.create = no_containers
+    with pytest.raises(NotFound):
+        box.run(tmp_path, {}, lambda line: True, 1)
+
+
+def test_no_compose_service_is_on_the_sandbox_network():
+    """Coolify attaches its proxy to every network one of its containers is on; then the proxy sits
+    next to the solver, and a deploy that changes the network fails because the proxy is still on it."""
+    compose = (Path(__file__).parents[2] / "docker-compose.yml").read_text()
+    code = "\n".join(line.split("#")[0] for line in compose.splitlines())
+    assert not re.search(r"^\s*sandbox:\s*$", code, re.M)  # the network is not declared
+    assert not re.search(r"networks:\s*\[[^\]]*sandbox|^\s*-\s*sandbox\s*$", code, re.M)  # and no service is on it
+    assert re.search(r"solver-image:(?:\n    .*)*\n    network_mode: none", code)
 
 
 def test_an_explicit_login_volume_wins():

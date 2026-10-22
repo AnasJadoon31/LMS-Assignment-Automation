@@ -7,7 +7,8 @@ from sqlalchemy import select
 
 from lms_worker.config import EvolutionConfig
 from lms_worker.db import Notification
-from lms_worker.notify import DiscordNotifier, EvolutionNotifier, NotifyError, Outbox, send_test
+from lms_worker.kv import FileKV
+from lms_worker.notify import DiscordNotifier, EvolutionNotifier, NotifyError, Outbox, WhatsAppNumber, active, send_test
 
 WEBHOOK = "https://discord.com/api/webhooks/123/tok"
 
@@ -53,6 +54,24 @@ def test_evolution_error_raises():
     cfg = EvolutionConfig(base_url="https://evo.example", api_key="x", instance="lms", number="1")
     with pytest.raises(NotifyError, match="401"):
         EvolutionNotifier(cfg, transport=rec.transport).text("hi")
+
+
+def test_evolution_sends_to_the_number_saved_now(tmp_path):
+    rec = Recorder(httpx.Response(201, json={}))
+    number = WhatsAppNumber(FileKV(tmp_path))
+    cfg = EvolutionConfig(base_url="https://evo.example", api_key="k3y", instance="lms")
+    n = EvolutionNotifier(cfg, number=number.get, transport=rec.transport)
+    assert not active(n)  # no number yet: the channel is off, nothing is queued for it
+    with pytest.raises(NotifyError, match="no number"):
+        n.text("too early")
+    number.save("923001234567")
+    assert active(n)
+    n.text("one")
+    number.save("923119999999")  # changed on the setup page: no restart needed
+    n.text("two")
+    assert [json.loads(r.content)["number"] for r in rec.requests] == ["923001234567", "923119999999"]
+    with pytest.raises(ValueError, match="WHATSAPP_NUMBER"):
+        EvolutionNotifier(cfg)  # no number and no way to look one up
 
 
 def test_discord_text_never_pings_and_is_trimmed():

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from lms_worker.api import SECRET_HEADER, create_app, webhook_secret
 from lms_worker.config import EvolutionConfig, PortalUrls, Settings
 from lms_worker.kv import DbKV
+from lms_worker.notify import WhatsAppNumber
 from lms_worker.whatsapp import EvolutionAdmin
 
 from .test_notify import Flaky
@@ -65,6 +66,15 @@ def test_extended_text_messages_count_too(client, phone):
     assert phone.sent[0][0].startswith("*LMS BOT*")
 
 
+def test_a_number_saved_on_the_setup_page_is_the_one_answered(sessions, phone):
+    kv = DbKV(sessions)
+    app = create_app(SETTINGS, sessions, kv, sender=phone, register_webhook=False)
+    WhatsAppNumber(kv).save("923119999999")
+    with TestClient(app) as c:
+        assert post(c, upsert(jid="923119999999@s.whatsapp.net")).json()["handled"]
+        assert post(c, upsert(msg_id="m2")).json()["reason"] == "not for the bot"  # WHATSAPP_NUMBER no longer applies
+
+
 def test_wrong_or_missing_secret_is_refused(client, phone):
     assert post(client, upsert(), secret="nope").status_code == 401
     assert post(client, upsert(), secret=None).status_code == 401
@@ -72,7 +82,7 @@ def test_wrong_or_missing_secret_is_refused(client, phone):
 
 
 def test_other_senders_groups_and_own_messages_are_ignored(client, phone):
-    assert post(client, upsert(jid="923119999999@s.whatsapp.net")).json()["reason"] == "sender"
+    assert post(client, upsert(jid="923119999999@s.whatsapp.net")).json()["reason"] == "not for the bot"
     assert post(client, upsert(jid="120363000000000000@g.us", msg_id="g")).json()["handled"] is False
     assert post(client, upsert(from_me=True, msg_id="me")).json()["handled"] is False
     assert post(client, {"event": "connection.update", "data": {}}).json()["handled"] is False
@@ -116,3 +126,35 @@ def test_the_webhook_is_registered_with_the_secret(sessions):
     assert body["url"] == "http://api:8000/api/webhooks/evolution"
     assert body["headers"] == {SECRET_HEADER: webhook_secret(SECRET_KEY)}
     assert body["events"] == ["MESSAGES_UPSERT"] and body["enabled"] is True
+
+
+def test_a_document_you_send_reaches_the_menu(sessions, phone, tmp_path):
+    import base64
+    import dataclasses
+
+    from lms_worker.api import _incoming
+
+    body = upsert("", msg_id="doc1")
+    body["data"]["message"] = {"documentWithCaptionMessage": {"message": {"documentMessage": {
+        "fileName": "My work.pdf", "mimetype": "application/pdf", "caption": "here"}}}}
+    number, _, text, media = _incoming(body)
+    assert (number, text, media["name"], media["inline"]) == (ME, "here", "My work.pdf", None)
+    picture = upsert("", msg_id="img1")
+    picture["data"]["message"] = {"imageMessage": {"mimetype": "image/jpeg"}, "base64": base64.b64encode(b"jpg").decode()}
+    assert _incoming(picture)[3]["name"] == "image.jpg"
+
+    class Media:
+        asked = []
+
+        def media(self, data):
+            self.asked.append(data["key"]["id"])
+            return b"%PDF mine"
+
+    admin = Media()
+    app = create_app(dataclasses.replace(SETTINGS, data_dir=tmp_path), sessions, DbKV(sessions), sender=phone, admin=admin,
+                     register_webhook=False, discord_chat=False)
+    with TestClient(app) as client:
+        assert post(client, body).json() == {"handled": True, "replies": 1}
+        assert admin.asked == ["doc1"]  # fetched from Evolution, then handed to the menu
+        assert phone.sent[-1][0].startswith("I did not know what that file is for.")
+        assert post(client, picture).json()["handled"] and admin.asked == ["doc1"]  # sent along: no second fetch

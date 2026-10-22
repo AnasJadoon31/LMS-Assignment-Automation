@@ -1,12 +1,13 @@
 """BahriaAdapter session handling. Kept apart from test_cms_login.py because the
 adapter starts its own Playwright, which cannot run beside a module-scoped one."""
 
+import dataclasses
 from pathlib import Path
 
 import pytest
 
 from lms_worker.lms.bahria import BahriaAdapter, upload_name
-from lms_worker.lms.errors import AlreadySubmitted, BadCredentials, LMSError, ReloginPaused, SessionExpired
+from lms_worker.lms.errors import AlreadySubmitted, BadCredentials, LMSError, NothingSubmitted, ReloginPaused, SessionExpired
 from lms_worker.lms.session import Throttle, session_is_valid
 
 from .conftest import make_settings
@@ -168,6 +169,40 @@ def test_submit_uploads_through_the_form_and_reads_the_row_back(portal, urls, tm
                               "data": b"%PDF solved", "type": "application/pdf"}
     assert [p for p in portal.lms_requests if "studentprocess" in p] == [
         "/Student/includes/studentprocess.php?s=assignmentSubmissionAdd"]  # never Delete
+
+
+def test_delete_follows_the_rows_own_link_and_reads_the_row_back(portal, urls, tmp_path):
+    pdf = tmp_path / "Assignment 01 - Recurrence Relations.pdf"
+    pdf.write_bytes(b"%PDF solved")
+    with logged_in(urls, tmp_path) as adapter:
+        lab = adapter.list_courses()[0]
+        closed, yours, a = adapter.list_assignments(lab)
+        with pytest.raises(NothingSubmitted):
+            adapter.delete_submission(a)  # open, nothing uploaded yet
+        receipt = adapter.submit(a, pdf)
+        assert adapter.delete_submission(a) == receipt.filename
+        assert not adapter.submission_status(a).submitted
+        assert adapter.submit(a, pdf).filename == receipt.filename  # open again, so it can go up again
+        with pytest.raises(LMSError, match="not open"):
+            adapter.delete_submission(closed)
+        with pytest.raises(LMSError, match="still shows the submission"):
+            adapter.delete_submission(yours)  # this fake keeps that row; a delete that did not take is reported
+    assert [d["a"] for d in portal.deletes] == ["MjMwMzY4", "MjMwMTcz"]
+    assert portal.deletes[0] == {"s": "assignmentSubmissionDelete", "aSubId": "NTAwMDAwMg==", "a": "MjMwMzY4", "oc": "MTAwMDAy"}
+
+
+def test_a_delete_link_for_another_course_is_not_followed(portal, urls, tmp_path, monkeypatch):
+    import lms_worker.lms.bahria as bahria
+
+    with logged_in(urls, tmp_path) as adapter:
+        lab = adapter.list_courses()[0]
+        yours = adapter.list_assignments(lab)[1]
+        row = adapter._row(yours)
+        moved = dataclasses.replace(row, delete_href=row.delete_href.replace("oc=MTAwMDAy", "oc=MTAwMDAz"))
+        monkeypatch.setattr(bahria.BahriaAdapter, "_row", lambda self, a: moved)
+        with pytest.raises(LMSError, match="not the one expected"):
+            adapter.delete_submission(yours)
+    assert portal.deletes == []
 
 
 def test_upload_names_have_no_special_symbols():

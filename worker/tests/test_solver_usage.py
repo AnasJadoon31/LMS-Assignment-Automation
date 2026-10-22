@@ -80,3 +80,18 @@ def test_status_line(tmp_path):
     guard.count_run(NOW)
     line = guard.status_line(NOW)
     assert "5-hour 62%" in line and "weekly 33%" in line and "Solver runs today: 1 of 6" in line
+
+
+def test_lifting_the_limits_for_a_day_takes_away_the_cap_and_the_early_stop_only(tmp_path):
+    kv = FileKV(tmp_path)
+    guard = UsageGuard(kv, pause_at=0.8, daily_cap=1)
+    assert guard.record(StreamReader().feed(limit_line(five=0.85)), NOW).reason == "headroom"
+    guard.count_run(NOW)
+    assert guard.paused(NOW).reason == "headroom" and guard.paused(NOW + timedelta(hours=3)).reason == "daily cap"
+    kv.set("solver_cap_lifted", NOW.astimezone(LMS_TZ).date().isoformat())
+    assert guard.paused(NOW) is None  # neither the cap nor the pause already recorded holds today
+    assert guard.record(StreamReader().feed(limit_line(five=0.95)), NOW) is None and guard.paused(NOW) is None
+    assert "limits lifted for today" in guard.status_line(NOW)
+    assert guard.record(StreamReader().feed(limit_line(status="rejected", five=1.0)), NOW).reason == "limit"  # the plan's own limit does
+    assert guard.paused(NOW).reason == "limit"
+    assert not guard.lifted(NOW + timedelta(days=1))  # back by itself tomorrow

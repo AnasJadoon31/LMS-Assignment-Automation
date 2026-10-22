@@ -17,8 +17,9 @@ link. Closed rows carry no id, so rows are identified by course and number.
 The Submit modal posts multipart to includes/studentprocess.php?s=assignmentSubmissionAdd
 with assignmentID, offeredCourseID, ocID, studentID and assignmentSubmissionFile
 (.pdf .doc .docx .xls .xlsx .zip, no special symbols in the name). Delete is a
-plain GET link. The poller follows neither; only the upload step posts the Submit form,
-after your approval, and nothing ever follows Delete.
+plain GET link to includes/studentprocess.php?s=assignmentSubmissionDelete with aSubId, a and
+oc. The poller follows neither; the upload step posts the Submit form after your approval,
+and the Delete link is followed only when you ask for a submission to be deleted.
 
 Papers.php lists lab exam papers (only lab courses get them), with ten columns: number,
 term (with its duration, e.g. "Mid Term (60 Minutes)"), paper file, remarks, your
@@ -118,6 +119,7 @@ class AssignmentRow:
     submission_hidden: bool = False  # papers: a submission link with no file (k=NA)
     paper_status: str | None = None  # papers: from the row colour, None if it is not one of the three
     submit_form: SubmitForm | None = None  # open rows with nothing submitted
+    delete_href: str | None = None  # open rows with a submission: the Delete link
 
     @property
     def deadline_passed(self) -> bool:
@@ -137,6 +139,13 @@ class AssignmentsPage:
     @property
     def current_semester(self) -> Option:
         return next((o for o in self.semesters if o.selected), self.semesters[0])
+
+
+def closes_at(deadline: datetime) -> datetime:
+    """When the LMS really stops taking uploads: the end of the deadline's day, whatever time
+    the teacher set. The posted time is still the deadline; this is only how long the Submit
+    button stays."""
+    return deadline.astimezone(LMS_TZ).replace(hour=23, minute=59, second=59, microsecond=0)
 
 
 def b64_id(value: str) -> str:
@@ -160,15 +169,37 @@ def decode_download_key(href: str) -> DownloadKey | None:
     return DownloadKey(student_id=parts[0], kind=parts[2], filename=parts[4])
 
 
+DATE = re.compile(r"(\d{1,2})[\s-]+([A-Za-z]{3,9})[\s,-]+(\d{4})\s*[-,@]?\s*(?:at\s*)?(\d{1,2}):(\d{2})(?::\d{2})?\s*([AaPp]\.?[Mm]\.?)?")
+
+
 def parse_deadline(text: str) -> datetime | None:
-    """'1 October 2026-11:55 pm' -> 2026-10-01 23:55 PKT."""
-    text = " ".join(text.split())
-    for fmt in ("%d %B %Y-%I:%M %p", "%d %B %Y - %I:%M %p", "%d %b %Y-%I:%M %p"):
-        try:
-            return datetime.strptime(text, fmt).replace(tzinfo=LMS_TZ)
-        except ValueError:
-            continue
-    return None
+    """'1 October 2026-11:55 pm' -> 2026-10-01 23:55 PKT. Also finds the date inside a longer
+    label ('Extended: 25 Oct 2026 - 11:55 PM') and takes a 24-hour time."""
+    m = DATE.search(" ".join(text.split()))
+    if not m:
+        return None
+    day, month, year, hour, minute, half = m.groups()
+    try:
+        month_no = datetime.strptime(month[:3].title(), "%b").month
+        hour_no = int(hour)
+        if half:
+            if not 1 <= hour_no <= 12:
+                return None
+            hour_no = hour_no % 12 + (12 if half[0].lower() == "p" else 0)
+        return datetime(int(year), month_no, int(day), hour_no, int(minute), tzinfo=LMS_TZ)
+    except ValueError:
+        return None
+
+
+def _deadline(cell: Tag) -> datetime | None:
+    """The deadline cell shows the date in a label titled 'Actual'. When the teacher extends it,
+    the LMS adds another label: the date that counts is that one, whichever order they come in,
+    else the latest date shown."""
+    dated = [(small, d) for small in cell.find_all(["small", "span"]) if (d := parse_deadline(_text(small)))]
+    if not dated:
+        return parse_deadline(_text(cell))
+    others = [d for small, d in dated if (small.get("title") or "").strip().lower() not in ("", "actual")]
+    return max(others or [d for _, d in dated])
 
 
 def _options(soup: BeautifulSoup, select_id: str) -> list[Option]:
@@ -210,6 +241,14 @@ def _assignment_id(soup: BeautifulSoup, action_cell: Tag) -> str | None:
         value = (query.get("a") or query.get("p") or [None])[0]
         return b64_id(value) if value else None
     return None
+
+
+def _delete_href(soup: BeautifulSoup, action_cell: Tag) -> str | None:
+    """The link in the row's Delete modal."""
+    trigger = action_cell.find("a", attrs={"data-target": True})
+    modal = soup.find(id=trigger["data-target"].lstrip("#")) if trigger else None
+    link = modal.find("a", href=re.compile(r"assignmentSubmissionDelete", re.I)) if modal else None
+    return link["href"] if link else None
 
 
 def _submit_form(soup: BeautifulSoup, action_cell: Tag) -> SubmitForm | None:
@@ -318,8 +357,7 @@ def _parse_row(soup: BeautifulSoup, cells: list[Tag], layout: Layout, tr: Tag | 
     else:
         title = _text(cells[layout.title])
     if starts_at is None:
-        labels = deadline.find_all(["small", "span"]) or [deadline]
-        ends_at = parse_deadline(_text(labels[-1]))
+        ends_at = _deadline(deadline)
     hidden = bool(s_link) and s_key is None and "k=NA" in (s_link.get("href") or "")
 
     return AssignmentRow(
@@ -338,6 +376,7 @@ def _parse_row(soup: BeautifulSoup, cells: list[Tag], layout: Layout, tr: Tag | 
         submission_hidden=hidden,
         paper_status=_paper_status(tr) if tr is not None and layout.term is not None else None,
         submit_form=_submit_form(soup, status) if _action(status) == "submit" else None,
+        delete_href=_delete_href(soup, status) if _action(status) == "delete" else None,
     )
 
 

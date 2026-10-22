@@ -22,6 +22,7 @@ dependencies = [
     "sqlalchemy>=2.0",
     "tzdata",
     "uvicorn>=0.30",
+    "websockets>=13",
 ]
 
 [project.optional-dependencies]

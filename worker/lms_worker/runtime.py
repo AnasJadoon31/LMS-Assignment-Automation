@@ -13,7 +13,8 @@ from .kv import DbKV, FileKV, KeyValue, SecretBox
 from .lms.bahria import BahriaAdapter
 from .lms.login_guard import LoginGuard
 from .lms.session import SessionStore
-from .notify import ConsoleNotifier, DiscordSetting, EvolutionNotifier, LiveDiscord, Notifier, Outbox, active
+from .notify import (ConsoleNotifier, DiscordSetting, EvolutionNotifier, LiveDiscord, Notifier, Outbox,
+                     WhatsAppNumber, active)
 from .watcher import Watcher
 
 
@@ -30,15 +31,23 @@ class Runtime:
         box = SecretBox(st.app_secret_key) if st.app_secret_key and self.sessions is not None else None
         return DiscordSetting(self.kv if box else None, box, st.discord_webhook_url)
 
+    def whatsapp_number(self) -> WhatsAppNumber:
+        evo = self.settings.evolution
+        return WhatsAppNumber(self.kv, evo.number if evo else None)
+
     def outbox(self) -> Outbox:
         """Every channel that is on gets every message; with none on, they go to the log."""
         channels: dict[str, Notifier] = {}
         evo = self.settings.evolution
-        if evo and evo.number:
-            channels["whatsapp"] = EvolutionNotifier(evo)
+        if evo:
+            channels["whatsapp"] = EvolutionNotifier(evo, number=self.whatsapp_number().get)
         channels["discord"] = LiveDiscord(self.discord())
         others = dict(channels)
         channels["console"] = ConsoleNotifier(when=lambda: not any(active(n) for n in others.values()))
+        if evo:  # WhatsApp groups chosen on the setup page: assignment notices only
+            from .groups import CHANNEL, GroupNotifier, WhatsAppGroups
+
+            channels[CHANNEL] = GroupNotifier(evo, WhatsAppGroups(self.kv if self.sessions is not None else None))
         return Outbox(channels)
 
     def drive(self):
@@ -69,13 +78,26 @@ class Runtime:
             self.sessions, self.kv, self.outbox(), sandbox, self.settings.data_dir,
             guard=UsageGuard(self.kv, pause_at=cfg.pause_at, daily_cap=cfg.daily_cap),
             login=ClaudeLogin(self.settings.claude_home), drive=self.drive(),
-            public_url=self.settings.public_url, model=cfg.model, env=env,
+            public_url=self.settings.public_url, model=cfg.model, env=env, materials=self.materials(),
         )
+
+    def materials(self):
+        """Lecture notes, plans and outlines, read with a client of its own: the poller's is busy polling."""
+        from .lms.session import SessionStore
+        from .materials import Materials
+
+        store = self.adapter.store
+        reader = BahriaAdapter(self.settings, store=SessionStore(store.kv, store.box), guard=self.adapter.guard)
+        return Materials(reader, self.settings.data_dir, self.kv)
 
     def watcher(self) -> Watcher:
         if self.sessions is None:
             raise ConfigError("Polling needs DATABASE_URL")
-        return Watcher(self.adapter, self.sessions, self.kv, self.outbox(), self.settings.data_dir)
+        from .groups import GroupNotices, WhatsAppGroups
+
+        outbox = self.outbox()
+        groups = GroupNotices(self.sessions, self.kv, outbox, WhatsAppGroups(self.kv))
+        return Watcher(self.adapter, self.sessions, self.kv, outbox, self.settings.data_dir, groups=groups)
 
 
 def build(settings: Settings, *, headless: bool = True, require_db: bool = False) -> Runtime:

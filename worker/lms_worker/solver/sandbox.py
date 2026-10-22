@@ -6,7 +6,8 @@ host paths are shared. Claude runs under your claude.ai login, kept in a
 Docker volume mounted as the solver's home: a full login, unlike a setup token, can read the
 theme artifact, and the volume keeps the refreshed login between runs. Log in once with
 the setup page (/setup). The container's network is the sandbox network: the internet,
-but none of the stack's services. Claude has every tool and no permission prompts inside it.
+but none of the stack's services. The worker makes that network, and makes it again before a
+run if it is gone; no compose service is on it. Claude has every tool and no permission prompts inside it.
 Limits: 2 CPUs, 4 GB memory, 512 processes and the run's time limit.
 
 LocalSandbox (development): the same entry script as a subprocess, with a clean environment
@@ -136,12 +137,27 @@ class DockerSandbox:
         box.image = _find_image(box.client, image)
         box.network = _find_network(box.client, network) if network else None
         box.login_volume = login_volume or _own_volume(box.client, login_path) or "lms-claude-home"
+        box._ensure_network()
         return box
+
+    def _ensure_network(self) -> None:
+        """Make the sandbox network if it is not there. Nothing else holds it between runs, so a
+        `docker network prune` (Coolify's cleanup can run one) removes it."""
+        if not self.network:
+            return
+        try:
+            self.client.networks.get(self.network)
+        except Exception:
+            try:
+                self.client.networks.create(self.network, driver="bridge")
+            except Exception:
+                pass  # the run fails with Docker's own message
 
     def work_path(self, work: Path) -> str:
         return "/work"
 
     def run(self, work: Path, env: dict[str, str], on_line: Callable[[str], bool], timeout: float) -> SandboxRun:
+        self._ensure_network()
         container = self.client.containers.create(
             self.image, command=["python3", "-m", "lms_sandbox.run"], environment=env, working_dir="/work",
             network=self.network, network_disabled=self.network is None, user=str(SANDBOX_UID),
@@ -208,7 +224,7 @@ def _find_image(client, name: str) -> str:
 
 
 def _find_network(client, name: str) -> str:
-    """The sandbox network by its name, else the one whose name ends in 'sandbox'; made if missing."""
+    """The sandbox network by its name, else one a compose file made whose name ends in 'sandbox'."""
     try:
         client.networks.get(name)
         return name
@@ -218,7 +234,6 @@ def _find_network(client, name: str) -> str:
         for net in client.networks.list():
             if net.name.endswith(("_sandbox", "-sandbox", name)):
                 return net.name
-        client.networks.create(name, driver="bridge")
     except Exception:
         pass
     return name

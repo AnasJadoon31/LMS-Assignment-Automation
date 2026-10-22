@@ -25,7 +25,7 @@ RUN fc-cache -f > /dev/null
 COPY --from=claude /claude /usr/local/bin/claude
 RUN pip install --break-system-packages --no-cache-dir \
         python-docx matplotlib networkx graphviz schemdraw numpy pandas scipy sympy scikit-learn pillow \
-        notebook nbclient nbformat ipykernel
+        notebook nbclient nbformat ipykernel markdown latex2mathml playwright==1.56.0
 
 COPY lms_sandbox /opt/lms/lms_sandbox
 # Claude Code with every feature on ("essential traffic only" would turn off the Artifact tool
@@ -36,6 +36,8 @@ ENV PYTHONPATH=/opt/lms \
     CLAUDE_CODE_ARTIFACT=1
 RUN printf '#!/bin/sh\nexec python3 -m lms_sandbox.notebook "$@"\n' > /usr/local/bin/lms-notebook \
     && chmod +x /usr/local/bin/lms-notebook \
+    && printf '#!/bin/sh\nexec python3 -m lms_sandbox.notes "$@"\n' > /usr/local/bin/lms-notes \
+    && chmod +x /usr/local/bin/lms-notes \
     && useradd --create-home --uid 10001 solver \
     && mkdir -p /work && chown solver /work
 
