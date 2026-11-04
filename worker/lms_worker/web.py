@@ -578,7 +578,7 @@ SETUP_BODY = """
     <div>Or use a token instead of signing in: run <code>claude setup-token</code> on any computer and paste the token. It takes effect at once.</div>
     <div class="row"><input id="c-token" type="password" autocomplete="off" placeholder="sk-ant-oat01-…"><button class="secondary" id="c-tsave">Save token</button></div>
     <div class="row"><button class="secondary" id="c-toff" hidden>Remove token</button></div>
-    <p class="muted">A token cannot read the theme artifact: save each course's theme on its course page.</p>
+    <p class="muted">A token cannot read the theme artifact: save a default theme on the Courses page (or one per course on its page).</p>
   </div>
   <div class="err" id="c-err"></div>
 </div>

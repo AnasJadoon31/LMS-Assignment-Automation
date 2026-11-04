@@ -964,3 +964,19 @@ def test_a_redo_after_the_saved_theme_changed_starts_a_fresh_session(solver, san
         actions.redo(s, s.get(Job, job_id), "bigger headings", "WhatsApp")
     solver.run_once()
     assert "resume" not in sandbox.runs[2]["job"] and sandbox.runs[2]["theme"] == ["README.md"]
+
+
+def test_the_default_theme_is_used_unless_the_course_has_its_own(solver, sandbox, sessions, tmp_path):
+    kv = DbKV(sessions)
+    themes.save(kv, themes.DEFAULT, {"README.md": b"# Default", "logo.png": b"\x89PNG"})
+    job_id = add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    assert sandbox.runs[0]["theme"] == ["README.md", "logo.png"] and "already saved in /work/theme" in sandbox.runs[0]["job"]["system"]
+
+    with sessions() as s:
+        course_id = s.get(Job, job_id).assignment.course_id
+    themes.save(kv, course_id, {"README.md": b"# Own"})
+    add_job(sessions, tmp_path, ref="155150:2", title="Sorting")
+    solver.run_once()
+    assert sandbox.runs[1]["theme"] == ["README.md"]

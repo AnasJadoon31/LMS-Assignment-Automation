@@ -1,8 +1,8 @@
 """Each course's report theme, uploaded on its course page and kept in the settings table.
 
-A solver run copies the course's theme into work/theme and reads it there, so it needs no
-access to the theme artifact (a CLAUDE_CODE_OAUTH_TOKEN is enough). Courses without one
-fall back to the theme artifact.
+A default theme, uploaded on the Courses page, serves every course without its own.
+A solver run copies the theme into work/theme and reads it there, so it needs no access to
+the theme artifact (a token is enough). With neither, it falls back to the theme artifact.
 """
 
 from __future__ import annotations
@@ -20,10 +20,11 @@ from .kv import KeyValue
 MAX_FILES = 200
 MAX_BYTES = 15 * 1024 * 1024
 PART = re.compile(r"[\w.\- ()&+,@]+")
+DEFAULT = "default"  # in place of a course id: the theme for courses without their own
 
 
-def _key(course_id: int) -> str:
-    return f"theme:{int(course_id)}"
+def _key(course_id: int | str) -> str:
+    return f"theme:{DEFAULT if course_id == DEFAULT else int(course_id)}"
 
 
 def clean_name(name: str) -> str:
@@ -51,11 +52,11 @@ def decode(files: list[tuple[str, str]]) -> dict[str, bytes]:
     return out
 
 
-def save(kv: KeyValue, course_id: int, files: dict[str, bytes]) -> None:
+def save(kv: KeyValue, course_id: int | str, files: dict[str, bytes]) -> None:
     kv.set(_key(course_id), json.dumps({k: base64.b64encode(v).decode() for k, v in files.items()}))
 
 
-def load(kv: KeyValue, course_id: int) -> dict[str, bytes] | None:
+def load(kv: KeyValue, course_id: int | str) -> dict[str, bytes] | None:
     raw = kv.get(_key(course_id))
     return {k: base64.b64decode(v) for k, v in json.loads(raw).items()} if raw else None
 
@@ -68,7 +69,12 @@ def mark(files: dict[str, bytes]) -> str:
     return h.hexdigest()[:16]
 
 
-def remove(kv: KeyValue, course_id: int) -> None:
+def for_course(kv: KeyValue, course_id: int) -> dict[str, bytes] | None:
+    """The course's own theme, else the default one."""
+    return load(kv, course_id) or load(kv, DEFAULT)
+
+
+def remove(kv: KeyValue, course_id: int | str) -> None:
     kv.delete(_key(course_id))
 
 

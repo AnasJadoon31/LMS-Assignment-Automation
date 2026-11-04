@@ -286,7 +286,7 @@ class Solver:
             work = self.job_dir(a, job) / "work"
             theme_files = files.listed(files.theme_dir(self.data_dir, course))
             references = files.listed(files.refs_dir(self.data_dir, a))
-            theme = themes.load(self.kv, course.id)  # the theme saved on the course page, used instead of the artifact
+            theme = themes.for_course(self.kv, course.id)  # saved on the course or Courses page, used instead of the artifact
             theme_mark = themes.mark(theme) if theme else None
             system = course_prompt(system_prompt(self.sandbox.work_path(work), course.theme or THEME_ARTIFACT, local=bool(theme)),
                                    course.prompt, course.prompt_replaces)

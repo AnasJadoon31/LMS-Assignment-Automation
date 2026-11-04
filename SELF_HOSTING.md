@@ -36,8 +36,9 @@ cannot. Sign in from the setup page; if the login ever expires, the bot tells yo
 links you there. To skip the sign-in, paste a token from `claude setup-token` on the
 setup page (Claude card); it takes effect at once, no restart. `CLAUDE_CODE_OAUTH_TOKEN`
 works too, and a token saved on the page overrides it. A token cannot read the theme
-artifact, so save each course's theme on its course page (**Report theme**: upload the
-theme folder). A course with a saved theme always uses it, whatever the sign-in.
+artifact, so upload the theme folder as the **Default report theme** on the Courses page;
+a course that needs a different one gets its own on its course page (**Report theme**).
+A saved theme is always used, whatever the sign-in.
 
 ## Option A: any machine with Docker
 

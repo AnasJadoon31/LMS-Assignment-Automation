@@ -7,7 +7,9 @@ GET  /api/courses                   the list as JSON
 GET  /api/courses/{id}              one course as JSON
 POST /api/courses/{id}/mode         {mode}: approve or auto
 POST /api/courses/{id}/theme        {files: [{name, data}]}: replace the course's report theme (data in base64)
-POST /api/courses/{id}/theme/remove back to the theme artifact
+POST /api/courses/{id}/theme/remove back to the default theme, or the theme artifact
+POST /api/themes/default            {files}: the theme for every course without its own
+POST /api/themes/default/remove
 POST /api/jobs/{id}/approve         upload the solved PDF
 POST /api/jobs/{id}/reject
 POST /api/jobs/{id}/redo            {note}: solve again with this note
@@ -96,7 +98,7 @@ def dashboard_router(auth: Auth, sessions: sessionmaker[Session], kv: KeyValue, 
                     },
                 })
             name = s.scalar(select(Course.semester_name).where(Course.semester == semester).limit(1)) if semester else None
-        return {"semester": name, "courses": out, "modes": MODE_WORDS}
+        return {"semester": name, "courses": out, "modes": MODE_WORDS, "theme": _listing(themes.load(kv, themes.DEFAULT))}
 
     @router.get("/api/courses/{course_id}")
     def get_course(request: Request, course_id: int) -> dict:
@@ -107,11 +109,11 @@ def dashboard_router(auth: Auth, sessions: sessionmaker[Session], kv: KeyValue, 
             if c is None:
                 raise HTTPException(status_code=404, detail="No such course")
             items = sorted(_items(s, c.id), key=_order)
-            theme = themes.load(kv, c.id) or {}
             return {
                 "course": {"id": c.id, "code": c.code, "name": c.name, "semester": c.semester_name, "mode": c.mode,
                            "lab": is_lab(c.name)},
-                "theme": [{"name": k, "size": len(v)} for k, v in sorted(theme.items())],
+                "theme": _listing(themes.load(kv, c.id)),
+                "default_theme": themes.load(kv, themes.DEFAULT) is not None,
                 "assignments": [_item(s, i, t) for i in items if i.kind != PAPER],
                 "papers": [_item(s, i, t) for i in items if i.kind == PAPER],
                 "modes": MODE_WORDS,
@@ -134,23 +136,40 @@ def dashboard_router(auth: Auth, sessions: sessionmaker[Session], kv: KeyValue, 
             if s.get(Course, course_id) is None:
                 raise HTTPException(status_code=404, detail="No such course")
 
-    @router.post("/api/courses/{course_id}/theme")
-    def save_theme(request: Request, course_id: int, body: Theme) -> dict:
-        auth.guard(request)
-        _course(course_id)
+    def _save_theme(slot: int | str, body: Theme) -> int:
         try:
             files = themes.decode([(f.name, f.data) for f in body.files])
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        themes.save(kv, course_id, files)
-        return {"message": f"Theme saved: {len(files)} files. The next solve for this course uses it."}
+        themes.save(kv, slot, files)
+        return len(files)
+
+    @router.post("/api/courses/{course_id}/theme")
+    def save_theme(request: Request, course_id: int, body: Theme) -> dict:
+        auth.guard(request)
+        _course(course_id)
+        n = _save_theme(course_id, body)
+        return {"message": f"Theme saved: {n} files. The next solve for this course uses it."}
 
     @router.post("/api/courses/{course_id}/theme/remove")
     def remove_theme(request: Request, course_id: int) -> dict:
         auth.guard(request)
         _course(course_id)
         themes.remove(kv, course_id)
-        return {"message": "Theme removed. This course uses the theme artifact again."}
+        fallback = "the default theme" if themes.load(kv, themes.DEFAULT) else "the theme artifact"
+        return {"message": f"Theme removed. This course uses {fallback} again."}
+
+    @router.post("/api/themes/default")
+    def save_default_theme(request: Request, body: Theme) -> dict:
+        auth.guard(request)
+        n = _save_theme(themes.DEFAULT, body)
+        return {"message": f"Default theme saved: {n} files. Every course without its own theme uses it from the next solve."}
+
+    @router.post("/api/themes/default/remove")
+    def remove_default_theme(request: Request) -> dict:
+        auth.guard(request)
+        themes.remove(kv, themes.DEFAULT)
+        return {"message": "Default theme removed. Courses without their own theme use the theme artifact again."}
 
     def job_action(request: Request, job_id: int, do: Callable[[Session, Job], tuple[bool, str]]) -> dict:
         auth.guard(request)
@@ -217,6 +236,10 @@ def dashboard_router(auth: Auth, sessions: sessionmaker[Session], kv: KeyValue, 
 
 def _semester(s: Session) -> str | None:
     return s.scalar(select(Course.semester).order_by(Course.last_seen_at.desc()).limit(1))
+
+
+def _listing(theme: dict[str, bytes] | None) -> list[dict]:
+    return [{"name": k, "size": len(v)} for k, v in sorted((theme or {}).items())]
 
 
 def _items(s: Session, course_id: int) -> list[Assignment]:
@@ -297,16 +320,70 @@ function modeControl(course, modes, onDone) {
 }
 """
 
+def theme_card(title: str, about: str) -> str:
+    return f"""<div class="card"><h2>{title}</h2>
+  <div>Theme: <span class="state" id="t-state">checking…</span></div>
+  <p class="muted">{about} The solver reads a saved theme straight from its files; without one it reads the theme artifact,
+  which needs a full claude.ai sign-in. Uploading replaces the saved theme.</p>
+  <input type="file" id="t-dir" webkitdirectory multiple hidden><input type="file" id="t-files" multiple hidden>
+  <div class="row"><button id="t-dir-btn">Upload a theme folder</button><button class="secondary" id="t-files-btn">Upload files</button>
+    <button class="secondary" id="t-off" hidden>Remove theme</button></div>
+  <details class="hist" id="t-list-wrap" hidden><summary>Files</summary><div id="t-list"></div></details>
+  <div class="err" id="t-err"></div>
+</div>"""
+
+
+# The page sets THEME_URL (where the card saves) and THEME_GONE (the confirm text for Remove)
+THEME_JS = """
+const kb = (n) => n < 1024 * 1024 ? Math.ceil(n / 1024) + " KB" : (n / 1024 / 1024).toFixed(1) + " MB";
+function b64(file) {
+  return new Promise((ok, bad) => { const r = new FileReader(); r.onerror = () => bad(r.error);
+    r.onload = () => ok(String(r.result).split(",", 2)[1] || ""); r.readAsDataURL(file); });
+}
+async function upload(input) {
+  const list = [...input.files].filter((f) => !f.name.startsWith(".")); input.value = "";
+  if (!list.length) return;
+  $("t-err").textContent = ""; $("t-state").textContent = "uploading…";
+  try {
+    // A folder's files come as "<folder>/<path>": drop the folder so its README sits at the top
+    const names = list.map((f) => f.webkitRelativePath || f.name);
+    const top = names.every((n) => n.includes("/") && n.split("/")[0] === names[0].split("/")[0]);
+    const files = await Promise.all(list.map(async (f, i) => ({ name: top ? names[i].slice(names[i].indexOf("/") + 1) : names[i], data: await b64(f) })));
+    const r = await call(THEME_URL, { files }); alert(r.message);
+  } catch (e) { $("t-err").textContent = e.message; }
+  load();
+}
+$("t-dir-btn").onclick = () => $("t-dir").click();
+$("t-files-btn").onclick = () => $("t-files").click();
+$("t-dir").onchange = () => upload($("t-dir"));
+$("t-files").onchange = () => upload($("t-files"));
+$("t-off").onclick = async () => { if (!confirm(THEME_GONE)) return;
+  try { await call(THEME_URL + "/remove", {}); } catch (e) { $("t-err").textContent = e.message; } load(); };
+function showTheme(files, none) {
+  const total = files.reduce((n, f) => n + f.size, 0);
+  $("t-state").textContent = files.length ? "saved · " + files.length + " files · " + kb(total) : none;
+  $("t-state").className = "state " + (files.length ? "ok" : "");
+  $("t-off").hidden = !files.length; $("t-list-wrap").hidden = !files.length;
+  $("t-list").innerHTML = files.map((f) => "<div>" + esc(f.name) + " · " + kb(f.size) + "</div>").join("");
+}
+"""
+
 COURSES_BODY = """
 <p class="muted" id="sem">Loading…</p>
+""" + theme_card("Default report theme", "The theme for every course that has no theme of its own: its README (student details and "
+                 "layout), colours and fonts, reference pages and logo. A course's own theme, saved on its page, wins.") + """
 <div id="list"></div>
 <div class="err" id="err"></div>
 """
 
 COURSES_JS = MODE_JS + """
+const THEME_URL = "/api/themes/default";
+const THEME_GONE = "Remove the default theme? Courses without their own theme go back to the theme artifact.";
+""" + THEME_JS + """
 async function load() {
   let d;
   try { d = await call("/api/courses"); } catch (e) { $("err").textContent = e.message; return; }
+  showTheme(d.theme, "none; courses without their own use the theme artifact");
   $("sem").textContent = d.courses.length ? (d.semester || "This semester") + " · " + d.courses.length + " courses. Approve sends you the PDF first; auto uploads without asking. Solving (bypass, manual, auto) and safe mode are set in the chat menu."
                                           : "No courses yet: they appear after the first check of the LMS.";
   const list = $("list"); list.innerHTML = "";
@@ -331,17 +408,8 @@ load(); setInterval(load, 60000);
 COURSE_BODY = """
 <p><a href="/courses">← All courses</a></p>
 <div class="card"><h2 id="name">Loading…</h2><div class="muted" id="sub"></div><div id="mode"></div></div>
-<div class="card"><h2>Report theme</h2>
-  <div>Theme: <span class="state" id="t-state">checking…</span></div>
-  <p class="muted">The theme this course's reports follow: its README (student details and layout), colours and fonts, reference pages and logo.
-  Saved here, the solver reads it straight from these files; without one it reads the theme artifact, which needs a full claude.ai sign-in.
-  Uploading replaces the saved theme.</p>
-  <input type="file" id="t-dir" webkitdirectory multiple hidden><input type="file" id="t-files" multiple hidden>
-  <div class="row"><button id="t-dir-btn">Upload a theme folder</button><button class="secondary" id="t-files-btn">Upload files</button>
-    <button class="secondary" id="t-off" hidden>Remove theme</button></div>
-  <details class="hist" id="t-list-wrap" hidden><summary>Files</summary><div id="t-list"></div></details>
-  <div class="err" id="t-err"></div>
-</div>
+""" + theme_card("Report theme", "The theme this course's reports follow: its README (student details and layout), colours "
+                 "and fonts, reference pages and logo. Without one, the course uses the default theme from the Courses page.") + """
 <div class="card"><h2>Assignments</h2><div id="assignments"></div></div>
 <div class="card" id="papers-card" hidden><h2>Lab papers</h2>
   <p class="muted">Tracked only: the service never solves or uploads papers.</p><div id="papers"></div></div>
@@ -350,6 +418,9 @@ COURSE_BODY = """
 
 COURSE_JS = MODE_JS + """
 const ID = __ID__;
+const THEME_URL = "/api/courses/" + ID + "/theme";
+const THEME_GONE = "Remove this course's theme? Its reports go back to the default theme, or the theme artifact without one.";
+""" + THEME_JS + """
 function itemHtml(i) {
   const what = (i.kind === "paper" ? "Paper " : "Assignment ") + esc(i.number);
   let h = '<div class="item"><h3>' + esc(i.title) + '</h3><div class="muted">' + what + " · " + esc(i.when) + "</div>";
@@ -382,37 +453,6 @@ async function act(btn) {
   try { const r = await call(path, body); alert(r.message); } catch (e) { alert(e.message); }
   load();
 }
-const kb = (n) => n < 1024 * 1024 ? Math.ceil(n / 1024) + " KB" : (n / 1024 / 1024).toFixed(1) + " MB";
-function b64(file) {
-  return new Promise((ok, bad) => { const r = new FileReader(); r.onerror = () => bad(r.error);
-    r.onload = () => ok(String(r.result).split(",", 2)[1] || ""); r.readAsDataURL(file); });
-}
-async function upload(input) {
-  const list = [...input.files].filter((f) => !f.name.startsWith(".")); input.value = "";
-  if (!list.length) return;
-  $("t-err").textContent = ""; $("t-state").textContent = "uploading…";
-  try {
-    // A folder's files come as "<folder>/<path>": drop the folder so its README sits at the top
-    const names = list.map((f) => f.webkitRelativePath || f.name);
-    const top = names.every((n) => n.includes("/") && n.split("/")[0] === names[0].split("/")[0]);
-    const files = await Promise.all(list.map(async (f, i) => ({ name: top ? names[i].slice(names[i].indexOf("/") + 1) : names[i], data: await b64(f) })));
-    const r = await call("/api/courses/" + ID + "/theme", { files }); alert(r.message);
-  } catch (e) { $("t-err").textContent = e.message; }
-  load();
-}
-$("t-dir-btn").onclick = () => $("t-dir").click();
-$("t-files-btn").onclick = () => $("t-files").click();
-$("t-dir").onchange = () => upload($("t-dir"));
-$("t-files").onchange = () => upload($("t-files"));
-$("t-off").onclick = async () => { if (!confirm("Remove this course's theme? Its reports go back to the theme artifact.")) return;
-  try { await call("/api/courses/" + ID + "/theme/remove", {}); } catch (e) { $("t-err").textContent = e.message; } load(); };
-function showTheme(files) {
-  const total = files.reduce((n, f) => n + f.size, 0);
-  $("t-state").textContent = files.length ? "saved · " + files.length + " files · " + kb(total) : "none; uses the theme artifact";
-  $("t-state").className = "state " + (files.length ? "ok" : "");
-  $("t-off").hidden = !files.length; $("t-list-wrap").hidden = !files.length;
-  $("t-list").innerHTML = files.map((f) => "<div>" + esc(f.name) + " · " + kb(f.size) + "</div>").join("");
-}
 async function load() {
   let d;
   try { d = await call("/api/courses/" + ID); } catch (e) { $("err").textContent = e.message; return; }
@@ -420,7 +460,7 @@ async function load() {
   $("name").textContent = d.course.name;
   $("sub").textContent = d.course.code + (d.course.semester ? " · " + d.course.semester : "");
   const m = $("mode"); m.innerHTML = ""; m.appendChild(modeControl(d.course, d.modes, load));
-  showTheme(d.theme);
+  showTheme(d.theme, d.default_theme ? "none; uses the default theme" : "none; uses the theme artifact");
   $("assignments").innerHTML = d.assignments.map(itemHtml).join("") || '<p class="muted">No assignments yet.</p>';
   $("papers-card").hidden = !d.course.lab;
   $("papers").innerHTML = d.papers.map(itemHtml).join("") || '<p class="muted">No lab papers yet.</p>';

@@ -178,3 +178,19 @@ def test_a_course_theme_is_saved_listed_and_removed(client, semester, sessions):
         {"name": "README.md", "size": 7}, {"name": "components/cover/preview.html", "size": 3}]
     assert client.post(url + "/remove", headers=H).status_code == 200
     assert client.get(f"/api/courses/{semester['daa']}", headers=H).json()["theme"] == []
+
+
+def test_a_default_theme_serves_courses_without_their_own(client, semester):
+    import base64
+
+    signed_in(client)
+    files = [{"name": "README.md", "data": base64.b64encode(b"# Default").decode()}]
+    assert "Default report theme" in client.get("/courses").text
+    assert client.get("/api/courses", headers=H).json()["theme"] == []
+    assert client.post("/api/themes/default", json={"files": files}).status_code == 403  # no X-LMS header
+    assert client.post("/api/themes/default", headers=H, json={"files": files}).status_code == 200
+    assert client.get("/api/courses", headers=H).json()["theme"] == [{"name": "README.md", "size": 9}]
+    course = client.get(f"/api/courses/{semester['daa']}", headers=H).json()
+    assert course["theme"] == [] and course["default_theme"] is True
+    assert client.post("/api/themes/default/remove", headers=H).status_code == 200
+    assert client.get(f"/api/courses/{semester['daa']}", headers=H).json()["default_theme"] is False
