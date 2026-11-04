@@ -9,7 +9,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import select
 
-from lms_worker import actions, files
+from lms_worker import actions, files, themes
 from lms_worker.claude_login import LoginStatus
 from lms_worker.db import Artifact, Assignment, Course, Event, Job, JobState
 from lms_worker.kv import DbKV
@@ -57,7 +57,9 @@ class FakeSandbox:
 
     def run(self, work, env, on_line, timeout):
         self.runs.append({"job": json.loads((work / "job.json").read_text()), "env": env,
-                          "files": sorted(p.name for p in (work / "in").iterdir() if p.is_file())})
+                          "files": sorted(p.name for p in (work / "in").iterdir() if p.is_file()),
+                          "theme": sorted(str(p.relative_to(work / "theme")) for p in (work / "theme").rglob("*") if p.is_file())
+                          if (work / "theme").is_dir() else []})
         return self.script(work, on_line)
 
 
@@ -917,3 +919,48 @@ def test_assignments_go_before_summaries_and_a_failed_summary_is_retried_once(so
         assert s.get(Summary, sm_id).state == "FAILED"
     assert channel.sent[-1][0].startswith("The lecture summary could not be written: Design & Analysis of Algorithms, weeks 1, 2\n"
                                           "the run ended without notes.pdf")
+
+
+def test_a_course_theme_is_copied_in_and_replaces_the_artifact(solver, sandbox, sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    assert sandbox.runs[0]["theme"] == [] and "Artifact tool" in sandbox.runs[0]["job"]["system"]
+
+    with sessions() as s:
+        course_id = s.get(Job, job_id).assignment.course_id
+    themes.save(DbKV(sessions), course_id, {"README.md": b"# Theme", "assets/logo.png": b"\x89PNG"})
+    add_job(sessions, tmp_path, ref="155150:2", title="Sorting")
+    solver.run_once()
+    run = sandbox.runs[1]
+    assert run["theme"] == ["README.md", "assets/logo.png"]
+    assert "already saved in /work/theme" in run["job"]["system"] and "Artifact tool" not in run["job"]["system"]
+
+
+def test_the_current_token_goes_to_each_run(solver, sandbox, sessions, tmp_path):
+    solver.login = FakeLogin()
+    solver.login.token = "sk-ant-oat01-pasted-on-the-page"
+    add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    assert sandbox.runs[0]["env"] == {"HTTPS_PROXY": "http://proxy.example:3128",
+                                      "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-pasted-on-the-page"}
+
+
+def test_a_redo_after_the_saved_theme_changed_starts_a_fresh_session(solver, sandbox, sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path)
+    with sessions() as s:
+        course_id = s.get(Job, job_id).assignment.course_id
+    themes.save(DbKV(sessions), course_id, {"README.md": b"# Theme"})
+    sandbox.script = play(stream(SUMMARY))
+    solver.run_once()
+    with sessions.begin() as s:
+        actions.redo(s, s.get(Job, job_id), "bigger headings", "WhatsApp")
+    solver.run_once()
+    assert sandbox.runs[1]["job"]["resume"] == "sess-1"  # same theme: the session goes on
+
+    themes.save(DbKV(sessions), course_id, {"README.md": b"# Theme, blue now"})
+    with sessions.begin() as s:
+        actions.redo(s, s.get(Job, job_id), "bigger headings", "WhatsApp")
+    solver.run_once()
+    assert "resume" not in sandbox.runs[2]["job"] and sandbox.runs[2]["theme"] == ["README.md"]

@@ -160,3 +160,21 @@ def test_a_webhook_from_the_environment_shows_and_can_be_turned_off(sessions, ho
     assert (setting.url(), setting.source()) == (WEBHOOK, "env")
     setting.turn_off()
     assert (setting.url(), setting.source()) == (None, None)
+
+
+def test_a_course_theme_is_saved_listed_and_removed(client, semester, sessions):
+    import base64
+
+    signed_in(client)
+    url = f"/api/courses/{semester['daa']}/theme"
+    b64 = lambda b: base64.b64encode(b).decode()  # noqa: E731
+    assert client.get(f"/api/courses/{semester['daa']}", headers=H).json()["theme"] == []
+    assert client.post(url, headers=H, json={"files": [{"name": "../x", "data": b64(b"x")}]}).status_code == 400
+    assert client.post(url, headers=H, json={"files": [{"name": "a.md", "data": "not base64!"}]}).status_code == 400
+    assert client.post("/api/courses/9999/theme", headers=H, json={"files": [{"name": "a.md", "data": b64(b"x")}]}).status_code == 404
+    files = [{"name": "README.md", "data": b64(b"# Theme")}, {"name": "components/cover/preview.html", "data": b64(b"<p>")}]
+    assert client.post(url, headers=H, json={"files": files}).status_code == 200
+    assert client.get(f"/api/courses/{semester['daa']}", headers=H).json()["theme"] == [
+        {"name": "README.md", "size": 7}, {"name": "components/cover/preview.html", "size": 3}]
+    assert client.post(url + "/remove", headers=H).status_code == 200
+    assert client.get(f"/api/courses/{semester['daa']}", headers=H).json()["theme"] == []

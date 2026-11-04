@@ -5,6 +5,8 @@ GET  /login, POST /login, /logout   password sign-in; a signed cookie for 7 days
 GET  /api/setup/status              Claude's login and WhatsApp's link
 POST /api/setup/claude/start        start a Claude sign-in; returns the link to open
 POST /api/setup/claude/code         {code}: the code the sign-in page shows
+POST /api/setup/claude/token        {token}: use a `claude setup-token` token instead of the sign-in
+POST /api/setup/claude/token/remove
 POST /api/setup/whatsapp/link       {number?}: a QR code, or a pairing code for that number
 GET  /api/setup/whatsapp/qr         the current QR code (they rotate)
 POST /api/setup/whatsapp/unlink
@@ -188,7 +190,8 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
         else:
             s = login.status()
             out["claude"] = {"available": True, "logged_in": s.logged_in, "method": s.method, "email": s.email,
-                             "detail": s.detail, "waiting": login.waiting}
+                             "detail": s.detail, "waiting": login.waiting, "token": login.token_source(),
+                             "token_editable": bool(login.kv and login.box)}
         if admin is None:
             out["whatsapp"] = {"available": False, "detail": "Set EVOLUTION_API_URL and EVOLUTION_API_KEY"}
         else:
@@ -323,6 +326,25 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
         except LoginError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return {"logged_in": s.logged_in, "email": s.email, "method": s.method}
+
+    @router.post("/api/setup/claude/token")
+    def claude_token(request: Request, body: Token) -> dict:
+        guard(request)
+        if login is None:
+            raise HTTPException(status_code=503, detail="Claude Code is not installed in this container")
+        try:
+            s = login.save_token(body.token)
+        except LoginError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"logged_in": s.logged_in, "method": s.method, "detail": s.detail}
+
+    @router.post("/api/setup/claude/token/remove")
+    def claude_token_remove(request: Request) -> dict:
+        guard(request)
+        if login is None:
+            raise HTTPException(status_code=503, detail="Claude Code is not installed in this container")
+        login.remove_token()
+        return {"ok": True}
 
     @router.post("/api/setup/whatsapp/link")
     def whatsapp_link(request: Request, body: Number) -> dict:
@@ -552,6 +574,12 @@ SETUP_BODY = """
     <div>2. Paste the code the page shows:</div>
     <div class="row"><input id="c-code" autocomplete="off" placeholder="Code from the sign-in page"><button id="c-send">Finish</button></div>
   </div>
+  <div class="step" id="c-tok">
+    <div>Or use a token instead of signing in: run <code>claude setup-token</code> on any computer and paste the token. It takes effect at once.</div>
+    <div class="row"><input id="c-token" type="password" autocomplete="off" placeholder="sk-ant-oat01-…"><button class="secondary" id="c-tsave">Save token</button></div>
+    <div class="row"><button class="secondary" id="c-toff" hidden>Remove token</button></div>
+    <p class="muted">A token cannot read the theme artifact: save each course's theme on its course page.</p>
+  </div>
   <div class="err" id="c-err"></div>
 </div>
 <div class="card" id="wa">
@@ -630,6 +658,10 @@ async function refresh() {
   $("c-detail").textContent = c.logged_in ? [c.email, c.method].filter(Boolean).join(" · ") : (c.detail || "Solving waits until Claude is signed in.");
   $("c-start").textContent = c.logged_in ? "Sign in again" : "Sign in to Claude";
   $("c-start").hidden = !c.available;
+  $("c-tok").hidden = !c.available || !c.token_editable;
+  $("c-toff").hidden = c.token !== "page";
+  $("c-tsave").textContent = c.token === "page" ? "Replace token" : "Save token";
+  if (c.token) $("c-detail").textContent += (c.token === "page" ? " · token saved here" : " · token from CLAUDE_CODE_OAUTH_TOKEN");
   const w = s.whatsapp || {};
   const words = { open: "linked", connecting: "linking…", close: "not linked", missing: "not set up", unreachable: "Evolution API not reachable" };
   $("w-state").textContent = !w.available ? "not configured" : (words[w.state] || w.state);
@@ -692,6 +724,15 @@ $("c-send").onclick = async () => {
   catch (e) { $("c-err").textContent = e.message; }
   busy($("c-send"), false);
 };
+$("c-tsave").onclick = async () => {
+  $("c-err").textContent = ""; busy($("c-tsave"), true);
+  try { const r = await call("/api/setup/claude/token", { token: $("c-token").value }); $("c-token").value = "";
+        if (!r.logged_in) $("c-err").textContent = "Token saved, but Claude Code does not accept it: " + (r.detail || "check the token"); await refresh(); }
+  catch (e) { $("c-err").textContent = e.message; }
+  busy($("c-tsave"), false);
+};
+$("c-toff").onclick = async () => { if (!confirm("Remove the saved token? Claude goes back to the sign-in" + " (or CLAUDE_CODE_OAUTH_TOKEN).")) return;
+  try { await call("/api/setup/claude/token/remove", {}); await refresh(); } catch (e) { $("c-err").textContent = e.message; } };
 async function link(number) {
   $("w-err").textContent = "";
   try {

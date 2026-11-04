@@ -2,8 +2,9 @@
 
 One run does everything: read the theme artifact, read the sheet, solve it (programs or theory,
 with diagrams), build the report in the theme, convert it to PDF, look at every page, fix, and
-report back. The theme is read from the artifact itself on every run, with the Artifact tool of
-the claude.ai login the sandbox runs under.
+report back. The theme is the course's own, saved on its course page and copied into the work
+folder, or else read from the artifact itself on every run, with the Artifact tool of the
+claude.ai login the sandbox runs under.
 """
 
 from __future__ import annotations
@@ -52,19 +53,38 @@ SUMMARY_SCHEMA = {
 }
 
 
-def system_prompt(work: str = "/work", theme: str = THEME_ARTIFACT) -> str:
+def system_prompt(work: str = "/work", theme: str = THEME_ARTIFACT, local: bool = False) -> str:
+    """local: the course's theme files are already in {work}/theme; the artifact is not used."""
+    if local:
+        about = (f"The report theme is the student's theme for this course, already saved in {work}/theme. It is the only theme: "
+                 "its README holds the student details and the layout; the other files hold the colours, fonts and sizes, "
+                 "the reference pages for the cover, an exercise page, a code page and figures, and the logo.")
+        folder = "the theme's files, already there; read them, never change them"
+        step1 = (f"1. Read every file in {work}/theme, starting with the README (look at the images and render any HTML "
+                 "reference page to see it). Follow the README exactly. If there is no usable theme there, stop with status "
+                 "blocked and say so.")
+    else:
+        about = (f"The report theme is the student's design system artifact {theme}. It is the only theme: its README holds "
+                 "the student details and the layout, tokens.json the colours, fonts and sizes, components/*/preview.html and "
+                 "README.md the reference pages for the cover, an exercise page, a code page and figures, and its Logos asset "
+                 "group the logo.")
+        folder = "save the theme artifact's files here (step 1)"
+        step1 = (f"1. Read the theme artifact with the Artifact tool: list its files, then read project/README.md, "
+                 f"project/tokens.json, every project/components/*/README.md and preview.html, and the logo from its Logos "
+                 f"assets, saving them under {work}/theme (out_dir). Follow the README exactly. If you cannot read the "
+                 "artifact, stop with status blocked and say so.")
     return f"""You solve a university assignment and produce the report the student submits.
 
-The report theme is the student's design system artifact {theme}. It is the only theme: its README holds the student details and the layout, tokens.json the colours, fonts and sizes, components/*/preview.html and README.md the reference pages for the cover, an exercise page, a code page and figures, and its Logos asset group the logo.
+{about}
 
 The work folder is {work}:
 - {work}/in: the assignment as posted on the LMS. If a sheet is a PDF, Word or PowerPoint file, {work}/in/pages has every page as an image; look at them so figures and tables in the question are not missed.
-- {work}/theme: save the theme artifact's files here (step 1).
+- {work}/theme: {folder}.
 - {work}/code: write programs here.
 - {work}/out: the finished report goes here as report.docx and report.pdf.
 
 How to work:
-1. Read the theme artifact with the Artifact tool: list its files, then read project/README.md, project/tokens.json, every project/components/*/README.md and preview.html, and the logo from its Logos assets, saving them under {work}/theme (out_dir). Follow the README exactly. If you cannot read the artifact, stop with status blocked and say so.
+{step1}
 2. Read the whole sheet. For each question decide whether it needs a program or a written (theory) answer; an assignment can mix both.
 3. Solve every part. Programs follow the theme's writing voice; run them and use only their real output. Python programs also go into Jupyter cells with lms-notebook (below) for the notebook and output screenshots the theme asks for. Programs in other languages: compile and run them here and show their real output. Theory answers follow the theme's Theory questions section; draw every diagram that helps, in the theme's Figures style (matplotlib, graphviz and schemdraw are installed, and `from lms_sandbox.figures import draw_graph` draws graphs in the theme).
 4. Build {work}/out/report.docx with python-docx so that it looks exactly like the theme: cover page, header and footer, banners, Task and Result boxes, section headings, tables, captions, code blocks, screenshots and figures, with the sizes and colours from the theme.
@@ -91,7 +111,7 @@ NEVER_ASK = """Do not ask the student anything: where the sheet leaves something
 
 
 def with_extras(system: str, work: str, *, ask: bool, theme_files: list[str], references: list[str],
-                lectures: list[str] | None = None, lectures_must: bool = False) -> str:
+                lectures: list[str] | None = None, lectures_must: bool = False, local_theme: bool = False) -> str:
     """What changes from one run to the next: whether Claude may ask first, the files you sent,
     and the teacher's lecture notes for this assignment."""
     lines = [system, "", ASK_FIRST if ask else NEVER_ASK]
@@ -102,7 +122,8 @@ def with_extras(system: str, work: str, *, ask: bool, theme_files: list[str], re
                      "the way the lectures teach it: their methods, notation and terms.")
     if theme_files:
         lines.append(f"The student also sent theme reference files for this course, in {work}/in/theme-reference: "
-                     f"{', '.join(theme_files)}. Read them. The report still follows the theme artifact; where these files "
+                     f"{', '.join(theme_files)}. Read them. The report still follows the theme "
+                     f"{f'in {work}/theme' if local_theme else 'artifact'}; where these files "
                      "show a format the artifact does not have, or a different one the teacher wants, follow the files.")
     if references:
         lines.append(f"The student sent reference files for this assignment, in {work}/in/reference: {', '.join(references)}. "

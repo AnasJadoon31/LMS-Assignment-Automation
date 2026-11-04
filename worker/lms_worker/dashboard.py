@@ -6,6 +6,8 @@ GET  /courses/{id}                  one course: assignments, lab papers, files, 
 GET  /api/courses                   the list as JSON
 GET  /api/courses/{id}              one course as JSON
 POST /api/courses/{id}/mode         {mode}: approve or auto
+POST /api/courses/{id}/theme        {files: [{name, data}]}: replace the course's report theme (data in base64)
+POST /api/courses/{id}/theme/remove back to the theme artifact
 POST /api/jobs/{id}/approve         upload the solved PDF
 POST /api/jobs/{id}/reject
 POST /api/jobs/{id}/redo            {note}: solve again with this note
@@ -25,7 +27,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
-from . import actions
+from . import actions, themes
 from .actions import MODE_WORDS
 from .bot import _in, _paper_timing, _question_file, _relative, _status, _when, _window
 from .db.models import Artifact, Assignment, Course, Event, Job, JobState, utcnow
@@ -43,6 +45,15 @@ class Mode(BaseModel):
 
 class Note(BaseModel):
     note: str = ""
+
+
+class ThemeFile(BaseModel):
+    name: str
+    data: str  # base64
+
+
+class Theme(BaseModel):
+    files: list[ThemeFile]
 
 
 def dashboard_router(auth: Auth, sessions: sessionmaker[Session], kv: KeyValue, *,
@@ -96,9 +107,11 @@ def dashboard_router(auth: Auth, sessions: sessionmaker[Session], kv: KeyValue, 
             if c is None:
                 raise HTTPException(status_code=404, detail="No such course")
             items = sorted(_items(s, c.id), key=_order)
+            theme = themes.load(kv, c.id) or {}
             return {
                 "course": {"id": c.id, "code": c.code, "name": c.name, "semester": c.semester_name, "mode": c.mode,
                            "lab": is_lab(c.name)},
+                "theme": [{"name": k, "size": len(v)} for k, v in sorted(theme.items())],
                 "assignments": [_item(s, i, t) for i in items if i.kind != PAPER],
                 "papers": [_item(s, i, t) for i in items if i.kind == PAPER],
                 "modes": MODE_WORDS,
@@ -115,6 +128,29 @@ def dashboard_router(auth: Auth, sessions: sessionmaker[Session], kv: KeyValue, 
         if not ok:
             raise HTTPException(status_code=400, detail=message)
         return {"message": message}
+
+    def _course(course_id: int) -> None:
+        with sessions() as s:
+            if s.get(Course, course_id) is None:
+                raise HTTPException(status_code=404, detail="No such course")
+
+    @router.post("/api/courses/{course_id}/theme")
+    def save_theme(request: Request, course_id: int, body: Theme) -> dict:
+        auth.guard(request)
+        _course(course_id)
+        try:
+            files = themes.decode([(f.name, f.data) for f in body.files])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        themes.save(kv, course_id, files)
+        return {"message": f"Theme saved: {len(files)} files. The next solve for this course uses it."}
+
+    @router.post("/api/courses/{course_id}/theme/remove")
+    def remove_theme(request: Request, course_id: int) -> dict:
+        auth.guard(request)
+        _course(course_id)
+        themes.remove(kv, course_id)
+        return {"message": "Theme removed. This course uses the theme artifact again."}
 
     def job_action(request: Request, job_id: int, do: Callable[[Session, Job], tuple[bool, str]]) -> dict:
         auth.guard(request)
@@ -295,6 +331,17 @@ load(); setInterval(load, 60000);
 COURSE_BODY = """
 <p><a href="/courses">← All courses</a></p>
 <div class="card"><h2 id="name">Loading…</h2><div class="muted" id="sub"></div><div id="mode"></div></div>
+<div class="card"><h2>Report theme</h2>
+  <div>Theme: <span class="state" id="t-state">checking…</span></div>
+  <p class="muted">The theme this course's reports follow: its README (student details and layout), colours and fonts, reference pages and logo.
+  Saved here, the solver reads it straight from these files; without one it reads the theme artifact, which needs a full claude.ai sign-in.
+  Uploading replaces the saved theme.</p>
+  <input type="file" id="t-dir" webkitdirectory multiple hidden><input type="file" id="t-files" multiple hidden>
+  <div class="row"><button id="t-dir-btn">Upload a theme folder</button><button class="secondary" id="t-files-btn">Upload files</button>
+    <button class="secondary" id="t-off" hidden>Remove theme</button></div>
+  <details class="hist" id="t-list-wrap" hidden><summary>Files</summary><div id="t-list"></div></details>
+  <div class="err" id="t-err"></div>
+</div>
 <div class="card"><h2>Assignments</h2><div id="assignments"></div></div>
 <div class="card" id="papers-card" hidden><h2>Lab papers</h2>
   <p class="muted">Tracked only: the service never solves or uploads papers.</p><div id="papers"></div></div>
@@ -335,6 +382,37 @@ async function act(btn) {
   try { const r = await call(path, body); alert(r.message); } catch (e) { alert(e.message); }
   load();
 }
+const kb = (n) => n < 1024 * 1024 ? Math.ceil(n / 1024) + " KB" : (n / 1024 / 1024).toFixed(1) + " MB";
+function b64(file) {
+  return new Promise((ok, bad) => { const r = new FileReader(); r.onerror = () => bad(r.error);
+    r.onload = () => ok(String(r.result).split(",", 2)[1] || ""); r.readAsDataURL(file); });
+}
+async function upload(input) {
+  const list = [...input.files].filter((f) => !f.name.startsWith(".")); input.value = "";
+  if (!list.length) return;
+  $("t-err").textContent = ""; $("t-state").textContent = "uploading…";
+  try {
+    // A folder's files come as "<folder>/<path>": drop the folder so its README sits at the top
+    const names = list.map((f) => f.webkitRelativePath || f.name);
+    const top = names.every((n) => n.includes("/") && n.split("/")[0] === names[0].split("/")[0]);
+    const files = await Promise.all(list.map(async (f, i) => ({ name: top ? names[i].slice(names[i].indexOf("/") + 1) : names[i], data: await b64(f) })));
+    const r = await call("/api/courses/" + ID + "/theme", { files }); alert(r.message);
+  } catch (e) { $("t-err").textContent = e.message; }
+  load();
+}
+$("t-dir-btn").onclick = () => $("t-dir").click();
+$("t-files-btn").onclick = () => $("t-files").click();
+$("t-dir").onchange = () => upload($("t-dir"));
+$("t-files").onchange = () => upload($("t-files"));
+$("t-off").onclick = async () => { if (!confirm("Remove this course's theme? Its reports go back to the theme artifact.")) return;
+  try { await call("/api/courses/" + ID + "/theme/remove", {}); } catch (e) { $("t-err").textContent = e.message; } load(); };
+function showTheme(files) {
+  const total = files.reduce((n, f) => n + f.size, 0);
+  $("t-state").textContent = files.length ? "saved · " + files.length + " files · " + kb(total) : "none; uses the theme artifact";
+  $("t-state").className = "state " + (files.length ? "ok" : "");
+  $("t-off").hidden = !files.length; $("t-list-wrap").hidden = !files.length;
+  $("t-list").innerHTML = files.map((f) => "<div>" + esc(f.name) + " · " + kb(f.size) + "</div>").join("");
+}
 async function load() {
   let d;
   try { d = await call("/api/courses/" + ID); } catch (e) { $("err").textContent = e.message; return; }
@@ -342,6 +420,7 @@ async function load() {
   $("name").textContent = d.course.name;
   $("sub").textContent = d.course.code + (d.course.semester ? " · " + d.course.semester : "");
   const m = $("mode"); m.innerHTML = ""; m.appendChild(modeControl(d.course, d.modes, load));
+  showTheme(d.theme);
   $("assignments").innerHTML = d.assignments.map(itemHtml).join("") || '<p class="muted">No assignments yet.</p>';
   $("papers-card").hidden = !d.course.lab;
   $("papers").innerHTML = d.papers.map(itemHtml).join("") || '<p class="muted">No lab papers yet.</p>';

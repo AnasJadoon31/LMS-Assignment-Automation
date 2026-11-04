@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from lms_worker.claude_login import ClaudeLogin, LoginError
-from lms_worker.kv import FileKV
+from lms_worker.kv import FileKV, SecretBox
 from lms_worker.notify import NotifyError, WhatsAppNumber
 from lms_worker.web import COOKIE, session_cookie, session_valid, setup_router
 from lms_worker.whatsapp import LinkChallenge, LinkState
@@ -24,7 +24,8 @@ FAKE_CLAUDE = textwrap.dedent(f"""\
     home = os.environ["HOME"]
     flag = os.path.join(home, ".logged-in")
     if sys.argv[1:3] == ["auth", "status"]:
-        print(json.dumps({{"loggedIn": os.path.exists(flag), "authMethod": "claude.ai", "email": "student@example.com"}}))
+        token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        print(json.dumps({{"loggedIn": os.path.exists(flag) or bool(token), "authMethod": "oauth_token" if token else "claude.ai", "email": "student@example.com"}}))
     elif sys.argv[1:3] == ["auth", "login"]:
         print("Opening browser to sign in…")
         print("If the browser didn't open, visit: \\x1b]8;;https://claude.com/cai/oauth/authorize?code=true&state=abc\\x07"
@@ -69,7 +70,8 @@ class StubAdmin:
 
 
 def client(tmp_path, claude_bin=None, password=PASSWORD, admin=None, **parts):
-    login = ClaudeLogin(tmp_path / "home", binary=str(claude_bin)) if claude_bin else None
+    login = ClaudeLogin(tmp_path / "home", binary=str(claude_bin), kv=FileKV(tmp_path / "kv"),
+                        box=SecretBox(KEY)) if claude_bin else None
     app = FastAPI()
     app.include_router(setup_router(password=password, secret_key=KEY, login=login, admin=admin or StubAdmin(), **parts))
     return TestClient(app, base_url="https://lms.example.com")
@@ -210,3 +212,25 @@ def test_a_saved_number_wins_over_the_variable(tmp_path):
     assert (number.get(), number.source()) == ("923119999999", "page")
     number.remove()
     assert (number.get(), number.source()) == ("923001234567", "env")
+
+
+def test_a_token_pasted_on_the_page_signs_claude_in_without_a_restart(tmp_path, claude_bin):
+    c = signed_in(client(tmp_path, claude_bin))
+    h = {"X-LMS": "1"}
+    assert c.post("/api/setup/claude/token", headers=h, json={"token": "short"}).status_code == 400
+    r = c.post("/api/setup/claude/token", headers=h, json={"token": " sk-ant-oat01-abcdefghijklmnop\n"})
+    assert r.status_code == 200 and r.json()["logged_in"] and r.json()["method"] == "oauth_token"
+    assert c.get("/api/setup/status", headers=h).json()["claude"]["token"] == "page"
+    assert b"abcdefghijklmnop" not in (tmp_path / "kv" / "claude_token.json").read_bytes()  # kept encrypted
+    assert c.post("/api/setup/claude/token/remove", headers=h).status_code == 200
+    status = c.get("/api/setup/status", headers=h).json()["claude"]
+    assert status["token"] is None and not status["logged_in"]
+
+
+def test_the_pages_token_wins_over_the_environment(tmp_path):
+    login = ClaudeLogin(tmp_path, token="sk-ant-oat01-from-env-000000", kv=FileKV(tmp_path / "kv"), box=SecretBox(KEY))
+    before = login.stamp()
+    assert login._env()["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-from-env-000000" and login.token_source() == "env"
+    login.kv.set("claude_token", login.box.encrypt("sk-ant-oat01-from-page-00000"))
+    assert login.token == "sk-ant-oat01-from-page-00000" and login.stamp() != before  # a waiting solver notices
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in ClaudeLogin(tmp_path)._env()

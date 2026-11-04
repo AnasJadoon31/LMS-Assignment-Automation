@@ -47,7 +47,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..actions import EFFORT_KEY, MODEL_KEY
-from .. import files
+from .. import files, themes
 from ..db.models import Artifact, Assignment, Course, CourseMode, Event, Job, JobState, LectureMode, SolveMode, utcnow
 from ..kv import KeyValue
 from ..lms.bahria_pages import LMS_TZ
@@ -181,8 +181,8 @@ class Solver:
         claimed = self._claim(now)
         if claimed is None:
             return SolveResult("idle")
-        job_id, work, prompt, resume, system, route = claimed
-        self._write_job(work, prompt, resume, system, route)
+        job_id, work, prompt, resume, system, route, theme_mark = claimed
+        self._write_job(work, prompt, resume, system, route, theme_mark)
         self.guard.count_run(now)
 
         log.info("Solving job %s%s", job_id, " (resuming)" if resume else "")
@@ -207,7 +207,11 @@ class Solver:
                     return False
             return True
 
-        run = self.sandbox.run(work, self.env, on_line, timeout)
+        env = dict(self.env)
+        token = getattr(self.login, "token", None)  # read now: a token pasted on the setup page needs no restart
+        if token:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+        run = self.sandbox.run(work, env, on_line, timeout)
         return run, reader.outcome, pauses, overage
 
     def fixed_model(self) -> str | None:
@@ -273,7 +277,7 @@ class Solver:
             .order_by(Assignment.deadline.asc().nulls_last(), Job.id)
         )
 
-    def _claim(self, now: datetime) -> tuple[int, Path, str, str | None, str, tuple] | None:
+    def _claim(self, now: datetime) -> tuple[int, Path, str, str | None, str, tuple, str | None] | None:
         with self.sessions() as s:
             job = s.scalars(self._ready(now).limit(1).with_for_update(of=Job, skip_locked=True)).first()
             if job is None:
@@ -282,7 +286,9 @@ class Solver:
             work = self.job_dir(a, job) / "work"
             theme_files = files.listed(files.theme_dir(self.data_dir, course))
             references = files.listed(files.refs_dir(self.data_dir, a))
-            system = course_prompt(system_prompt(self.sandbox.work_path(work), course.theme or THEME_ARTIFACT),
+            theme = themes.load(self.kv, course.id)  # the theme saved on the course page, used instead of the artifact
+            theme_mark = themes.mark(theme) if theme else None
+            system = course_prompt(system_prompt(self.sandbox.work_path(work), course.theme or THEME_ARTIFACT, local=bool(theme)),
                                    course.prompt, course.prompt_replaces)
             last = json.loads(job.summary) if job.summary else {}
             redo = _is_redo(job)
@@ -293,6 +299,7 @@ class Solver:
                 if course.lectures != LectureMode.OFF else []
             system = with_extras(system, self.sandbox.work_path(work), ask=course.solve == SolveMode.AUTO and not answered,
                                  theme_files=[p.name for p in theme_files], references=[p.name for p in references],
+                                 local_theme=bool(theme),
                                  lectures=[p.name for p in lectures], lectures_must=course.lectures == LectureMode.ALWAYS)
             strong = triage.get("redo") or {}  # "Redo with Opus": its own model, over the one fixed in Settings
             forced = redo and bool(strong.get("forced")) and strong.get("note") == job.note
@@ -301,7 +308,7 @@ class Solver:
             # So does a redo after the course's prompt, theme or files changed: a resumed session
             # would go on working from what it read the first time.
             blocked = last.get("status") == "blocked"
-            changed = redo and (forced or _spec(work).get("system") != system)
+            changed = redo and (forced or _spec(work).get("system") != system or _spec(work).get("theme") != theme_mark)
             resume = (job.claude_session if job.claude_session and (work / "job.json").exists() and not blocked and not changed
                       else None)
             if not resume:
@@ -317,6 +324,8 @@ class Solver:
                     (work / "in" / folder).mkdir(parents=True)
                     for p in sent:
                         shutil.copy2(p, work / "in" / folder / p.name)
+            if theme:
+                themes.write(theme, work / "theme")
             if resume and answered:
                 said = f"The student answered: {job.note}" if job.note else "The student gave no answer: decide yourself."
                 prompt = (f"{said}\nFiles the student sent are listed in your instructions. Do not ask again: solve it now, "
@@ -343,13 +352,13 @@ class Solver:
                 how += f" with {route[0]}, {route[1]} effort"
             _move(s, job, JobState.SOLVING, "solving" + how)
             s.commit()
-            return job.id, work, prompt, resume, system, route
+            return job.id, work, prompt, resume, system, route, theme_mark
 
     def job_dir(self, a: Assignment, job: Job) -> Path:
         return self.data_dir / _safe(a.course.code) / str(a.id) / str(job.revision)
 
     def _write_job(self, work: Path, prompt: str, resume: str | None, system: str | None = None,
-                   route: tuple = (None, None, False)) -> None:
+                   route: tuple = (None, None, False), theme_mark: str | None = None) -> None:
         (work / "out").mkdir(parents=True, exist_ok=True)
         if system is None:
             system = with_extras(system_prompt(self.sandbox.work_path(work)), self.sandbox.work_path(work),
@@ -364,6 +373,8 @@ class Solver:
             spec["effort"] = effort
         if resume:
             spec["resume"] = resume
+        if theme_mark:
+            spec["theme"] = theme_mark  # a redo after the saved theme changed starts a fresh session
         (work / "job.json").write_text(json.dumps(spec))
         for stale in ("report.pdf", "report.docx", "stderr.txt"):
             (work / "out" / stale).unlink(missing_ok=True)

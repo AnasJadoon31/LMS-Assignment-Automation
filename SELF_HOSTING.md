@@ -33,7 +33,11 @@ whose name is on it. Run it only for your own account.
 Only the api gets a domain. Claude runs under your claude.ai login, kept in the
 `lms-claude-home` volume: a full login can read your theme artifact, which a setup token
 cannot. Sign in from the setup page; if the login ever expires, the bot tells you and
-links you there.
+links you there. To skip the sign-in, paste a token from `claude setup-token` on the
+setup page (Claude card); it takes effect at once, no restart. `CLAUDE_CODE_OAUTH_TOKEN`
+works too, and a token saved on the page overrides it. A token cannot read the theme
+artifact, so save each course's theme on its course page (**Report theme**: upload the
+theme folder). A course with a saved theme always uses it, whatever the sign-in.
 
 ## Option A: any machine with Docker
 

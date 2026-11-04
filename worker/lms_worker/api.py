@@ -99,7 +99,8 @@ def create_app(
     if admin is None and settings.evolution:
         admin = EvolutionAdmin(settings.evolution)
     if login is None and shutil.which("claude"):
-        login = ClaudeLogin(settings.claude_home)
+        box = SecretBox(settings.app_secret_key) if settings.app_secret_key else None
+        login = ClaudeLogin(settings.claude_home, token=settings.claude_token, kv=kv if box else None, box=box)
     if drive is None and settings.google_client_id and settings.google_client_secret and settings.app_secret_key:
         drive = GoogleDrive(settings.google_client_id, settings.google_client_secret, kv, SecretBox(settings.app_secret_key))
     if discord is None:

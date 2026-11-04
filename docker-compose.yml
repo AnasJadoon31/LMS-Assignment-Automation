@@ -44,6 +44,7 @@ services:
       - SOLVER_DAILY_CAP=${SOLVER_DAILY_CAP:-6}
       - SOLVER_PAUSE_AT=${SOLVER_PAUSE_AT:-0.8}
       - SOLVER_MODEL=${SOLVER_MODEL:-}
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
       - TZ=Asia/Karachi
     volumes:
       - artifacts:/data
@@ -81,6 +82,7 @@ services:
       - PUBLIC_URL=${PUBLIC_URL:-}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
       - TZ=Asia/Karachi
     volumes:
       # Writable: files you send in the chat, and lectures fetched for you, are kept here

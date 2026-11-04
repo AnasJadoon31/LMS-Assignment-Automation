@@ -59,6 +59,14 @@ class Runtime:
 
         return GoogleDrive(st.google_client_id, st.google_client_secret, self.kv, SecretBox(st.app_secret_key))
 
+    def claude_login(self):
+        """The claude.ai login, or a token: from the setup page (encrypted) or CLAUDE_CODE_OAUTH_TOKEN."""
+        from .claude_login import ClaudeLogin
+
+        st = self.settings
+        box = SecretBox(st.app_secret_key) if st.app_secret_key and self.sessions is not None else None
+        return ClaudeLogin(st.claude_home, token=st.claude_token, kv=self.kv if box else None, box=box)
+
     def solver(self):
         """The solver, when SOLVER_IMAGE is set; None otherwise."""
         cfg = self.settings.solver
@@ -66,7 +74,6 @@ class Runtime:
             return None
         if self.sessions is None:
             raise ConfigError("Solving needs DATABASE_URL")
-        from .claude_login import ClaudeLogin
         from .solver.pipeline import Solver
         from .solver.sandbox import DockerSandbox
         from .solver.usage import UsageGuard
@@ -77,7 +84,7 @@ class Runtime:
         return Solver(
             self.sessions, self.kv, self.outbox(), sandbox, self.settings.data_dir,
             guard=UsageGuard(self.kv, pause_at=cfg.pause_at, daily_cap=cfg.daily_cap),
-            login=ClaudeLogin(self.settings.claude_home), drive=self.drive(),
+            login=self.claude_login(), drive=self.drive(),
             public_url=self.settings.public_url, model=cfg.model, env=env, materials=self.materials(),
         )
 

@@ -7,10 +7,15 @@ as its home.
 `claude auth login --claudeai` prints a sign-in link and waits at "Paste code here if
 prompted >". You open the link, sign in, and the page shows a code. start() runs the
 command in a pseudo-terminal and returns the link; finish(code) types the code in.
+
+Alternatively a token from `claude setup-token` skips the sign-in: pasted on the setup page
+(kept encrypted, read on every use, so no restart) or CLAUDE_CODE_OAUTH_TOKEN; the page's wins.
+Claude Code then uses it instead of the stored login. It cannot read the theme artifact.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pty
@@ -23,10 +28,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .kv import KeyValue, SecretBox
+
 LINK = re.compile(r"https://\S*oauth/authorize\?[^\s\x07\x1b]+")
 ANSI = re.compile(r"\x1b\][^\x07]*\x07|\x1b\[[0-9;?]*[A-Za-z]")
 START_TIMEOUT = 40
 FINISH_TIMEOUT = 90
+TOKEN_KEY = "claude_token"
+TOKEN = re.compile(r"[A-Za-z0-9_\-.]{20,1000}")
 
 
 class LoginError(Exception):
@@ -42,19 +51,51 @@ class LoginStatus:
 
 
 class ClaudeLogin:
-    def __init__(self, home: Path, binary: str = "claude"):
+    def __init__(self, home: Path, binary: str = "claude", token: str | None = None,
+                 kv: KeyValue | None = None, box: SecretBox | None = None):
         self.home = Path(home)
         self.binary = binary
+        self.env_token = token  # CLAUDE_CODE_OAUTH_TOKEN
+        self.kv, self.box = kv, box  # where the setup page saves a token
         self._lock = threading.Lock()
         self._pid: int | None = None
         self._fd: int | None = None
         self._started = 0.0
 
+    def _saved_token(self) -> str | None:
+        raw = self.kv.get(TOKEN_KEY) if self.kv and self.box else None
+        try:
+            return self.box.decrypt(raw) if raw else None
+        except ValueError:
+            return None
+
+    @property
+    def token(self) -> str | None:
+        """The token Claude Code runs with, instead of the stored login; None uses the login."""
+        return self._saved_token() or self.env_token
+
+    def token_source(self) -> str | None:
+        """page, env, or None."""
+        return "page" if self._saved_token() else "env" if self.env_token else None
+
+    def save_token(self, token: str) -> LoginStatus:
+        token = "".join(token.split())
+        if not TOKEN.fullmatch(token):
+            raise LoginError("That does not look like a token from `claude setup-token`")
+        if not (self.kv and self.box):
+            raise LoginError("Saving needs DATABASE_URL and APP_SECRET_KEY; set CLAUDE_CODE_OAUTH_TOKEN instead")
+        self.kv.set(TOKEN_KEY, self.box.encrypt(token))
+        return self.status()
+
+    def remove_token(self) -> None:
+        if self.kv:
+            self.kv.delete(TOKEN_KEY)
+
     def _env(self) -> dict[str, str]:
         keep = ("PATH", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
                 "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE")
         return {**{k: os.environ[k] for k in keep if k in os.environ}, "HOME": str(self.home), "TERM": "dumb",
-                "DISABLE_AUTOUPDATER": "1"}
+                "DISABLE_AUTOUPDATER": "1", **({"CLAUDE_CODE_OAUTH_TOKEN": token} if (token := self.token) else {})}
 
     def status(self) -> LoginStatus:
         try:
@@ -107,12 +148,15 @@ class ClaudeLogin:
         return status
 
     def stamp(self) -> str | None:
-        """Changes whenever the stored login does, e.g. after a sign-in on the setup page."""
+        """Changes whenever the stored login or the token does, e.g. after a sign-in on the setup page."""
         try:
             st = (self.home / ".claude" / ".credentials.json").stat()
+            login = f"{st.st_mtime_ns}:{st.st_size}"
         except OSError:
-            return None
-        return f"{st.st_mtime_ns}:{st.st_size}"
+            login = ""
+        token = self.token
+        mark = hashlib.sha256(token.encode()).hexdigest()[:12] if token else ""
+        return f"{login}|{mark}" if login or mark else None
 
     @property
     def waiting(self) -> bool:
