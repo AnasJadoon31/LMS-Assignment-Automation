@@ -21,11 +21,15 @@ run; "Redo with Opus" alone picks its own. When a course uses the teacher's lect
 reference, they are fetched before the solve and put in the work folder. Lecture summaries
 (see summaries.py) take their turn when no assignment is waiting.
 
+With a saved theme, a fresh run also gets the course's report kit (themes.py) in work/kit, if
+there is one for that theme, and a solved run's kit is saved for the next.
+
 A redo resumes the Claude session, unless the course's prompt, theme or files changed since
 the last run: then it starts again from the sheet, so the new instructions are really read.
 
 A run stopped by the plan's limit, or about to draw paid extra usage, waits for the reset and
-then resumes the same Claude session. Any other failure is retried once, resuming too. When
+then resumes the same Claude session. Any other failure is retried once, resuming too: at once
+when the run only used up its turns, else after RETRY_AFTER. When
 Claude is signed out (the session expired, or it was never signed in), solving waits and one
 message links the setup page; it resumes by itself after you sign in there.
 """
@@ -348,6 +352,9 @@ class Solver:
                         shutil.copy2(p, work / "in" / folder / p.name)
             if theme:
                 themes.write(theme, work / "theme")
+                kit = None if resume else themes.load_kit(self.kv, course.id, theme_mark)
+                if kit:  # a resumed run keeps the kit it was working with
+                    themes.write(kit, work / "kit")
             if resume and answered:
                 said = f"The student answered: {job.note}" if job.note else "The student gave no answer: decide yourself."
                 prompt = (f"{said}\nFiles the student sent are listed in your instructions. Do not ask again: solve it now, "
@@ -436,8 +443,8 @@ class Solver:
                     until = pause.until if pause else now + timedelta(hours=1)
                     return self._requeue(s, job, until, f"usage limit; resumes {_pkt(until)}", counts=False)
                 reason = _why(run, o, stderr, self.timeout)
-                if job.attempts < MAX_ATTEMPTS:
-                    return self._requeue(s, job, now + RETRY_AFTER, f"run failed ({reason}); retrying")
+                if job.attempts < MAX_ATTEMPTS:  # out of turns: it was getting on, so go on at once
+                    return self._requeue(s, job, now if o.turn_capped else now + RETRY_AFTER, f"run failed ({reason}); retrying")
                 return self._give_up(s, job, reason)
 
             job.summary = json.dumps(summary)
@@ -461,6 +468,7 @@ class Solver:
                 return self._give_up(s, job, reason)
             name = report_name(summary, a)
             files = self._store(s, job, work.parent, name, pdf, docx)
+            self._keep_kit(a, work)
             job.last_error = None
             job.attempts = 0  # from here on, attempts count uploads
             handwritten = summary.get("status") == "handwritten"
@@ -482,6 +490,13 @@ class Solver:
         if to == JobState.SUBMITTING:
             self.kv.set(POLL_NOW_KEY, now.isoformat())
         return SolveResult(status, job_id)
+
+    def _keep_kit(self, a: Assignment, work: Path) -> None:
+        """Save the run's report kit for the course's next solves, for the theme it was built on."""
+        mark = _spec(work).get("theme")
+        kit = themes.read_dir(work / "kit") if mark else None
+        if kit:
+            themes.save_kit(self.kv, a.course_id, mark, kit, a.title)
 
     def _requeue(self, s: Session, job: Job, not_before: datetime | None, detail: str, *, counts: bool = True) -> SolveResult:
         if not counts:

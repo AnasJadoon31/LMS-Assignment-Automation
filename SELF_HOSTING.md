@@ -40,6 +40,12 @@ artifact, so upload the theme folder as the **Default report theme** on the Cour
 a course that needs a different one gets its own on its course page (**Report theme**).
 A saved theme is always used, whatever the sign-in.
 
+With a saved theme, the first solve for a course also writes a **report kit**: the code that
+builds that course's report in the theme (cover, header and footer, every block, and tools for
+real screenshots of the terminal or MARS). The course's next solves reuse it and write only the
+assignment's content, so they are faster and cheaper. The course page shows the kit; **Remove kit**
+if reports come out wrong, and the next solve writes a new one. A new theme starts a new kit.
+
 To solve with DeepSeek instead, save your DeepSeek API key in the setup page's **Solver**
 card and switch it to DeepSeek. The solver stays Claude Code, pointed at DeepSeek's
 Anthropic-compatible API: `deepseek-flash`, or `deepseek-v4-pro` for Redo with Opus,

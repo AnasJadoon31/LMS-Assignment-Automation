@@ -194,3 +194,19 @@ def test_a_default_theme_serves_courses_without_their_own(client, semester):
     assert course["theme"] == [] and course["default_theme"] is True
     assert client.post("/api/themes/default/remove", headers=H).status_code == 200
     assert client.get(f"/api/courses/{semester['daa']}", headers=H).json()["default_theme"] is False
+
+
+def test_the_course_page_shows_its_report_kit_and_can_remove_it(client, semester, sessions):
+    from lms_worker import themes
+
+    signed_in(client)
+    kv, course = DbKV(sessions), semester["daa"]
+    url = f"/api/courses/{course}"
+    assert client.get(url, headers=H).json()["kit"] is None and "Report kit" in client.get(f"/courses/{course}").text
+    themes.save(kv, themes.DEFAULT, {"README.md": b"# Default"})
+    themes.save_kit(kv, course, themes.mark({"README.md": b"# Default"}), {"report.py": b"", "README.md": b""}, "Lab 7")
+    assert client.get(url, headers=H).json()["kit"] == {"source": "Lab 7", "files": 2, "current": True}
+    themes.save(kv, course, {"README.md": b"# Own"})  # the course's own theme now: the kit was made for another
+    assert client.get(url, headers=H).json()["kit"]["current"] is False
+    assert client.post(url + "/kit/remove", headers=H).status_code == 200
+    assert client.get(url, headers=H).json()["kit"] is None

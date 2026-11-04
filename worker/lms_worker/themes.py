@@ -86,3 +86,50 @@ def write(files: dict[str, bytes], dest: Path) -> None:
         path = dest / clean_name(name)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+
+
+# A course's report kit: the code a solve wrote to build its report in the theme (page setup, cover,
+# header, every component, screenshot tools). The next solve gets it in work/kit and writes only the
+# assignment's content. It is kept for the theme it was made for; a new theme starts a new kit.
+
+def _kit_key(course_id: int) -> str:
+    return f"kit:{int(course_id)}"
+
+
+def read_dir(src: Path) -> dict[str, bytes] | None:
+    """A folder's files, or None when there are none or they are over the limits."""
+    if not src.is_dir():
+        return None
+    out = {}
+    for p in sorted(src.rglob("*")):
+        rel = p.relative_to(src).as_posix()
+        if p.is_file() and "__pycache__" not in rel and not rel.endswith(".pyc"):
+            try:
+                out[clean_name(rel)] = p.read_bytes()
+            except ValueError:
+                continue
+    if not out or len(out) > MAX_FILES or sum(map(len, out.values())) > MAX_BYTES:
+        return None
+    return out
+
+
+def save_kit(kv: KeyValue, course_id: int, theme_mark: str, files: dict[str, bytes], source: str) -> None:
+    kv.set(_kit_key(course_id), json.dumps({"theme": theme_mark, "source": source,
+                                            "files": {k: base64.b64encode(v).decode() for k, v in files.items()}}))
+
+
+def kit_info(kv: KeyValue, course_id: int) -> dict | None:
+    raw = kv.get(_kit_key(course_id))
+    return json.loads(raw) if raw else None
+
+
+def load_kit(kv: KeyValue, course_id: int, theme_mark: str) -> dict[str, bytes] | None:
+    """The course's kit, if it was made for this theme."""
+    info = kit_info(kv, course_id)
+    if not info or info.get("theme") != theme_mark:
+        return None
+    return {k: base64.b64decode(v) for k, v in info["files"].items()}
+
+
+def remove_kit(kv: KeyValue, course_id: int) -> None:
+    kv.delete(_kit_key(course_id))

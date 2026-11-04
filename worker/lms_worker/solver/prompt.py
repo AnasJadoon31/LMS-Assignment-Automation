@@ -60,15 +60,20 @@ def system_prompt(work: str = "/work", theme: str = THEME_ARTIFACT, local: bool 
                  "its README holds the student details and the layout; the other files hold the colours, fonts and sizes, "
                  "the reference pages for the cover, an exercise page, a code page and figures, and the logo.")
         folder = "the theme's files, already there; read them, never change them"
-        step1 = (f"1. Read every file in {work}/theme, starting with the README (look at the images and render any HTML "
-                 "reference page to see it). Follow the README exactly. If there is no usable theme there, stop with status "
-                 "blocked and say so.")
+        step1 = (f"1. If {work}/kit/README.md exists, this course's report kit is there (below): read its README and the "
+                 f"theme's README, and open other theme files only for something the kit does not cover. Otherwise read every "
+                 f"file in {work}/theme, starting with the README (look at the images and render any HTML reference page to "
+                 "see it). Follow the README exactly. If there is no usable theme there, stop with status blocked and say so.")
+        kit = f"""
+- {work}/kit: the report kit, the code that builds this course's reports in the theme. When it is there, build the report with it: import it, use its screenshot tools, and write only this assignment's content in {work}/code/build_report.py. If part of it is wrong or missing, fix it in {work}/kit and keep it general. When it is not there, write it as you build: {work}/kit/report.py with everything that is the same in every report of this course (page setup, header and footer, cover, every component of the theme, the student details), any screenshot or run helpers in {work}/kit, and {work}/kit/README.md saying how to use them; this assignment's content goes in {work}/code/build_report.py. The kit is saved for the course's next assignments."""
+
     else:
         about = (f"The report theme is the student's design system artifact {theme}. It is the only theme: its README holds "
                  "the student details and the layout, tokens.json the colours, fonts and sizes, components/*/preview.html and "
                  "README.md the reference pages for the cover, an exercise page, a code page and figures, and its Logos asset "
                  "group the logo.")
         folder = "save the theme artifact's files here (step 1)"
+        kit = ""
         step1 = (f"1. Read the theme artifact with the Artifact tool: list its files, then read project/README.md, "
                  f"project/tokens.json, every project/components/*/README.md and preview.html, and the logo from its Logos "
                  f"assets, saving them under {work}/theme (out_dir). Follow the README exactly. If you cannot read the "
@@ -81,14 +86,14 @@ The work folder is {work}:
 - {work}/in: the assignment as posted on the LMS. If a sheet is a PDF, Word or PowerPoint file, {work}/in/pages has every page as an image; look at them so figures and tables in the question are not missed.
 - {work}/theme: {folder}.
 - {work}/code: write programs here.
-- {work}/out: the finished report goes here as report.docx and report.pdf.
+- {work}/out: the finished report goes here as report.docx and report.pdf.{kit}
 
 How to work:
 {step1}
 2. Read the whole sheet. For each question decide whether it needs a program or a written (theory) answer; an assignment can mix both.
 3. Solve every part. Programs follow the theme's writing voice; run them and use only their real output. Python programs also go into Jupyter cells with lms-notebook (below) for the notebook and output screenshots the theme asks for. Programs in other languages: compile and run them here and show their real output. Theory answers follow the theme's Theory questions section; draw every diagram that helps, in the theme's Figures style (matplotlib, graphviz and schemdraw are installed, and `from lms_sandbox.figures import draw_graph` draws graphs in the theme).
 4. Build {work}/out/report.docx with python-docx so that it looks exactly like the theme: cover page, header and footer, banners, Task and Result boxes, section headings, tables, captions, code blocks, screenshots and figures, with the sizes and colours from the theme.
-5. Convert it with `soffice --headless --convert-to pdf --outdir {work}/out {work}/out/report.docx` and render the pages with `pdftoppm -r 60 -png {work}/out/report.pdf {work}/out/check/page`. Look at every page image. Check the answers again and go through the theme's "Before a report is final" list. Fix anything wrong, rebuild, convert and look again until every page is right.
+5. Convert it with `soffice --headless --convert-to pdf --outdir {work}/out {work}/out/report.docx` and render the pages with `pdftoppm -r 60 -png {work}/out/report.pdf {work}/out/check/page`. Look at every page image once, check the answers again and go through the theme's "Before a report is final" list. Fix only what is really wrong (a missing or wrong answer, a broken layout, overflowing text or images, a wrong colour or font), then rebuild, convert and look at the changed pages. Do not zoom in, crop or measure pixels: the page images are enough. After two rounds of fixes, finish.
 6. End with the summary the output format asks for.
 
 lms-notebook: write a spec file and run `lms-notebook spec.json`. The spec is

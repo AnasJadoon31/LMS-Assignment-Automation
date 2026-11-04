@@ -13,19 +13,30 @@ FROM mcr.microsoft.com/playwright/python:v1.56.0-noble
 
 # LibreOffice for the PDF; Carlito and Caladea have Calibri's and Cambria's metrics, so pages
 # break as in Word (put licensed Calibri, Cambria and Consolas in fonts/ to use the real ones);
-# poppler renders pages to check them; graphviz for diagrams; compilers for C, C++ and Java labs
+# poppler renders pages to check them; graphviz for diagrams; compilers for C, C++ and Java labs.
+# Screenshots of real programs (the report kits use them): Xvfb with xdotool, xterm and nano
+# for terminal labs, a Java with AWT and MARS for MIPS labs
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer-nogui libreoffice-impress-nogui \
-        fonts-crosextra-carlito fonts-crosextra-caladea fonts-dejavu-core \
-        poppler-utils graphviz g++ default-jdk-headless \
+        fonts-crosextra-carlito fonts-crosextra-caladea fonts-dejavu-core fonts-liberation \
+        poppler-utils graphviz g++ default-jdk-headless default-jre \
+        xvfb xdotool xterm nano \
     && rm -rf /var/lib/apt/lists/*
+ADD https://github.com/dpetersanderson/MARS/releases/download/v.4.5.1/Mars4_5.jar /opt/mars/Mars4_5.jar
+RUN chmod 644 /opt/mars/Mars4_5.jar
 COPY fonts/ /usr/share/fonts/truetype/local/
-RUN fc-cache -f > /dev/null
+# Themes name Windows fonts the image does not have: map them to ones with close widths, so lines
+# break as in Word (the .docx keeps the real names)
+RUN printf '<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n<fontconfig>\n%s</fontconfig>\n' \
+        "$(for f in 'Trebuchet MS' 'Microsoft Sans Serif' 'Tahoma' 'Verdana' 'Segoe UI'; do \
+             printf '  <alias binding="same"><family>%s</family><prefer><family>Liberation Sans</family></prefer></alias>\n' "$f"; done)" \
+        > /etc/fonts/local.conf \
+    && fc-cache -f > /dev/null
 
 COPY --from=claude /claude /usr/local/bin/claude
 RUN pip install --break-system-packages --no-cache-dir \
         python-docx matplotlib networkx graphviz schemdraw numpy pandas scipy sympy scikit-learn pillow \
-        notebook nbclient nbformat ipykernel markdown latex2mathml playwright==1.56.0
+        notebook nbclient nbformat ipykernel markdown latex2mathml playwright==1.56.0 mss
 
 COPY lms_sandbox /opt/lms/lms_sandbox
 # Claude Code with every feature on ("essential traffic only" would turn off the Artifact tool

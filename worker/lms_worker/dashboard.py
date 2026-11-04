@@ -8,6 +8,7 @@ GET  /api/courses/{id}              one course as JSON
 POST /api/courses/{id}/mode         {mode}: approve or auto
 POST /api/courses/{id}/theme        {files: [{name, data}]}: replace the course's report theme (data in base64)
 POST /api/courses/{id}/theme/remove back to the default theme, or the theme artifact
+POST /api/courses/{id}/kit/remove   forget the course's report kit; the next solve writes a new one
 POST /api/themes/default            {files}: the theme for every course without its own
 POST /api/themes/default/remove
 POST /api/jobs/{id}/approve         upload the solved PDF
@@ -114,6 +115,7 @@ def dashboard_router(auth: Auth, sessions: sessionmaker[Session], kv: KeyValue, 
                            "lab": is_lab(c.name)},
                 "theme": _listing(themes.load(kv, c.id)),
                 "default_theme": themes.load(kv, themes.DEFAULT) is not None,
+                "kit": _kit(c.id),
                 "assignments": [_item(s, i, t) for i in items if i.kind != PAPER],
                 "papers": [_item(s, i, t) for i in items if i.kind == PAPER],
                 "modes": MODE_WORDS,
@@ -158,6 +160,21 @@ def dashboard_router(auth: Auth, sessions: sessionmaker[Session], kv: KeyValue, 
         themes.remove(kv, course_id)
         fallback = "the default theme" if themes.load(kv, themes.DEFAULT) else "the theme artifact"
         return {"message": f"Theme removed. This course uses {fallback} again."}
+
+    def _kit(course_id: int) -> dict | None:
+        info = themes.kit_info(kv, course_id)
+        if not info:
+            return None
+        theme = themes.for_course(kv, course_id)
+        return {"source": info.get("source") or "", "files": len(info.get("files") or {}),
+                "current": bool(theme) and themes.mark(theme) == info.get("theme")}
+
+    @router.post("/api/courses/{course_id}/kit/remove")
+    def remove_kit(request: Request, course_id: int) -> dict:
+        auth.guard(request)
+        _course(course_id)
+        themes.remove_kit(kv, course_id)
+        return {"message": "Report kit removed. The next solve for this course builds the report from the theme and saves a new kit."}
 
     @router.post("/api/themes/default")
     def save_default_theme(request: Request, body: Theme) -> dict:
@@ -320,7 +337,7 @@ function modeControl(course, modes, onDone) {
 }
 """
 
-def theme_card(title: str, about: str) -> str:
+def theme_card(title: str, about: str, extra: str = "") -> str:
     return f"""<div class="card"><h2>{title}</h2>
   <div>Theme: <span class="state" id="t-state">checking…</span></div>
   <p class="muted">{about} The solver reads a saved theme straight from its files; without one it reads the theme artifact,
@@ -329,6 +346,7 @@ def theme_card(title: str, about: str) -> str:
   <div class="row"><button id="t-dir-btn">Upload a theme folder</button><button class="secondary" id="t-files-btn">Upload files</button>
     <button class="secondary" id="t-off" hidden>Remove theme</button></div>
   <details class="hist" id="t-list-wrap" hidden><summary>Files</summary><div id="t-list"></div></details>
+  {extra}
   <div class="err" id="t-err"></div>
 </div>"""
 
@@ -405,11 +423,17 @@ async function load() {
 load(); setInterval(load, 60000);
 """
 
+KIT_HTML = """<div style="margin-top:10px">Report kit: <span class="state" id="k-state">none</span></div>
+  <p class="muted">The code that builds this course's reports in its theme. The first solve writes it and every solve after
+  that reuses it, so it only writes the assignment's content. Remove it if reports come out wrong; the next solve writes a new one.</p>
+  <div class="row"><button class="secondary" id="k-off" hidden>Remove kit</button></div>"""
+
 COURSE_BODY = """
 <p><a href="/courses">← All courses</a></p>
 <div class="card"><h2 id="name">Loading…</h2><div class="muted" id="sub"></div><div id="mode"></div></div>
 """ + theme_card("Report theme", "The theme this course's reports follow: its README (student details and layout), colours "
-                 "and fonts, reference pages and logo. Without one, the course uses the default theme from the Courses page.") + """
+                 "and fonts, reference pages and logo. Without one, the course uses the default theme from the Courses page.",
+                 KIT_HTML) + """
 <div class="card"><h2>Assignments</h2><div id="assignments"></div></div>
 <div class="card" id="papers-card" hidden><h2>Lab papers</h2>
   <p class="muted">Tracked only: the service never solves or uploads papers.</p><div id="papers"></div></div>
@@ -421,6 +445,8 @@ const ID = __ID__;
 const THEME_URL = "/api/courses/" + ID + "/theme";
 const THEME_GONE = "Remove this course's theme? Its reports go back to the default theme, or the theme artifact without one.";
 """ + THEME_JS + """
+$("k-off").onclick = async () => { if (!confirm("Remove this course's report kit? The next solve writes a new one.")) return;
+  try { await call("/api/courses/" + ID + "/kit/remove", {}); } catch (e) { $("t-err").textContent = e.message; } load(); };
 function itemHtml(i) {
   const what = (i.kind === "paper" ? "Paper " : "Assignment ") + esc(i.number);
   let h = '<div class="item"><h3>' + esc(i.title) + '</h3><div class="muted">' + what + " · " + esc(i.when) + "</div>";
@@ -461,6 +487,10 @@ async function load() {
   $("sub").textContent = d.course.code + (d.course.semester ? " · " + d.course.semester : "");
   const m = $("mode"); m.innerHTML = ""; m.appendChild(modeControl(d.course, d.modes, load));
   showTheme(d.theme, d.default_theme ? "none; uses the default theme" : "none; uses the theme artifact");
+  $("k-state").textContent = !d.kit ? "none yet; the next solve writes one"
+    : (d.kit.current ? "saved" : "made for an older theme; the next solve writes a new one") + " · " + d.kit.files + " files · from " + d.kit.source;
+  $("k-state").className = "state " + (d.kit && d.kit.current ? "ok" : "");
+  $("k-off").hidden = !d.kit;
   $("assignments").innerHTML = d.assignments.map(itemHtml).join("") || '<p class="muted">No assignments yet.</p>';
   $("papers-card").hidden = !d.course.lab;
   $("papers").innerHTML = d.papers.map(itemHtml).join("") || '<p class="muted">No lab papers yet.</p>';

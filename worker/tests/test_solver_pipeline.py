@@ -1030,3 +1030,49 @@ def test_a_claude_session_is_never_resumed_on_deepseek(solver, sandbox, sessions
     assert "resume" not in again and again["provider"] == "deepseek"  # its history holds blocks DeepSeek refuses
     assert "Assignment on the LMS: Recurrence Relations" in again["prompt"]
     assert "solving (a fresh run on deepseek: the solver changed)" in details(sessions, job_id)
+
+
+def test_the_report_kit_a_solve_writes_is_handed_to_the_next_while_the_theme_stays(solver, sandbox, sessions, tmp_path):
+    kv = DbKV(sessions)
+    themes.save(kv, themes.DEFAULT, {"README.md": b"# Default"})
+    job_id = add_job(sessions, tmp_path)
+    seen = []
+
+    def build_a_kit(work, on_line):
+        seen.append((work / "kit").exists())
+        (work / "kit" / "__pycache__").mkdir(parents=True)
+        (work / "kit" / "report.py").write_text("def cover(doc): ...")
+        (work / "kit" / "README.md").write_text("# Kit")
+        (work / "kit" / "__pycache__" / "report.cpython-312.pyc").write_bytes(b"\0")
+        return play(stream(SUMMARY))(work, on_line)
+
+    sandbox.script = build_a_kit
+    solver.run_once()
+    assert "/work/kit/README.md exists" in sandbox.runs[0]["job"]["system"]
+    with sessions() as s:
+        course_id = s.get(Job, job_id).assignment.course_id
+    info = themes.kit_info(kv, course_id)
+    assert sorted(info["files"]) == ["README.md", "report.py"] and info["source"] == "Recurrence Relations"
+
+    add_job(sessions, tmp_path, ref="155150:2", title="Sorting")
+    solver.run_once()
+    assert seen == [False, True]  # the second solve starts with the first one's kit
+
+    themes.save(kv, themes.DEFAULT, {"README.md": b"# Default, blue now"})  # a new theme: the old kit does not fit it
+    add_job(sessions, tmp_path, ref="155150:3", title="Graphs")
+    solver.run_once()
+    assert seen == [False, True, False]
+    themes.remove_kit(kv, course_id)
+    assert themes.kit_info(kv, course_id) is None
+
+
+def test_a_run_that_used_up_its_turns_goes_on_at_once(solver, sandbox, sessions, tmp_path):
+    job_id = add_job(sessions, tmp_path)
+    capped = [json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1"}),
+              json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 251,
+                          "session_id": "sess-1", "result": ""})]
+    sandbox.script = play(capped, files=False)
+    assert solver.run_once().status == "retry"
+    sandbox.script = play(stream(SUMMARY))
+    assert solver.run_once().status == "solved"  # no ten-minute wait
+    assert sandbox.runs[1]["job"]["resume"] == "sess-1" and state(sessions, job_id) == JobState.AWAITING_APPROVAL
