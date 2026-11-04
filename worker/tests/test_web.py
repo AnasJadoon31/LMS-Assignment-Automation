@@ -234,3 +234,28 @@ def test_the_pages_token_wins_over_the_environment(tmp_path):
     login.kv.set("claude_token", login.box.encrypt("sk-ant-oat01-from-page-00000"))
     assert login.token == "sk-ant-oat01-from-page-00000" and login.stamp() != before  # a waiting solver notices
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in ClaudeLogin(tmp_path)._env()
+
+
+def test_the_solver_switch_and_deepseek_key_on_the_page(tmp_path):
+    import httpx
+
+    from lms_worker.deepseek import DeepSeek
+
+    good = "sk-0123456789abcdef0123456789abcdef"
+    api = lambda r: httpx.Response(200, json={"is_available": True, "balance_infos": [{"currency": "USD", "total_balance": "3.10"}]}) \
+        if r.headers["authorization"] == f"Bearer {good}" else httpx.Response(401)  # noqa: E731
+    ds = DeepSeek(FileKV(tmp_path / "kv"), SecretBox(KEY), transport=httpx.MockTransport(api))
+    c = signed_in(client(tmp_path, deepseek=ds))
+    h = {"X-LMS": "1"}
+    assert "Assignments are solved with" in c.get("/setup").text
+    assert c.get("/api/setup/status", headers=h).json()["solver"] == {
+        "provider": "claude", "deepseek": {"available": True, "key": None, "editable": True}}
+    assert c.post("/api/setup/solver", headers=h, json={"provider": "deepseek"}).status_code == 400  # no key yet
+    assert c.post("/api/setup/deepseek/key", headers=h, json={"token": "sk-notthekeynotthekey"}).status_code == 400
+    assert c.post("/api/setup/deepseek/key", headers=h, json={"token": good}).json() == {"balance": "3.10 USD", "available": True}
+    assert c.post("/api/setup/solver", headers=h, json={"provider": "deepseek"}).status_code == 200
+    assert c.get("/api/setup/status", headers=h).json()["solver"]["provider"] == "deepseek"
+    assert c.get("/api/setup/deepseek/balance", headers=h).json()["balance"] == "3.10 USD"
+    assert c.post("/api/setup/solver", json={"provider": "claude"}).status_code == 403  # no X-LMS header
+    assert c.post("/api/setup/deepseek/key/remove", headers=h).status_code == 200
+    assert c.get("/api/setup/status", headers=h).json()["solver"]["provider"] == "claude"

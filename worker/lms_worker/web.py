@@ -7,6 +7,10 @@ POST /api/setup/claude/start        start a Claude sign-in; returns the link to 
 POST /api/setup/claude/code         {code}: the code the sign-in page shows
 POST /api/setup/claude/token        {token}: use a `claude setup-token` token instead of the sign-in
 POST /api/setup/claude/token/remove
+POST /api/setup/solver              {provider}: claude or deepseek solves everything
+POST /api/setup/deepseek/key        {token}: the DeepSeek API key, checked against its balance
+POST /api/setup/deepseek/key/remove
+GET  /api/setup/deepseek/balance
 POST /api/setup/whatsapp/link       {number?}: a QR code, or a pairing code for that number
 GET  /api/setup/whatsapp/qr         the current QR code (they rotate)
 POST /api/setup/whatsapp/unlink
@@ -41,6 +45,7 @@ from pydantic import BaseModel
 
 from . import actions
 from .claude_login import ClaudeLogin, LoginError
+from .deepseek import DeepSeek, DeepSeekError
 from .gdrive import CALLBACK, DriveError, GoogleDrive
 from .notify import DiscordSetting, Notifier, NotifyError, WhatsAppNumber, masked
 from .whatsapp import EvolutionAdmin, WhatsAppError
@@ -111,6 +116,10 @@ class GroupList(BaseModel):
     groups: list[GroupPick]
 
 
+class Provider(BaseModel):
+    provider: str
+
+
 class Webhook(BaseModel):
     url: str
 
@@ -127,7 +136,7 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
                  drive: GoogleDrive | None = None, discord: DiscordSetting | None = None, public_url: str | None = None,
                  clock=time.time, auth: Auth | None = None, whatsapp: WhatsAppNumber | None = None,
                  sender: Notifier | None = None, discord_bot=None, groups=None, group_sender: Notifier | None = None,
-                 group_summary=None, bot_users=None) -> APIRouter:
+                 group_summary=None, bot_users=None, deepseek: DeepSeek | None = None) -> APIRouter:
     """`groups`: groups.WhatsAppGroups; `group_sender` posts to them; `group_summary()` gives the
     summary text as it would go out now."""
     router = APIRouter()
@@ -201,6 +210,9 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
                                    "name": st.name}
             except WhatsAppError as e:
                 out["whatsapp"] = {"available": True, "state": "unreachable", "linked": False, "detail": str(e)}
+        out["solver"] = {"provider": "deepseek" if deepseek and deepseek.active() else "claude",
+                         "deepseek": {"available": deepseek is not None, "key": deepseek.source() if deepseek else None,
+                                      "editable": bool(deepseek and deepseek.editable)}}
         if whatsapp is not None:
             out["whatsapp"].update(send_to=whatsapp.get(), send_to_source=whatsapp.source())
         if groups is not None and "whatsapp" in out:
@@ -337,6 +349,44 @@ def setup_router(*, password: str | None, secret_key: str, login: ClaudeLogin | 
         except LoginError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return {"logged_in": s.logged_in, "method": s.method, "detail": s.detail}
+
+    def _deepseek() -> DeepSeek:
+        if deepseek is None:
+            raise HTTPException(status_code=503, detail="DeepSeek is not available here")
+        return deepseek
+
+    @router.post("/api/setup/solver")
+    def solver_provider(request: Request, body: Provider) -> dict:
+        guard(request)
+        try:
+            _deepseek().use(body.provider)
+        except DeepSeekError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"ok": True}
+
+    @router.post("/api/setup/deepseek/key")
+    def deepseek_key(request: Request, body: Token) -> dict:
+        guard(request)
+        try:
+            b = _deepseek().save_key(body.token)
+        except DeepSeekError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"balance": b.text, "available": b.available}
+
+    @router.post("/api/setup/deepseek/key/remove")
+    def deepseek_key_remove(request: Request) -> dict:
+        guard(request)
+        _deepseek().remove_key()
+        return {"ok": True}
+
+    @router.get("/api/setup/deepseek/balance")
+    def deepseek_balance(request: Request) -> dict:
+        guard(request)
+        try:
+            b = _deepseek().balance()
+        except DeepSeekError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        return {"balance": b.text, "available": b.available}
 
     @router.post("/api/setup/claude/token/remove")
     def claude_token_remove(request: Request) -> dict:
@@ -563,6 +613,20 @@ function busy(btn, on) { btn.disabled = on; }
 
 
 SETUP_BODY = """
+<div class="card" id="solver">
+  <h2>Solver</h2>
+  <div>Assignments are solved with:</div>
+  <div class="seg" id="s-seg"><button data-p="claude">Claude</button><button data-p="deepseek">DeepSeek</button></div>
+  <div class="muted" id="s-detail"></div>
+  <div class="step" id="s-ds">
+    <div>DeepSeek API key: <span class="state" id="s-key">checking…</span></div>
+    <div class="muted" id="s-balance"></div>
+    <div class="row"><input id="s-input" type="password" autocomplete="off" placeholder="sk-… from platform.deepseek.com/api_keys"><button class="secondary" id="s-save">Save key</button></div>
+    <div class="row"><button class="secondary" id="s-bal" hidden>Check balance</button><button class="secondary" id="s-off" hidden>Remove key</button></div>
+    <p class="muted">DeepSeek runs deepseek-flash (Redo with Opus: deepseek-v4-pro) and is billed per token to your DeepSeek balance. It cannot read the theme artifact, so save a default theme on the Courses page. Claude's usage limits do not apply to it; the daily run cap does.</p>
+  </div>
+  <div class="err" id="s-err"></div>
+</div>
 <div class="card" id="claude">
   <h2>Claude</h2>
   <div>Login: <span class="state" id="c-state">checking…</span></div>
@@ -662,6 +726,15 @@ async function refresh() {
   $("c-toff").hidden = c.token !== "page";
   $("c-tsave").textContent = c.token === "page" ? "Replace token" : "Save token";
   if (c.token) $("c-detail").textContent += (c.token === "page" ? " · token saved here" : " · token from CLAUDE_CODE_OAUTH_TOKEN");
+  const sv = s.solver || {}, ds = sv.deepseek || {};
+  for (const b of $("s-seg").children) b.className = b.dataset.p === sv.provider ? "on" : "";
+  $("s-detail").textContent = sv.provider === "deepseek" ? "DeepSeek solves every assignment and lecture summary." : "Claude solves every assignment and lecture summary.";
+  $("solver").hidden = !ds.available; $("s-ds").hidden = !ds.editable && !ds.key;
+  $("s-key").textContent = ds.key === "page" ? "saved here" : ds.key === "env" ? "from DEEPSEEK_API_KEY" : "not set";
+  $("s-key").className = "state " + (ds.key ? "ok" : "bad");
+  $("s-bal").hidden = !ds.key; $("s-off").hidden = ds.key !== "page";
+  if (!ds.key) $("s-balance").textContent = "";
+  $("s-save").textContent = ds.key === "page" ? "Replace key" : "Save key";
   const w = s.whatsapp || {};
   const words = { open: "linked", connecting: "linking…", close: "not linked", missing: "not set up", unreachable: "Evolution API not reachable" };
   $("w-state").textContent = !w.available ? "not configured" : (words[w.state] || w.state);
@@ -724,6 +797,27 @@ $("c-send").onclick = async () => {
   catch (e) { $("c-err").textContent = e.message; }
   busy($("c-send"), false);
 };
+for (const b of $("s-seg").children) b.onclick = async () => {
+  if (b.className === "on") return;
+  if (b.dataset.p === "deepseek" && !confirm("Solve everything with DeepSeek? Runs are billed per token to your DeepSeek balance.")) return;
+  $("s-err").textContent = "";
+  try { await call("/api/setup/solver", { provider: b.dataset.p }); } catch (e) { $("s-err").textContent = e.message; }
+  await refresh();
+};
+$("s-save").onclick = async () => {
+  $("s-err").textContent = ""; busy($("s-save"), true);
+  try { const r = await call("/api/setup/deepseek/key", { token: $("s-input").value }); $("s-input").value = "";
+        await refresh(); $("s-balance").textContent = "Balance: " + r.balance; }
+  catch (e) { $("s-err").textContent = e.message; }
+  busy($("s-save"), false);
+};
+$("s-bal").onclick = async () => {
+  $("s-err").textContent = "";
+  try { const r = await call("/api/setup/deepseek/balance"); $("s-balance").textContent = "Balance: " + r.balance; }
+  catch (e) { $("s-err").textContent = e.message; }
+};
+$("s-off").onclick = async () => { if (!confirm("Remove the DeepSeek key? Solving goes back to Claude if no other key is set.")) return;
+  try { await call("/api/setup/deepseek/key/remove", {}); await refresh(); } catch (e) { $("s-err").textContent = e.message; } };
 $("c-tsave").onclick = async () => {
   $("c-err").textContent = ""; busy($("c-tsave"), true);
   try { const r = await call("/api/setup/claude/token", { token: $("c-token").value }); $("c-token").value = "";

@@ -59,6 +59,14 @@ class Runtime:
 
         return GoogleDrive(st.google_client_id, st.google_client_secret, self.kv, SecretBox(st.app_secret_key))
 
+    def deepseek(self):
+        """Solving with DeepSeek, switched on the setup page."""
+        from .deepseek import DeepSeek
+
+        st = self.settings
+        box = SecretBox(st.app_secret_key) if st.app_secret_key and self.sessions is not None else None
+        return DeepSeek(self.kv if box else None, box, st.deepseek_key)
+
     def claude_login(self):
         """The claude.ai login, or a token: from the setup page (encrypted) or CLAUDE_CODE_OAUTH_TOKEN."""
         from .claude_login import ClaudeLogin
@@ -86,6 +94,7 @@ class Runtime:
             guard=UsageGuard(self.kv, pause_at=cfg.pause_at, daily_cap=cfg.daily_cap),
             login=self.claude_login(), drive=self.drive(),
             public_url=self.settings.public_url, model=cfg.model, env=env, materials=self.materials(),
+            deepseek=self.deepseek(),
         )
 
     def materials(self):

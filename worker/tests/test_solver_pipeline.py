@@ -980,3 +980,30 @@ def test_the_default_theme_is_used_unless_the_course_has_its_own(solver, sandbox
     add_job(sessions, tmp_path, ref="155150:2", title="Sorting")
     solver.run_once()
     assert sandbox.runs[1]["theme"] == ["README.md"]
+
+
+def test_deepseek_solves_with_its_own_model_and_ignores_claudes_limits(solver, sandbox, sessions, tmp_path, clock):
+    import httpx
+
+    from lms_worker.deepseek import DeepSeek
+    from lms_worker.kv import SecretBox
+    from lms_worker.solver.usage import PAUSE_KEY
+
+    kv = DbKV(sessions)
+    solver.deepseek = DeepSeek(kv, SecretBox("k" * 48), "sk-fromtheenvironment0000",
+                               transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    solver.deepseek.use("deepseek")
+    solver.login = FakeLogin(logged_in=False)  # Claude signed out: DeepSeek does not need it
+    kv.set("solver_model", "claude-opus-5-5")  # a Claude model fixed in Settings is not sent to DeepSeek
+    kv.set(PAUSE_KEY, json.dumps({"until": (NOW + timedelta(hours=3)).isoformat(), "reason": "headroom"}))
+    add_job(sessions, tmp_path)
+    sandbox.script = play(stream(SUMMARY))
+
+    assert solver.run_once().status == "solved"
+    run = sandbox.runs[0]
+    assert run["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-fromtheenvironment0000" and "CLAUDE_CODE_OAUTH_TOKEN" not in run["env"]
+    assert run["env"]["HTTPS_PROXY"] == "http://proxy.example:3128" and "model" not in run["job"]
+
+    solver.deepseek.use("claude")  # back on Claude: its sign-in and its pause count again
+    add_job(sessions, tmp_path, ref="155150:2", title="Sorting")
+    assert solver.run_once().status == "signed_out" and len(sandbox.runs) == 1

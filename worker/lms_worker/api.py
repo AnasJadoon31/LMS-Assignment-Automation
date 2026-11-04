@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .bot import Bot, Incoming, Reply
 from .discord_bot import DiscordBotSetting, DiscordChat
 from .claude_login import ClaudeLogin
+from .deepseek import DeepSeek
 from .gdrive import GoogleDrive
 from .config import Settings
 from .db.models import InboundMessage
@@ -106,6 +107,8 @@ def create_app(
     if discord is None:
         box = SecretBox(settings.app_secret_key) if settings.app_secret_key else None
         discord = DiscordSetting(kv if box else None, box, settings.discord_webhook_url)
+    box = SecretBox(settings.app_secret_key) if settings.app_secret_key else None
+    deepseek = DeepSeek(kv if box else None, box, settings.deepseek_key)
     if discord_bot is None and settings.app_secret_key:
         discord_bot = DiscordBotSetting(kv, SecretBox(settings.app_secret_key))
     bot = Bot(sessions, kv, login=login, setup_url=f"{settings.public_url}/setup" if settings.public_url else None,
@@ -244,7 +247,7 @@ def create_app(
                                     login=login, admin=admin, drive=drive, discord=discord,
                                     whatsapp=whatsapp, sender=sender, discord_bot=discord_bot,
                                     groups=group_setting, group_sender=group_sender, group_summary=group_summary,
-                                    bot_users=bot_users,
+                                    bot_users=bot_users, deepseek=deepseek,
                                     public_url=settings.public_url, auth=auth))
     app.include_router(dashboard_router(auth, sessions, kv))
     app.state.classes_data_dir = settings.data_dir

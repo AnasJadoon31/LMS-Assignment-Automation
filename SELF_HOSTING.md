@@ -40,6 +40,11 @@ artifact, so upload the theme folder as the **Default report theme** on the Cour
 a course that needs a different one gets its own on its course page (**Report theme**).
 A saved theme is always used, whatever the sign-in.
 
+To solve with DeepSeek instead, save your DeepSeek API key in the setup page's **Solver**
+card and switch it to DeepSeek. The solver stays Claude Code, pointed at DeepSeek's
+Anthropic-compatible API: `deepseek-flash`, or `deepseek-v4-pro` for Redo with Opus,
+billed per token to your DeepSeek balance. It needs a saved theme, as above.
+
 ## Option A: any machine with Docker
 
 ```sh

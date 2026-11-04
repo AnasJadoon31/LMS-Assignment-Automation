@@ -115,6 +115,7 @@ class Solver:
         timeout: float = RUN_TIMEOUT,
         max_turns: int = MAX_TURNS,
         materials=None,  # materials.Materials: the teacher's lecture notes, as a reference for solving
+        deepseek=None,  # deepseek.DeepSeek: when its switch is on, runs go to DeepSeek instead of Claude
     ) -> None:
         self.sessions, self.kv, self.outbox, self.sandbox = sessions, kv, outbox, sandbox
         self.data_dir = data_dir
@@ -126,6 +127,7 @@ class Solver:
         self.env = env or {}  # e.g. HTTPS_PROXY, the sandbox's way out
         self.timeout, self.max_turns = timeout, max_turns
         self.materials = materials
+        self.deepseek = deepseek
         from .summaries import Summarizer
 
         self.summaries = Summarizer(self)
@@ -166,9 +168,12 @@ class Solver:
             prepare = job.id if job is not None and self._needs_prepare(job) else None
             if job is None and not self.summaries.waiting(s, now):
                 return SolveResult("idle")
-        if not self._signed_in():
+        on_deepseek = self.on_deepseek()
+        if not on_deepseek and not self._signed_in():
             return SolveResult("signed_out")
         pause = self.guard.paused(now)
+        if pause and on_deepseek and pause.reason != "daily cap":
+            pause = None  # Claude's plan limits do not hold DeepSeek up; the daily cap does
         if pause:
             self._warn_deadlines(pause)
             return SolveResult("paused", detail=pause.describe())
@@ -208,14 +213,21 @@ class Solver:
             return True
 
         env = dict(self.env)
-        token = getattr(self.login, "token", None)  # read now: a token pasted on the setup page needs no restart
-        if token:
+        if self.on_deepseek():
+            env.update(self.deepseek.env())
+        elif token := getattr(self.login, "token", None):  # read now: a token pasted on the setup page needs no restart
             env["CLAUDE_CODE_OAUTH_TOKEN"] = token
         run = self.sandbox.run(work, env, on_line, timeout)
         return run, reader.outcome, pauses, overage
 
+    def on_deepseek(self) -> bool:
+        return self.deepseek is not None and self.deepseek.active()
+
     def fixed_model(self) -> str | None:
-        """The model you fixed in Settings, else SOLVER_MODEL; with neither, the CLI's default."""
+        """The model you fixed in Settings, else SOLVER_MODEL; with neither, the CLI's default.
+        On DeepSeek, always DeepSeek's own default (deepseek-flash)."""
+        if self.on_deepseek():
+            return None
         return (self.kv.get(MODEL_KEY) or "").strip() or self.model
 
     # --- lecture notes as a reference ---

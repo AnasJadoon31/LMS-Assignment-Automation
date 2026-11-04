@@ -88,6 +88,7 @@ class Settings:
     admin_password: str | None = field(default=None, repr=False)  # the setup page's password
     claude_home: Path = Path("/claude-home")  # the claude.ai login the solver runs under
     claude_token: str | None = field(default=None, repr=False)  # CLAUDE_CODE_OAUTH_TOKEN, instead of the login
+    deepseek_key: str | None = field(default=None, repr=False)  # DEEPSEEK_API_KEY; the setup page's key wins
     public_url: str | None = None  # where the setup page is reachable, for links in alerts
     solver: SolverConfig | None = None
     google_client_id: str | None = None  # Google Drive saving: an OAuth client of type Web application
@@ -160,6 +161,7 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         admin_password=os.environ.get("ADMIN_PASSWORD") or None,
         claude_home=Path(os.environ.get("CLAUDE_HOME", "/claude-home")),
         claude_token=os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip() or None,
+        deepseek_key=os.environ.get("DEEPSEEK_API_KEY", "").strip() or None,
         public_url=(os.environ.get("PUBLIC_URL") or "").rstrip("/") or None,
         solver=solver,
         google_client_id=os.environ.get("GOOGLE_CLIENT_ID", "").strip() or None,
