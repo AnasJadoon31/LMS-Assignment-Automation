@@ -76,7 +76,8 @@ class Summarizer:
         missing = [p.name for p in sources if not p.is_file()]
         if missing:
             return self._fail(sm_id, name, lectures, f"lecture files are no longer on the server: {', '.join(missing)}")
-        resume = session if session and (work / "job.json").exists() and (work / "notes.md").exists() else None
+        resume = (session if session and (work / "job.json").exists() and (work / "notes.md").exists() and v.same_provider(work)
+                  else None)
         if not resume:
             shutil.rmtree(work, ignore_errors=True)
             (work / "in").mkdir(parents=True)
@@ -87,7 +88,7 @@ class Summarizer:
         spec = {"prompt": CONTINUE if resume else notes_prompt(name, lectures),
                 "system": notes_system(where),
                 "schema": NOTES_SCHEMA, "max_turns": MAX_TURNS, "text": True, "plain": True,
-                "prepared": (work / "in" / "text").is_dir()}
+                "prepared": (work / "in" / "text").is_dir(), "provider": v.provider()}
         model = v.fixed_model()
         effort = (v.kv.get(EFFORT_KEY) or "").strip()
         spec |= {k: val for k, val in (("model", model), ("effort", effort), ("resume", resume)) if val}

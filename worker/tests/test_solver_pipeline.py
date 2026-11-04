@@ -1007,3 +1007,26 @@ def test_deepseek_solves_with_its_own_model_and_ignores_claudes_limits(solver, s
     solver.deepseek.use("claude")  # back on Claude: its sign-in and its pause count again
     add_job(sessions, tmp_path, ref="155150:2", title="Sorting")
     assert solver.run_once().status == "signed_out" and len(sandbox.runs) == 1
+
+
+def test_a_claude_session_is_never_resumed_on_deepseek(solver, sandbox, sessions, clock, tmp_path):
+    import httpx
+
+    from lms_worker.deepseek import DeepSeek
+    from lms_worker.kv import SecretBox
+
+    job_id = add_job(sessions, tmp_path)
+    sandbox.script = play(stream(error="Your organization has disabled Claude subscription access"), files=False)
+    assert solver.run_once().status == "retry"  # Claude left a session behind
+    assert sandbox.runs[0]["job"]["provider"] == "claude"
+
+    solver.deepseek = DeepSeek(DbKV(sessions), SecretBox("k" * 48), "sk-fromtheenvironment0000",
+                               transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    solver.deepseek.use("deepseek")
+    clock.at = NOW + timedelta(minutes=11)
+    sandbox.script = play(stream(SUMMARY, session="ds-1"))
+    assert solver.run_once().status == "solved"
+    again = sandbox.runs[1]["job"]
+    assert "resume" not in again and again["provider"] == "deepseek"  # its history holds blocks DeepSeek refuses
+    assert "Assignment on the LMS: Recurrence Relations" in again["prompt"]
+    assert "solving (a fresh run on deepseek: the solver changed)" in details(sessions, job_id)

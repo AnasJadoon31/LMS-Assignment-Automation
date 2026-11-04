@@ -36,8 +36,6 @@ ENV = {
     "CLAUDE_CODE_SUBAGENT_MODEL": MODEL,
     "CLAUDE_CODE_EFFORT_LEVEL": "max",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "786432",
-    # Tool search sends tool_definition blocks, which DeepSeek's API refuses (422): every tool up front
-    "ENABLE_TOOL_SEARCH": "false",
 }
 
 

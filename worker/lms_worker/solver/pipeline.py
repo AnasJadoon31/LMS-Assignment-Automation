@@ -223,6 +223,14 @@ class Solver:
     def on_deepseek(self) -> bool:
         return self.deepseek is not None and self.deepseek.active()
 
+    def provider(self) -> str:
+        return "deepseek" if self.on_deepseek() else "claude"
+
+    def same_provider(self, work: Path) -> bool:
+        """A session is resumed only by the solver that started it: a Claude session holds message
+        kinds DeepSeek's API refuses (422 "unknown variant tool_definition")."""
+        return _spec(work).get("provider", "claude") == self.provider()
+
     def fixed_model(self) -> str | None:
         """The model you fixed in Settings, else SOLVER_MODEL; with neither, the CLI's default.
         On DeepSeek, always DeepSeek's own default (deepseek-flash)."""
@@ -321,7 +329,9 @@ class Solver:
             # would go on working from what it read the first time.
             blocked = last.get("status") == "blocked"
             changed = redo and (forced or _spec(work).get("system") != system or _spec(work).get("theme") != theme_mark)
+            switched = (work / "job.json").exists() and not self.same_provider(work)
             resume = (job.claude_session if job.claude_session and (work / "job.json").exists() and not blocked and not changed
+                      and not switched
                       else None)
             if not resume:
                 if work.exists():
@@ -359,7 +369,8 @@ class Solver:
             job.attempts += 1
             job.not_before = None
             how = (" (resuming the Claude session)" if resume else " (a fresh run, as you asked)" if forced
-                   else " (a fresh run: the course's prompt, theme or files changed)" if changed else "")
+                   else " (a fresh run: the course's prompt, theme or files changed)" if changed
+                   else f" (a fresh run on {self.provider()}: the solver changed)" if switched and job.claude_session else "")
             if route[0]:
                 how += f" with {route[0]}, {route[1]} effort"
             _move(s, job, JobState.SOLVING, "solving" + how)
@@ -385,6 +396,7 @@ class Solver:
             spec["effort"] = effort
         if resume:
             spec["resume"] = resume
+        spec["provider"] = self.provider()
         if theme_mark:
             spec["theme"] = theme_mark  # a redo after the saved theme changed starts a fresh session
         (work / "job.json").write_text(json.dumps(spec))
