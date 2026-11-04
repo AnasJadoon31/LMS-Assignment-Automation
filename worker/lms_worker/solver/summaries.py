@@ -96,7 +96,8 @@ class Summarizer:
         for stale in ("notes.pdf", "stderr.txt"):
             (work / "out" / stale).unlink(missing_ok=True)
         (work / "job.json").write_text(json.dumps(spec))
-        v.guard.count_run(now)
+        if not v.on_deepseek():
+            v.guard.count_run(now)  # the daily cap counts Claude runs only
         log.info("Writing lecture summary %s with %s", sm_id, model or "the default model")
         run, o, pauses, overage = v.run_claude(work, RUN_TIMEOUT)
         tokens += o.tokens

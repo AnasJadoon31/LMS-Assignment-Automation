@@ -49,7 +49,8 @@ if reports come out wrong, and the next solve writes a new one. A new theme star
 To solve with DeepSeek instead, save your DeepSeek API key in the setup page's **Solver**
 card and switch it to DeepSeek. The solver stays Claude Code, pointed at DeepSeek's
 Anthropic-compatible API: `deepseek-flash`, or `deepseek-v4-pro` for Redo with Opus,
-billed per token to your DeepSeek balance. It needs a saved theme, as above.
+billed per token to your DeepSeek balance. It needs a saved theme, as above. The daily run
+cap (`SOLVER_DAILY_CAP`) and Claude's usage pauses do not apply to it: your balance is the limit.
 
 ## Option A: any machine with Docker
 

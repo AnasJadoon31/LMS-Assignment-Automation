@@ -996,10 +996,12 @@ def test_deepseek_solves_with_its_own_model_and_ignores_claudes_limits(solver, s
     solver.login = FakeLogin(logged_in=False)  # Claude signed out: DeepSeek does not need it
     kv.set("solver_model", "claude-opus-5-5")  # a Claude model fixed in Settings is not sent to DeepSeek
     kv.set(PAUSE_KEY, json.dumps({"until": (NOW + timedelta(hours=3)).isoformat(), "reason": "headroom"}))
+    solver.guard.daily_cap = 0  # nor the daily cap: DeepSeek is paid per token
     add_job(sessions, tmp_path)
     sandbox.script = play(stream(SUMMARY))
 
     assert solver.run_once().status == "solved"
+    assert solver.guard.runs_today(NOW) == 0  # and its runs do not count towards Claude's cap
     run = sandbox.runs[0]
     assert run["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-fromtheenvironment0000" and "CLAUDE_CODE_OAUTH_TOKEN" not in run["env"]
     assert run["env"]["HTTPS_PROXY"] == "http://proxy.example:3128" and "model" not in run["job"]

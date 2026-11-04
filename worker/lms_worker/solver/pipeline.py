@@ -175,9 +175,7 @@ class Solver:
         on_deepseek = self.on_deepseek()
         if not on_deepseek and not self._signed_in():
             return SolveResult("signed_out")
-        pause = self.guard.paused(now)
-        if pause and on_deepseek and pause.reason != "daily cap":
-            pause = None  # Claude's plan limits do not hold DeepSeek up; the daily cap does
+        pause = None if on_deepseek else self.guard.paused(now)  # DeepSeek is paid per token: your balance is its limit
         if pause:
             self._warn_deadlines(pause)
             return SolveResult("paused", detail=pause.describe())
@@ -192,7 +190,8 @@ class Solver:
             return SolveResult("idle")
         job_id, work, prompt, resume, system, route, theme_mark = claimed
         self._write_job(work, prompt, resume, system, route, theme_mark)
-        self.guard.count_run(now)
+        if not on_deepseek:
+            self.guard.count_run(now)  # the daily cap counts Claude runs only
 
         log.info("Solving job %s%s", job_id, " (resuming)" if resume else "")
         run, outcome, pauses, overage = self.run_claude(work, self.timeout)

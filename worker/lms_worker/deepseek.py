@@ -4,7 +4,8 @@ The solver stays Claude Code; it is pointed at DeepSeek's Anthropic-compatible A
 DeepSeek API key, as DeepSeek documents (api-docs.deepseek.com, Claude Code integration).
 Runs are billed per token to your DeepSeek balance. DeepSeek cannot read the claude.ai theme
 artifact, so it needs a saved theme (the default one on the Courses page, or a course's own),
-and it sends no Claude plan usage, so only the daily run cap applies to it.
+and it is billed per token, so none of the service's own limits (Claude's plan pauses, the daily
+run cap) hold it up: your DeepSeek balance is the limit.
 
 The key is saved encrypted on the setup page (or DEEPSEEK_API_KEY); both are read on every
 run, so a change needs no restart.
