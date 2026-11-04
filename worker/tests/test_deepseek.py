@@ -35,6 +35,7 @@ def test_a_key_is_checked_saved_encrypted_and_switched_on(tmp_path):
     env = ds.env()
     assert env["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic" and env["ANTHROPIC_AUTH_TOKEN"] == GOOD
     assert env["ANTHROPIC_MODEL"] == "deepseek-flash[1m]" and env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "deepseek-v4-pro"
+    assert env["ENABLE_TOOL_SEARCH"] == "false"  # DeepSeek refuses tool search's tool_definition blocks
     ds.remove_key()
     assert not ds.active() and ds.kv.get("solver_provider") is None  # back to Claude
 
