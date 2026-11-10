@@ -114,6 +114,10 @@ Add the bot's number to a WhatsApp group, then on the setup page under **WhatsAp
 Groups get only these notices; your alerts, solved reports and the menu stay in your own chat.
 **Send a test message** and **Send the summary now** check it straight away.
 
+You can also do this from the chat where the bot messages you: **Settings → Group notices** lists the groups
+the bot is in; reply with a number to turn a group on or off (it takes effect at once), or send the summary to
+the groups now. It is the same choice as on the setup page.
+
 ### The public menu for classmates
 
 In a ticked group, anyone who tags the bot (or replies to one of its messages) gets a menu:

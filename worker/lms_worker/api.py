@@ -111,8 +111,21 @@ def create_app(
     deepseek = DeepSeek(kv if box else None, box, settings.deepseek_key)
     if discord_bot is None and settings.app_secret_key:
         discord_bot = DiscordBotSetting(kv, SecretBox(settings.app_secret_key))
+    from .db.models import utcnow
+    from .groups import GroupNotifier, WhatsAppGroups, open_assignments, summary_text
+
+    group_setting = WhatsAppGroups(kv)
+    group_sender = GroupNotifier(settings.evolution, group_setting) if settings.evolution else None
+
+    def group_summary() -> str:
+        with sessions() as s:
+            return summary_text(open_assignments(s, utcnow()), utcnow())
+
     bot = Bot(sessions, kv, login=login, setup_url=f"{settings.public_url}/setup" if settings.public_url else None,
-              data_dir=settings.data_dir, materials=materials)
+              data_dir=settings.data_dir, materials=materials,
+              # Settings → Group notices: choose from the chat which of the bot's groups get the notices
+              groups=group_setting if group_sender and admin else None, group_choices=(lambda: admin.groups()) if admin else None,
+              group_summary=(lambda: group_sender.text(group_summary())) if group_sender else None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -127,16 +140,6 @@ def create_app(
             threading.Thread(target=DiscordChat(discord_bot, bot.handle).run_forever, args=(stop,), daemon=True).start()
         yield
         stop.set()
-
-    from .db.models import utcnow
-    from .groups import GroupNotifier, WhatsAppGroups, open_assignments, summary_text
-
-    group_setting = WhatsAppGroups(kv)
-    group_sender = GroupNotifier(settings.evolution, group_setting) if settings.evolution else None
-
-    def group_summary() -> str:
-        with sessions() as s:
-            return summary_text(open_assignments(s, utcnow()), utcnow())
 
     public = PublicBot(sessions, settings.data_dir, materials=materials)
     directory = Directory(admin, group_setting) if admin is not None else None

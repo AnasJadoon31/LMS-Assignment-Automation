@@ -158,3 +158,26 @@ def test_a_document_you_send_reaches_the_menu(sessions, phone, tmp_path):
         assert admin.asked == ["doc1"]  # fetched from Evolution, then handed to the menu
         assert phone.sent[-1][0].startswith("I did not know what that file is for.")
         assert post(client, picture).json()["handled"] and admin.asked == ["doc1"]  # sent along: no second fetch
+
+
+def test_settings_in_the_chat_offers_the_groups_the_bot_is_in(sessions, phone):
+    """Your message, from the number you manage the bot with, opens Settings → Group notices and ticks a group."""
+    groups = [{"id": "120363000000000001@g.us", "subject": "BSCS 5-A", "size": 40}]
+
+    def evolution(req):
+        if req.url.path == "/group/fetchAllGroups/lms":
+            return httpx.Response(200, json=groups)
+        return httpx.Response(404)
+
+    admin = EvolutionAdmin(SETTINGS.evolution, transport=httpx.MockTransport(evolution), sleep=lambda s: None)
+    kv = DbKV(sessions)
+    app = create_app(SETTINGS, sessions, kv, sender=phone, admin=admin, register_webhook=False)
+    with TestClient(app) as c:
+        for i, step in enumerate(["menu", "6", "5"]):
+            post(c, upsert(step, msg_id=f"g{i}"))
+        assert "1. BSCS 5-A: off (turn on)" in phone.sent[-1][0]
+        post(c, upsert("1", msg_id="g3"))
+    from lms_worker.groups import WhatsAppGroups
+
+    assert [g.name for g in WhatsAppGroups(kv).get()] == ["BSCS 5-A"]
+    assert "1. BSCS 5-A: on (turn off)" in phone.sent[-1][0]

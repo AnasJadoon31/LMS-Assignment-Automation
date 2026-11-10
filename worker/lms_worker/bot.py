@@ -7,7 +7,8 @@ again at the main menu. Approve and Reject ask 1. Yes / 2. No first.
 
 The main menu is short: your work (assignments, lab papers, what needs you, what is due),
 the courses (lecture notes, course plan, course outline and each course's settings) and the
-service's own settings. The same menu answers on WhatsApp and on Discord.
+service's own settings. The same menu answers on WhatsApp and on Discord. Under Settings, Group notices picks which of
+the groups the bot is in get the assignment notices (the same choice as on the setup page).
 
 Files: a lecture, an outline or a question file is sent as a document, the course plan as a
 picture of its table. A file you send is used for what the open screen says: your own
@@ -34,6 +35,9 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from . import actions, files
 from .solver.prompt import THEME_ARTIFACT, system_prompt
+from .groups import Group
+from .notify import NotifyError
+from .whatsapp import WhatsAppError
 from .db.models import (TERMINAL_STATES, Artifact, Assignment, ChatSession, Course, CourseMode, Event, Job, JobState,
                         Summary, SummaryState, utcnow)
 from .kv import KeyValue
@@ -116,6 +120,9 @@ class Bot:
         setup_url: str | None = None,
         data_dir: Path | None = None,  # where files you send are kept; without it they are refused
         materials=None,  # materials.Materials: lecture notes, course plan and outline from the LMS
+        groups=None,  # groups.WhatsAppGroups: the groups that get assignment notices; Settings offers them when set
+        group_choices: Callable[[], list[dict]] | None = None,  # the groups the bot is in: [{id, name, size}]
+        group_summary: Callable[[], None] | None = None,  # sends the summary to the ticked groups now
     ) -> None:
         self.sessions = sessions
         self.kv = kv
@@ -124,6 +131,7 @@ class Bot:
         self.setup_url = setup_url
         self.data_dir = data_dir
         self.materials = materials
+        self.groups, self.group_choices, self.group_summary = groups, group_choices, group_summary
 
     # --- entry point ---
 
@@ -392,6 +400,15 @@ class Bot:
                 self.kv.delete(actions.CAP_LIFTED_KEY)
                 said = "The limits are back on."
             return [Reply(said), self._render(s, stack)]
+        if kind == "group_toggle":
+            return self._toggle_group(s, stack, option)
+        if kind == "group_summary":
+            names = ", ".join(g.name for g in self.groups.get())
+            try:
+                self.group_summary()
+            except NotifyError as e:
+                return [Reply(f"Could not send the summary: {e}"), self._render(s, stack)]
+            return [Reply(f"The summary was sent to {names}."), self._render(s, stack)]
         if kind == "prompt_builtin":
             return [Reply(system_prompt())]
         if kind == "theme_text":
@@ -554,9 +571,53 @@ class Bot:
             (f"Solver effort: {self.kv.get(actions.EFFORT_KEY) or 'default'} (change)", _open({"name": "effort"})),
             (f"Daily solve limit: {'lifted for today' if self._cap_lifted() else 'on'} (change)", _open({"name": "cap"})),
             ("Course settings: solving, uploading, safe mode, prompt, theme", _open({"name": "modes"})),
+            *([(f"Group notices: {_count(len(self.groups.get()), 'group')} (change)", _open({"name": "groups"}))]
+              if self.groups is not None else []),
             ("Reset the web page password", {"do": "confirm", "action": "password"}),
         ]
         return "Settings", [], options
+
+    def _screen_groups(self, s: Session, screen: dict):
+        if "items" not in screen:  # read from WhatsApp once, then keep the numbering
+            screen["items"], screen["problem"] = self._bot_groups()
+        ticked = self.groups.get()
+        on = {g.id for g in ticked}
+        lines = [f"Now: {', '.join(g.name for g in ticked) or 'none'}.",
+                 "A group that is on gets every new or changed assignment with its question file, a reminder 24 h and "
+                 "2 h before each deadline, and a summary at 8:00 AM and 9:00 PM. Only the groups the bot is in are listed."]
+        if screen["problem"]:
+            lines.append(screen["problem"])
+        elif not screen["items"]:
+            lines.append("The bot is not in any group yet. Add its number to a group, then open this again.")
+        options = [(f"{name}: {'on (turn off)' if gid in on else 'off (turn on)'}", {"do": "group_toggle", "id": gid, "name": name})
+                   for gid, name in screen["items"]]
+        if ticked and self.group_summary is not None:
+            options.append(("Send the summary to the groups now", {"do": "group_summary"}))
+        return "Group notices", lines, options
+
+    def _bot_groups(self) -> tuple[list[list[str]], str | None]:
+        """The groups the bot is in, then any ticked one it has left, so it can still be turned off."""
+        problem = None
+        try:
+            found = self.group_choices() if self.group_choices else []
+        except (WhatsAppError, OSError) as e:
+            found, problem = [], f"Could not read the bot's groups right now: {e}"
+        items = [[g["id"], g["name"]] for g in found]
+        listed = {gid for gid, _ in items}
+        return items + [[g.id, g.name] for g in self.groups.get() if g.id not in listed], problem
+
+    def _toggle_group(self, s: Session, stack: list[dict], option: dict) -> list[Reply]:
+        current = self.groups.get()
+        try:
+            if any(g.id == option["id"] for g in current):
+                self.groups.save([g for g in current if g.id != option["id"]])
+                said = f"{option['name']} will no longer get the assignment notices."
+            else:
+                self.groups.save([*current, Group(option["id"], option["name"])])
+                said = f"{option['name']} will get the assignment notices from now on."
+        except ValueError as e:
+            said = str(e)
+        return [Reply(said), self._render(s, stack)]
 
     def _cap_lifted(self) -> bool:
         return self.kv.get(actions.CAP_LIFTED_KEY) == self.now().astimezone(LMS_TZ).date().isoformat()
@@ -1154,7 +1215,7 @@ def _status(a: Assignment, now: datetime) -> str:
 # Icons for menu options, by how the label starts. Labels not listed (list items) carry their own.
 ICONS = (
     ("Assignments", "📝"), ("Lab papers", "🧪"), ("Needs your action", "⚡"), ("Due or starting", "⏰"),
-    ("Courses:", "📘"), ("Check the LMS now", "🔄"), ("System status", "🩺"),
+    ("Courses:", "📘"), ("Group notices", "👥"), ("Send the summary", "📰"), ("Check the LMS now", "🔄"), ("System status", "🩺"),
     ("Remaining", "📌"), ("Due in the next 48", "⏰"), ("Waiting for your approval", "✅"), ("Waiting for your go-ahead", "▶️"),
     ("Claude is waiting", "💬"), ("Queued or being solved", "⚙️"), ("Stopped, needs you", "🛑"), ("Submitted", "📤"),
     ("Missed", "❌"), ("Marked", "🏅"), ("All", "🗂️"), ("Upcoming", "🗓️"), ("Open now", "🟢"),
@@ -1176,7 +1237,11 @@ ICONS = (
 )
 TITLE_ICONS = {"main": "📚", "action": "⚡", "settings": "⚙️", "model": "🤖", "effort": "🧠", "cap": "📊", "courses": "📘",
                "course": "📘", "course_settings": "🛠️", "solve_pick": "🤖", "lectures_pick": "📖", "safe": "🛡️",
-               "lectures": "📖", "theme": "🎨", "prompt": "💬", "modes": "🛠️", "mode_pick": "📤", "file_what": "📎"}
+               "lectures": "📖", "theme": "🎨", "prompt": "💬", "modes": "🛠️", "mode_pick": "📤", "file_what": "📎", "groups": "👥"}
+
+
+def _count(n: int, noun: str) -> str:
+    return "none" if n == 0 else f"{n} {noun}" + ("s" if n != 1 else "")
 
 
 def _icon(label: str) -> str:

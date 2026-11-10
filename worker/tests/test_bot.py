@@ -696,3 +696,102 @@ def test_redo_with_opus_is_an_option_on_a_finished_report(bot, semester, session
         assert (job.state, job.note) == ("DOWNLOADED", "Q2 is wrong")
         assert json.loads(job.triage)["redo"] == {"note": "Q2 is wrong", "model": "opus", "effort": "high",
                                                   "reason": "you asked for Opus", "forced": True}
+
+
+# --- group notices, chosen from the chat ---
+
+BOT_GROUPS = [{"id": "120363000000000001@g.us", "name": "BSCS 5-A", "size": 40},
+              {"id": "120363000000000002@g.us", "name": "Lab group", "size": 12}]
+
+
+@pytest.fixture
+def grouped(sessions):
+    from lms_worker.groups import WhatsAppGroups
+
+    class Wired:
+        sent = []
+        found = list(BOT_GROUPS)
+        error = None
+
+        def choices(self):
+            if self.error:
+                raise self.error
+            return self.found
+
+        def summary(self):
+            self.sent.append("summary")
+
+    wired = Wired()
+    wired.sent = []
+    wired.groups = WhatsAppGroups(DbKV(sessions))
+    wired.bot = Bot(sessions, DbKV(sessions), now=Clock(NOW), groups=wired.groups, group_choices=wired.choices,
+                    group_summary=wired.summary)
+    return wired
+
+
+def test_settings_offers_group_notices_only_when_groups_are_set_up(bot, grouped):
+    assert "Group notices" not in text(say(bot, "menu", "6"))
+    assert "5. Group notices: none (change)" in text(say(grouped.bot, "menu", "6"))
+
+
+def test_the_chat_lists_the_groups_the_bot_is_in_and_turns_them_on_and_off(grouped):
+    shown = text(say(grouped.bot, "menu", "6", "5"))
+    assert "*Group notices*" in shown and "Now: none" in shown
+    assert "1. BSCS 5-A: off (turn on)" in shown and "2. Lab group: off (turn on)" in shown
+    assert "Send the summary" not in shown  # nothing ticked yet
+
+    on = text(say(grouped.bot, "1"))
+    assert "BSCS 5-A will get the assignment notices" in on and "1. BSCS 5-A: on (turn off)" in on
+    assert [g.name for g in grouped.groups.get()] == ["BSCS 5-A"] and "Now: BSCS 5-A" in on
+    assert "3. Send the summary to the groups now" in on
+
+    both = text(say(grouped.bot, "2"))
+    assert [g.name for g in grouped.groups.get()] == ["BSCS 5-A", "Lab group"]
+    assert "1. BSCS 5-A: on (turn off)" in both and "2. Lab group: on (turn off)" in both  # numbers do not shift
+
+    off = text(say(grouped.bot, "1"))
+    assert "BSCS 5-A will no longer get" in off and [g.name for g in grouped.groups.get()] == ["Lab group"]
+    assert "5. Group notices: 1 group (change)" in text(say(grouped.bot, "menu", "6"))
+
+
+def test_settings_line_counts_the_ticked_groups(grouped):
+    say(grouped.bot, "menu", "6", "5", "1", "2")
+    assert "5. Group notices: 2 groups (change)" in text(say(grouped.bot, "menu", "6"))
+
+
+def test_a_group_ticked_before_but_no_longer_listed_can_still_be_turned_off(grouped):
+    from lms_worker.groups import Group
+
+    grouped.groups.save([Group("120363000000000009@g.us", "Old class")])
+    shown = text(say(grouped.bot, "menu", "6", "5"))
+    assert "Old class: on (turn off)" in shown
+    say(grouped.bot, "3")
+    assert grouped.groups.get() == []
+
+
+def test_the_summary_can_be_sent_to_the_groups_from_the_chat(grouped):
+    say(grouped.bot, "menu", "6", "5", "1")
+    said = text(say(grouped.bot, "3"))
+    assert grouped.sent == ["summary"] and "summary" in said.lower() and "BSCS 5-A" in said
+
+
+def test_a_failing_summary_is_reported_not_raised(grouped):
+    from lms_worker.notify import NotifyError
+
+    say(grouped.bot, "menu", "6", "5", "1")
+
+    def down():
+        raise NotifyError("Evolution API unreachable")
+
+    grouped.bot.group_summary = down
+    assert "Evolution API unreachable" in text(say(grouped.bot, "3"))
+
+
+def test_the_chat_says_so_when_the_groups_cannot_be_read_or_there_are_none(grouped):
+    from lms_worker.whatsapp import WhatsAppError
+
+    grouped.error = WhatsAppError("Cannot reach Evolution API")
+    assert "Could not read the bot's groups right now: Cannot reach Evolution API" in text(say(grouped.bot, "menu", "6", "5"))
+    grouped.error = None
+    grouped.found = []
+    assert "The bot is not in any group yet" in text(say(grouped.bot, "menu", "6", "5"))
