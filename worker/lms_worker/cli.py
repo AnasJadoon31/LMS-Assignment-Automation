@@ -274,6 +274,7 @@ def cmd_poll(rt: Runtime, args) -> int:
 
 
 def cmd_run(rt: Runtime, args) -> int:
+    db.upgrade(rt.engine)  # the api migrates too, but may not have finished when polling starts
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
