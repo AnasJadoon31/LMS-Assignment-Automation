@@ -117,6 +117,7 @@ class AssignmentRow:
     term: str | None = None  # papers: "Mid Term", "Final Term"
     starts_at: datetime | None = None  # papers: when the exam window opens (deadline is when it closes)
     submission_hidden: bool = False  # papers: a submission link with no file (k=NA)
+    submission_href: str | None = None
     paper_status: str | None = None  # papers: from the row colour, None if it is not one of the three
     submit_form: SubmitForm | None = None  # open rows with nothing submitted
     delete_href: str | None = None  # open rows with a submission: the Delete link
@@ -154,6 +155,12 @@ def b64_id(value: str) -> str:
         return base64.b64decode(unquote(value)).decode()
     except (binascii.Error, UnicodeDecodeError):
         return value
+
+
+def plain_id(value: str) -> str | None:
+    """'MTUxNjk0' -> '151694'; None for the encrypted ids the LMS has sent since Nov 2026."""
+    decoded = b64_id(value)
+    return decoded if decoded != value and decoded.isdigit() else None
 
 
 def decode_download_key(href: str) -> DownloadKey | None:
@@ -234,12 +241,12 @@ def _assignment_id(soup: BeautifulSoup, action_cell: Tag) -> str | None:
         return None
     hidden = modal.find("input", attrs={"name": re.compile(r"^(assignment|paper)ID$", re.I)})
     if hidden and hidden.get("value"):
-        return b64_id(hidden["value"])
+        return plain_id(hidden["value"])
     delete = modal.find("a", href=re.compile(r"(assignment|paper)SubmissionDelete", re.I))
     if delete:
         query = parse_qs(urlsplit(delete["href"]).query)
         value = (query.get("a") or query.get("p") or [None])[0]
-        return b64_id(value) if value else None
+        return plain_id(value) if value else None
     return None
 
 
@@ -374,6 +381,7 @@ def _parse_row(soup: BeautifulSoup, cells: list[Tag], layout: Layout, tr: Tag | 
         term=term or None,
         starts_at=starts_at,
         submission_hidden=hidden,
+        submission_href=s_link["href"] if s_link and not hidden else None,
         paper_status=_paper_status(tr) if tr is not None and layout.term is not None else None,
         submit_form=_submit_form(soup, status) if _action(status) == "submit" else None,
         delete_href=_delete_href(soup, status) if _action(status) == "delete" else None,

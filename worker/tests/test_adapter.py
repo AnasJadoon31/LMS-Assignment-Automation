@@ -191,14 +191,14 @@ def test_delete_follows_the_rows_own_link_and_reads_the_row_back(portal, urls, t
     assert portal.deletes[0] == {"s": "assignmentSubmissionDelete", "aSubId": "NTAwMDAwMg==", "a": "MjMwMzY4", "oc": "MTAwMDAy"}
 
 
-def test_a_delete_link_for_another_course_is_not_followed(portal, urls, tmp_path, monkeypatch):
+def test_a_delete_link_without_its_course_is_not_followed(portal, urls, tmp_path, monkeypatch):
     import lms_worker.lms.bahria as bahria
 
     with logged_in(urls, tmp_path) as adapter:
         lab = adapter.list_courses()[0]
         yours = adapter.list_assignments(lab)[1]
         row = adapter._row(yours)
-        moved = dataclasses.replace(row, delete_href=row.delete_href.replace("oc=MTAwMDAy", "oc=MTAwMDAz"))
+        moved = dataclasses.replace(row, delete_href=row.delete_href.replace("&oc=MTAwMDAy", ""))
         monkeypatch.setattr(bahria.BahriaAdapter, "_row", lambda self, a: moved)
         with pytest.raises(LMSError, match="not the one expected"):
             adapter.delete_submission(yours)
@@ -221,3 +221,43 @@ def test_list_papers(portal, urls, tmp_path):
         assert papers[2].starts_at.isoformat() == "2026-10-20T14:00:00+05:00"
         assert adapter.list_papers(daa) == []
         assert adapter.submission_status(papers[0]).submitted_file is None  # a paper's file is never shown
+
+
+def test_encrypted_ids_that_change_on_every_page(urls, tmp_path, monkeypatch):
+    """Since Nov 2026 the LMS encrypts s, oc, hidden ids and download keys: a new value on every page."""
+    import itertools
+    import re
+
+    import httpx
+
+    from lms_worker.lms.models import HIDDEN
+
+    from .conftest import assignments_page
+
+    adapter, issued, n = adapter_for(urls, tmp_path), {}, itertools.count()
+
+    def encrypt(html: str) -> str:
+        def token(m):
+            issued[t := f"enc{next(n)}"] = m[1]
+            return f'value="{t}"'
+        html = re.sub(r'value="(M[A-Za-z0-9=%]+)"', token, html)
+        html = re.sub(r"([?&](?:a|aSubId|oc)=)[A-Za-z0-9%]+", r"\1encrypted", html)
+        return re.sub(r'Download\.php\?k=[^"]+', "Download.php?k=encrypted", html)
+
+    def get(path, params=None, method="GET"):
+        if method == "HEAD":
+            return httpx.Response(200, headers={"content-disposition": 'attachment; filename="open.pdf"'})
+        return httpx.Response(200, text=encrypt(assignments_page(issued.get((params or {}).get("oc")))))
+
+    monkeypatch.setattr(adapter, "_get", get)
+    lab, daa = adapter.list_courses()
+    assert (lab.code, lab.lms_ref, lab.semester) == ("Computer Architecture Lab", "Computer Architecture Lab", "Fall-2026")
+    adapter._refs = {}  # a course read back from the database, before this adapter listed any
+    rows = adapter.list_assignments(dataclasses.replace(lab, code="100002"))
+    assert [(a.lms_ref, a.assignment_id, a.attachment_name, a.deadline_passed) for a in rows] == [
+        ("100002:1", None, HIDDEN, True),
+        ("100002:2", None, "open.pdf", False),
+        ("100002:3", None, "open.pdf", False),
+    ]
+    assert rows[0].with_names("lab1.pdf", None).attachment_name == "lab1.pdf"  # the stored name, so no false change
+    assert adapter.list_assignments(daa) == []

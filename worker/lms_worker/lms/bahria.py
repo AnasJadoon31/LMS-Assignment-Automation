@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +14,7 @@ from playwright.sync_api import sync_playwright
 
 from ..config import Settings
 from ..kv import FileKV
-from .bahria_pages import AssignmentRow, b64_id, parse_assignments_page, parse_papers_page
+from .bahria_pages import AssignmentRow, parse_assignments_page, parse_papers_page, plain_id
 from .materials import Lecture, LectureFile, PlanWeek, parse_lectures, parse_outlines, parse_plan, plan_html
 from .cms_login import login
 from .errors import (
@@ -28,7 +29,7 @@ from .errors import (
     SessionExpired,
 )
 from .login_guard import LoginGuard
-from .models import ASSIGNMENT, PAPER, AssignmentMeta, Course, Receipt, SubmissionStatus
+from .models import ASSIGNMENT, HIDDEN, PAPER, AssignmentMeta, Course, Receipt, SubmissionStatus
 from .session import USER_AGENT, SessionStore, Throttle, lms_cookies, session_is_valid
 
 ASSIGNMENTS = "Assignments.php"
@@ -55,6 +56,8 @@ class BahriaAdapter:
         self.throttle = throttle or Throttle()
         self.headless = headless
         self._http: httpx.Client | None = None
+        # (semester, course name) -> (s, oc): the LMS encrypts both, a new value on every page
+        self._refs: dict[tuple[str, str], tuple[str, str]] = {}
 
     def close(self) -> None:
         if self._http is not None:
@@ -107,16 +110,31 @@ class BahriaAdapter:
 
         self.store.save(state)
         self.guard.record_success()
+        self._refs = {}  # a new session may not take the old session's ids
         self.close()  # the next request picks up the new cookie
 
     def list_courses(self) -> list[Course]:
-        """Courses of the current semester, as the LMS lists them."""
+        """Courses of the current semester, as the LMS lists them. Known by name: the ids change on every page."""
         page = parse_assignments_page(self._get(ASSIGNMENTS).text)
         sem = page.current_semester
+        refs = {(sem.label, o.label): (sem.value, o.value) for o in page.courses}
+        if len(refs) != len(page.courses):
+            raise ContractBroken(f"Two courses share a name on the LMS: {[o.label for o in page.courses]}")
+        self._refs = refs
         return [
-            Course(code=b64_id(o.value), name=o.label, lms_ref=o.value, semester=sem.value, semester_name=sem.label)
+            Course(code=plain_id(o.value) or o.label, name=o.label, lms_ref=o.label, semester=sem.label,
+                   semester_name=sem.label)
             for o in page.courses
         ]
+
+    def _params(self, course: Course, *, fresh: bool = False) -> dict:
+        """The `s` and `oc` the LMS wants for this course now."""
+        if fresh or (course.semester, course.lms_ref) not in self._refs:
+            self.list_courses()
+        found = self._refs.get((course.semester, course.lms_ref))
+        if found is None:
+            raise LMSError(f"{course.name} ({course.semester}) is no longer on the LMS course list")
+        return {"s": found[0], "oc": found[1]}
 
     def list_assignments(self, course: Course) -> list[AssignmentMeta]:
         return [self._meta(course, row, ASSIGNMENT) for row in self._rows(course, ASSIGNMENT)]
@@ -131,7 +149,7 @@ class BahriaAdapter:
         if not row.question_href:
             return []
         r = self._get(row.question_href)
-        name = _attachment_name(r) or row.question_file or f"{a.lms_ref}.bin"
+        name = _attachment_name(r) or (row.question_file if row.question_file != HIDDEN else None) or f"{a.lms_ref}.bin"
         dest.mkdir(parents=True, exist_ok=True)
         path = dest / Path(name).name
         path.write_bytes(r.content)
@@ -182,7 +200,7 @@ class BahriaAdapter:
             raise LMSError(f"{a.title} is not open, so its submission cannot be deleted ({row.action})")
         href = row.delete_href
         query = parse_qs(urlsplit(href).query) if href else {}
-        if not href or not DELETE_ACTION.fullmatch(href) or not query.get("aSubId") or query.get("oc") != [a.course.lms_ref]:
+        if not href or not DELETE_ACTION.fullmatch(href) or not query.get("aSubId") or not query.get("oc"):
             raise LMSError(f"The Delete link for {a.title} is not the one expected ({href or 'missing'}); delete it on the LMS")
         self.throttle.wait()
         r = self._client().get(href)
@@ -200,10 +218,16 @@ class BahriaAdapter:
     # --- course material, read on request; nothing here uses Claude ---
 
     def course_plan(self, course: Course) -> list[PlanWeek]:
-        return parse_plan(self._get("CoursePlan.php", {"s": course.semester, "oc": course.lms_ref}).text)
+        return parse_plan(self._get("CoursePlan.php", self._params(course)).text)
 
     def lectures(self, course: Course) -> list[Lecture]:
-        return parse_lectures(self._get("LectureNotes.php", {"s": course.semester, "oc": course.lms_ref}).text)
+        # ponytail: one HEAD per file whose key is encrypted, on every read; cache by href if it gets slow
+        return [
+            dataclasses.replace(lec, files=tuple(
+                f if f.filename else dataclasses.replace(f, filename=self._filename(f.href) or f"week-{f.week}-{i}")
+                for i, f in enumerate(lec.files, 1)))
+            for lec in parse_lectures(self._get("LectureNotes.php", self._params(course)).text)
+        ]
 
     def download_lecture(self, course: Course, week: str, filename: str, dest: Path) -> Path:
         """Reads the list again for today's link. A file already saved is not fetched twice."""
@@ -218,12 +242,12 @@ class BahriaAdapter:
 
     def download_outline(self, course: Course, dest: Path) -> Path | None:
         """The course outline file, or None when the teacher posted none."""
-        page = self._get("CourseOutline.php", {"s": course.semester, "oc": course.lms_ref}).text
+        page = self._get("CourseOutline.php", self._params(course)).text
         found = parse_outlines(page).get(course.name.lower())
         if found is None:
             return None
         filename, href = found
-        path = dest / Path(filename).name
+        path = dest / Path(filename or self._filename(href) or "outline.pdf").name
         return path if path.is_file() and path.stat().st_size else self._save(href, path)
 
     def _save(self, href: str, path: Path) -> Path:
@@ -251,9 +275,9 @@ class BahriaAdapter:
             )
         return self._http
 
-    def _get(self, path: str, params: dict | None = None) -> httpx.Response:
+    def _get(self, path: str, params: dict | None = None, method: str = "GET") -> httpx.Response:
         self.throttle.wait()
-        r = self._client().get(path, params=params)
+        r = self._client().request(method, path, params=params)
         if r.is_redirect:
             target = urljoin(str(r.url), r.headers.get("location", ""))
             if urlsplit(target).hostname != self.settings.urls.lms_host:
@@ -264,11 +288,28 @@ class BahriaAdapter:
 
     def _rows(self, course: Course, kind: str = ASSIGNMENT) -> list[AssignmentRow]:
         path, parse = PAGES[kind]
-        page = parse(self._get(path, {"s": course.semester, "oc": course.lms_ref}).text)
+        page = parse(self._get(path, self._params(course)).text)
+        if not any(o.selected for o in page.courses):  # ids from an older session: read them again
+            page = parse(self._get(path, self._params(course, fresh=True)).text)
         selected = next((o for o in page.courses if o.selected), None)
-        if selected is None or selected.value != course.lms_ref:
+        if selected is None or selected.label != course.lms_ref:
             raise ContractBroken(f"Asked for {course.name} but the LMS showed {selected.label if selected else 'no course'}")
-        return page.rows
+        return [self._named(row) for row in page.rows]
+
+    def _named(self, row: AssignmentRow) -> AssignmentRow:
+        """File names behind encrypted download keys: read from the file's headers on open rows,
+        where a new file or a fresh upload matters; HIDDEN on closed ones, which the watcher fills in."""
+        # ponytail: one HEAD per file on open rows each poll; cache by row if the LMS minds the extra requests
+        is_open = row.action in ("submit", "delete")
+        q, s = row.question_file, row.submission_file
+        if q is None and row.question_href:
+            q = (self._filename(row.question_href) if is_open else None) or HIDDEN
+        if s is None and row.submission_href:
+            s = (self._filename(row.submission_href) if is_open else None) or HIDDEN
+        return dataclasses.replace(row, question_file=q, submission_file=s)
+
+    def _filename(self, href: str) -> str | None:
+        return _attachment_name(self._get(href, method="HEAD"))
 
     def _row(self, a: AssignmentMeta) -> AssignmentRow:
         for row in self._rows(a.course, a.kind):

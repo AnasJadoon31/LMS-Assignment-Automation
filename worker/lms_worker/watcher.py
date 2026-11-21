@@ -34,7 +34,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
@@ -181,14 +181,18 @@ class Watcher:
         result.courses = len(courses)
         new_courses: list[str] = []
         for c in courses:
+            with self.sessions.begin() as s:
+                row, created = self._sync_course(s, c)
+                if created:
+                    new_courses.append(row.name)
+                course_id = row.id
+                c = replace(c, code=row.code)  # assignment refs and fingerprints use the stored code
             listed = self._list(c, self.adapter.list_assignments, "assignments", result)
             papers = self._list(c, self.adapter.list_papers, "papers", result) if is_lab(c.name) else []
             if listed is None and papers is None:
                 continue
             with self.sessions.begin() as s:
-                row, created = self._sync_course(s, c)
-                if created:
-                    new_courses.append(row.name)
+                row = s.get(Course, course_id)
                 for meta in (listed or []) + (papers or []):
                     if meta.kind == PAPER:
                         result.papers += 1
@@ -255,8 +259,9 @@ class Watcher:
         self, s: Session, course: Course, meta: lms.AssignmentMeta, result: PollResult
     ) -> str | None:
         """Returns the PollResult counter to bump: new_jobs, revisions, skipped, stopped, new_papers, or None."""
-        fp = meta.fingerprint()
         row = s.scalar(select(Assignment).where(Assignment.course_id == course.id, Assignment.lms_ref == meta.lms_ref))
+        meta = meta.with_names(row.attachment_name, row.submitted_file) if row else meta.with_names(None, None)
+        fp = meta.fingerprint()
 
         if row is None:
             row = Assignment(

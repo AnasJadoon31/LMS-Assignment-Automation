@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import random
 import threading
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
@@ -105,10 +106,12 @@ class ClassPoller:
             if klass is None or klass.status != ClassStatus.ACTIVE:
                 return "skipped"
             adapter = self.adapter_for(klass)
+            codes = {(c.semester, c.lms_ref): c.code for c in klass.courses}
         outcome, error = "ok", None
         try:
             adapter.ensure_session()
-            courses = adapter.list_courses()
+            # assignment refs and fingerprints use the stored code
+            courses = [replace(c, code=codes.get((c.semester, c.lms_ref), c.code)) for c in adapter.list_courses()]
             listed = []
             for c in courses:
                 try:
@@ -196,6 +199,7 @@ class ClassPoller:
 
     def _sync_one(self, s: Session, klass: SchoolClass, p, course: ClassCourse, row: ClassAssignment | None,
                   meta: lms.AssignmentMeta, adapter, *, quiet: bool) -> None:
+        meta = meta.with_names(row.attachment_name, None) if row else meta.with_names(None, None)
         now, fp = self.now(), meta.fingerprint()
         if row is None:
             row = ClassAssignment(course=course, lms_ref=meta.lms_ref, number=meta.number, title=meta.title,

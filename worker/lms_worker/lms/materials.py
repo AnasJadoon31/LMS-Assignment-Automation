@@ -81,8 +81,8 @@ def parse_outlines(page: str) -> dict[str, tuple[str, str]]:
     for c in _rows(page, "course outline", "sr", 3):
         link = c[2].find("a", href=re.compile(r"Download\.php"))
         key = decode_download_key(link["href"]) if link else None
-        if key:
-            out[_text(c[1]).lower()] = (key.filename, link["href"])
+        if key or (link and "k=NA" not in link["href"]):  # "" when the key is encrypted: the adapter reads the name
+            out[_text(c[1]).lower()] = (key.filename if key else "", link["href"])
     return out
 
 
@@ -93,8 +93,8 @@ def parse_lectures(page: str) -> list[Lecture]:
         files = []
         for link in c[2].find_all("a", href=re.compile(r"Download\.php")):
             key = decode_download_key(link["href"])
-            if key:
-                files.append(LectureFile(week, title, key.filename, link["href"]))
+            if key or "k=NA" not in link["href"]:  # "" when the key is encrypted: the adapter reads the name
+                files.append(LectureFile(week, title, key.filename if key else "", link["href"]))
         videos = []
         for cell in c[3:5]:
             for link in cell.find_all("a"):

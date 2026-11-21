@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,12 +11,14 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Course:
-    code: str  # LMS offered-course id until a real code is set in the web UI
+    code: str  # LMS offered-course id (the course name since the LMS encrypts ids); a stored course keeps its own
     name: str
-    lms_ref: str  # base64 offered-course id, the `oc` query parameter
-    semester: str  # base64 semester id, the `s` query parameter
+    lms_ref: str  # the course as the LMS names it; its `oc` token changes on every page, so the adapter looks it up
+    semester: str  # the semester's name, for the same reason
     semester_name: str = ""
 
+
+HIDDEN = "a file"  # a closed row's file: the LMS links it under an encrypted key, so its name takes a download to read
 
 ASSIGNMENT = "assignment"
 PAPER = "paper"
@@ -52,6 +55,15 @@ class AssignmentMeta:
     @property
     def submitted(self) -> bool:
         return self.submitted_file is not None or self.paper_status == PAPER_SUBMITTED
+
+    def with_names(self, attachment: str | None, submitted: str | None) -> AssignmentMeta:
+        """Fill names the LMS hid (HIDDEN) from what was stored for this row; a stored None stays None
+        for the question file, and the submission reads HIDDEN so it still counts as submitted."""
+        return dataclasses.replace(
+            self,
+            attachment_name=attachment if self.attachment_name == HIDDEN else self.attachment_name,
+            submitted_file=(submitted or HIDDEN) if self.submitted_file == HIDDEN else self.submitted_file,
+        )
 
     def fingerprint(self) -> str:
         """Hash of course code, title, deadline and attachment name plus size.
